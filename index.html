@@ -225,7 +225,7 @@ button,input,select,textarea{font:inherit;color:inherit}
 var LS_KEY = 'radiotherapy.v1';
 var SNAP_PREFIX = 'radiotherapy.snap.';
 var SNAP_KEEP = 7;
-var APP_VERSION = '0.3.2';
+var APP_VERSION = '0.3.3';
 
 var SEXES = ['男', '女'];
 var PURPOSES = ['根治性', '术后辅助', '术前新辅助', '姑息性'];
@@ -1084,7 +1084,6 @@ function renderSettingsPage() {
   var bytes = 0; try { bytes = (localStorage.getItem(LS_KEY) || '').length; } catch (e) { }
   var evCount = 0, openCount = 0;
   state.patients.forEach(function (p) { evCount += (p.reactions || []).length; openCount += openReactions(p).length; });
-  var snaps = snapKeys();
   var hol = holidays(), mk = makeups();
   var holDates = Object.keys(hol).sort();
   var mkDates = Object.keys(mk).sort();
@@ -1103,35 +1102,17 @@ function renderSettingsPage() {
   var missY = [];
   for (var yy = 2025; yy <= thisY + 1; yy++) if (covYears.indexOf(String(yy)) < 0) missY.push(yy);
 
-  h += '<div class="section-title">法定节假日 · 已录入 ' + (covYears.length ? covYears.join('、') + ' 年' : '0 年') + '</div>';
-  h += '<div class="setgrp">';
-  if (!covYears.length) h += '<div class="holitem"><div class="nm hint">暂无</div></div>';
-  Object.keys(groupByYear(holDates)).forEach(function (y) {
-    var ds = groupByYear(holDates)[y];
-    h += '<div class="holitem" style="background:#f7f9fb"><div class="nm"><b>' + y + ' 年</b> <span class="hint">' + ds.length + ' 天</span></div></div>';
-    ds.forEach(function (d) {
-      h += '<div class="holitem"><div class="dt">' + d.slice(5).replace('-', '/') + '</div>' +
-        '<div class="nm">' + esc(hol[d]) + (isBuiltinHol(d) ? ' <span class="hint">内置</span>' : ' <span class="chip sm">自定义</span>') + '</div>' +
-        '<button class="x" data-act="hol-del" data-date="' + d + '">✕</button></div>';
-    });
-  });
-  h += '<div class="setrow" data-act="hol-add"><div style="font-size:20px">＋</div><div class="n">添加节假日</div><div class="arw">›</div></div>';
-  if (Object.keys(holidayOverride()).length) h += '<div class="setrow" data-act="hol-reset"><div style="font-size:20px">↺</div><div class="n">恢复内置假期数据<div class="sub2">清除全部自定义增删</div></div><div class="arw">›</div></div>';
-  if (missY.length) h += '<div class="holitem" style="display:block;background:#fdf0e0"><div class="hint" style="line-height:1.7">⚠ <b>' + missY.join('、') + ' 年</b>暂无节假日数据<br>这些年份将自动按「周一~周五为工作日 + 周末休息」排程（不跳假期）。国务院通常于前一年 11 月公布次年安排，届时在此补录即可。</div></div>';
-  h += '</div>';
-
-  h += '<div class="section-title">调休上班日 · ' + mkDates.length + ' 天</div><div class="setgrp">';
-  if (!mkDates.length) h += '<div class="holitem"><div class="nm hint">暂无</div></div>';
-  Object.keys(groupByYear(mkDates)).forEach(function (y) {
-    var ds = groupByYear(mkDates)[y];
-    ds.forEach(function (d) {
-      h += '<div class="holitem"><div class="dt">' + y + '/' + d.slice(5).replace('-', '/') + '</div>' +
-        '<div class="nm">' + esc(mk[d]) + (isBuiltinMk(d) ? ' <span class="hint">内置</span>' : ' <span class="chip sm">自定义</span>') + '</div>' +
-        '<button class="x" data-act="mk-del" data-date="' + d + '">✕</button></div>';
-    });
-  });
-  h += '<div class="setrow" data-act="mk-add"><div style="font-size:20px">＋</div><div class="n">添加调休上班日</div><div class="arw">›</div></div>';
-  h += '</div>';
+  /* 节假日明细很长（两年共 60+ 天），设置页只放摘要，点进去管理 */
+  h += '<div class="setgrp">' +
+    setRow('hol-manage', '🎌', '法定节假日',
+      (holDates.length ? '已录入 ' + covYears.join('、') + ' 年 · ' + holDates.length + ' 天' : '暂无数据') + ' · 点击管理') +
+    setRow('mk-manage', '📅', '调休上班日', mkDates.length + ' 天 · 点击管理') +
+    '</div>';
+  if (missY.length) {
+    h += '<div class="hint" style="padding:9px 12px;background:var(--warn-soft);border-radius:10px;margin:-4px 0 12px;line-height:1.7">' +
+      '⚠ ' + missY.join('、') + ' 年暂无节假日数据，将按「周一~周五 + 周末休息」排程（不跳假期）。' +
+      '国务院通常于前一年 11 月公布次年安排，届时可在此补录。</div>';
+  }
   h += '<div class="section-title">数据概况</div><div class="setgrp">' +
     '<div class="setrow" style="cursor:default"><div class="n">在治患者<div class="sub2">归档 ' + completed().length + ' 位</div></div><div>' + inTreat().length + ' 位</div></div>' +
     '<div class="setrow" style="cursor:default"><div class="n">副反应记录<div class="sub2">其中未闭环 ' + openCount + ' 条</div></div><div>' + evCount + ' 条</div></div>' +
@@ -2054,6 +2035,71 @@ function sheetTreatDays() {
   });
   document.querySelectorAll('#sheetBody .segday').forEach(function (b) { b.addEventListener('click', function () { b.classList.toggle('on'); }); });
 }
+/* 节假日管理：设置页只显示摘要，明细在这里 */
+function missingHolidayYearsForUi() {
+  var cov = coveredYears();
+  var thisY = new Date().getFullYear();
+  var missY = [];
+  for (var y = 2025; y <= thisY + 1; y++) if (cov.indexOf(String(y)) < 0) missY.push(y);
+  return missY;
+}
+function sheetHolidayManage() {
+  var hol = holidays();
+  var dates = Object.keys(hol).sort();
+  var hasOverride = Object.keys(holidayOverride()).length > 0;
+  var missY = missingHolidayYearsForUi();
+  var body = '<div class="hint" style="margin-bottom:10px;line-height:1.7">排程时会跳过这些日期。可增删，改动立即生效。</div>';
+  if (!dates.length) body += '<div class="hint">暂无节假日数据</div>';
+  Object.keys(groupByYear(dates)).forEach(function (y) {
+    var ds = groupByYear(dates)[y];
+    body += '<div class="event" style="padding:9px 11px"><div class="head" style="margin-bottom:4px">' +
+      '<span class="chip pri">' + y + ' 年</span><span class="chip sm">' + ds.length + ' 天</span></div>' +
+      ds.map(function (d) {
+        return '<div style="display:flex;align-items:center;gap:10px;padding:5px 0;font-size:14px;border-top:1px dashed var(--line)">' +
+          '<span style="flex:0 0 auto;color:var(--sub);font-size:13px">' + d.slice(5).replace('-', '/') + '</span>' +
+          '<span style="flex:1">' + esc(hol[d]) + (isBuiltinHol(d) ? ' <span class="hint">内置</span>' : ' <span class="chip sm">自定义</span>') + '</span>' +
+          '<button style="flex:0 0 auto;border:0;background:transparent;color:var(--danger);font-size:16px;cursor:pointer;padding:2px 6px" data-act="hol-del" data-date="' + d + '">✕</button>' +
+          '</div>';
+      }).join('') + '</div>';
+  });
+  if (missY.length) body += '<div class="hint" style="padding:9px 11px;background:var(--warn-soft);border-radius:8px;line-height:1.7;margin-top:8px">⚠ ' + missY.join('、') + ' 年暂无数据，将按「周一~周五 + 周末」排程</div>';
+  openSheet({
+    title: '法定节假日',
+    body: body,
+    actions: [
+      { label: '添加节假日', act: 'hol-add', primary: true, full: !hasOverride },
+      hasOverride ? { label: '恢复内置数据', act: 'hol-reset' } : null,
+      hasOverride ? { label: '关闭', act: 'sheet-close' } : null
+    ].filter(Boolean)
+  });
+  reopenSheet = sheetHolidayManage;
+}
+/* 调休上班日管理 */
+function sheetMakeupManage() {
+  var mk = makeups();
+  var dates = Object.keys(mk).sort();
+  var body = '<div class="hint" style="margin-bottom:10px;line-height:1.7">这些周末按工作日安排治疗。是否生效取决于上方「调休上班日安排治疗」开关。</div>';
+  if (!dates.length) body += '<div class="hint">暂无调休上班日</div>';
+  Object.keys(groupByYear(dates)).forEach(function (y) {
+    var ds = groupByYear(dates)[y];
+    body += '<div class="event" style="padding:9px 11px"><div class="head" style="margin-bottom:4px">' +
+      '<span class="chip pri">' + y + ' 年</span><span class="chip sm">' + ds.length + ' 天</span></div>' +
+      ds.map(function (d) {
+        return '<div style="display:flex;align-items:center;gap:10px;padding:5px 0;font-size:14px;border-top:1px dashed var(--line)">' +
+          '<span style="flex:0 0 auto;color:var(--sub);font-size:13px">' + d.slice(5).replace('-', '/') + ' ' + WEEKDAYS[parseD(d).getDay()] + '</span>' +
+          '<span style="flex:1">' + esc(mk[d]) + (isBuiltinMk(d) ? ' <span class="hint">内置</span>' : ' <span class="chip sm">自定义</span>') + '</span>' +
+          '<button style="flex:0 0 auto;border:0;background:transparent;color:var(--danger);font-size:16px;cursor:pointer;padding:2px 6px" data-act="mk-del" data-date="' + d + '">✕</button>' +
+          '</div>';
+      }).join('') + '</div>';
+  });
+  openSheet({
+    title: '调休上班日',
+    body: body,
+    actions: [{ label: '添加调休上班日', act: 'mk-add', primary: true, full: true }]
+  });
+  reopenSheet = sheetMakeupManage;
+}
+
 function sheetAddHoliday() {
   openSheet({
     title: '添加节假日', okText: '添加',
@@ -2069,6 +2115,8 @@ function sheetAddHoliday() {
       if (n > 60) { toast('区间过长（最多 60 天）'); return false; }
       for (var i = 0; i <= n; i++) setHoliday(addDays(v.from, i), v.name || '节假日');
       render(); toast('已添加 ' + (n + 1) + ' 天');
+      sheetHolidayManage();      /* 保存后回到列表 */
+      return false;
     }
   });
 }
@@ -2087,6 +2135,8 @@ function sheetAddMakeup() {
       if (n > 30) { toast('区间过长（最多 30 天）'); return false; }
       for (var i = 0; i <= n; i++) setMakeup(addDays(v.from, i), v.name || '调休上班');
       render(); toast('已添加 ' + (n + 1) + ' 天');
+      sheetMakeupManage();       /* 保存后回到列表 */
+      return false;
     }
   });
 }
@@ -2224,21 +2274,27 @@ function bind() {
     'restore-snap': function (el) { restoreSnap(el.dataset.key); },
     'restore-backup': function (el) { restoreBackup(el.dataset.key); },
     'treat-days': function () { sheetTreatDays(); },
+    'hol-manage': function () { sheetHolidayManage(); },
+    'mk-manage': function () { sheetMakeupManage(); },
     'hol-add': function () { sheetAddHoliday(); },
     'mk-add': function () { sheetAddMakeup(); },
     'hol-del': function (el) {
       var d = el.dataset.date;
       if (isBuiltinHol(d) && !confirm('「' + d + '」是内置假期，删除后将不再作为假期排程。确定继续？')) return;
       delHoliday(d); render(); toast('已删除');
+      if (reopenSheet) reopenSheet();
     },
     'mk-del': function (el) {
       var d = el.dataset.date;
       if (isBuiltinMk(d) && !confirm('「' + d + '」是内置调休上班日，删除后将不再按工作日治疗。确定继续？')) return;
       delMakeup(d); render(); toast('已删除');
+      if (reopenSheet) reopenSheet();
     },
     'hol-reset': function () {
       if (!confirm('恢复内置假期数据？将清除你添加/删除的全部假期设置。')) return;
-      lsSet('radiotherapy.holidays', {}); lsSet('radiotherapy.makeups', {}); render(); toast('已恢复内置数据');
+      lsSet('radiotherapy.holidays', {}); lsSet('radiotherapy.makeups', {});
+      render(); toast('已恢复内置数据');
+      if (reopenSheet) reopenSheet();
     },
     'toggle-makeup': function () { setMakeupAsWorkday(!makeupAsWorkday()); render(); toast(makeupAsWorkday() ? '调休上班日已按工作日治疗' : '调休上班日不再治疗'); },
     'selftest': function () { runSelfTest(); },
