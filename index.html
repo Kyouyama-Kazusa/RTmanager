@@ -225,7 +225,7 @@ button,input,select,textarea{font:inherit;color:inherit}
 var LS_KEY = 'radiotherapy.v1';
 var SNAP_PREFIX = 'radiotherapy.snap.';
 var SNAP_KEEP = 7;
-var APP_VERSION = '0.3.3';
+var APP_VERSION = '0.4.0';
 
 var SEXES = ['男', '女'];
 var PURPOSES = ['根治性', '术后辅助', '术前新辅助', '姑息性'];
@@ -532,6 +532,220 @@ function missingHolidayYears(from, to) {
 function makeupAsWorkday() { var v = lsGet('radiotherapy.makeupWorkday', null); return v === null ? true : !!v; }
 function setMakeupAsWorkday(b) { lsSet('radiotherapy.makeupWorkday', b); }
 
+/* ================= AI 识别引擎 =================
+   纯前端直连（无后端）：API Key 只存本机 localStorage，不上传任何服务器。
+   兼容 OpenAI Chat Completions 协议，可对接任意服务商（含本地 Ollama）。
+   注意：使用 AI 识别意味着材料内容会发送给所选服务商，请在合规前提下使用。 */
+
+/* 预设服务商（均实测支持浏览器直连） */
+var AI_PROVIDERS = [
+  { key: 'zhipu', name: '智谱 GLM', note: '有免费多模态模型', url: 'https://open.bigmodel.cn/api/paas/v4/chat/completions', model: 'glm-4-flash', vision: 'glm-4v-flash' },
+  { key: 'dashscope', name: '通义千问', note: '阿里云百炼', url: 'https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions', model: 'qwen-plus', vision: 'qwen-vl-max' },
+  { key: 'siliconflow', name: '硅基流动', note: '多模型聚合', url: 'https://api.siliconflow.cn/v1/chat/completions', model: 'Qwen/Qwen2.5-7B-Instruct', vision: 'Qwen/Qwen2.5-VL-72B-Instruct' },
+  { key: 'moonshot', name: 'Moonshot Kimi', note: '', url: 'https://api.moonshot.cn/v1/chat/completions', model: 'moonshot-v1-8k', vision: 'moonshot-v1-8k-vision-preview' },
+  { key: 'deepseek', name: 'DeepSeek', note: '不支持图片', url: 'https://api.deepseek.com/chat/completions', model: 'deepseek-chat', vision: '' },
+  { key: 'ollama', name: 'Ollama 本地', note: '数据不出本机', url: 'http://localhost:11434/v1/chat/completions', model: 'qwen2.5:7b', vision: 'qwen2.5vl:7b' },
+  { key: 'custom', name: '自定义', note: '填任意 OpenAI 兼容地址', url: '', model: '', vision: '' }
+];
+
+var AI_FIELDS = ['name', 'mrn', 'sex', 'age', 'diagnosis', 'purpose', 'technique', 'physician', 'planStatus', 'totalDose', 'fractions', 'dosePerFraction', 'simDate', 'startDate', 'position'];
+
+/* 默认提示词：约束枚举值，降低后续人工修改成本 */
+function defaultAiPrompt() {
+  return '你是放疗科病历录入助手。从用户提供的材料（文字或图片）中提取患者信息，只输出 JSON。\n\n' +
+    '严格要求：\n' +
+    '1. 只输出 JSON 本体，不要任何解释文字，不要 markdown 代码块\n' +
+    '2. 输出格式：{"patients":[{...}]}\n' +
+    '3. 字段（无法确定的填空字符串 ""，不要编造）：\n' +
+    '   name 姓名；mrn 住院号/病案号；sex 性别（只能是「男」或「女」）；age 年龄（只要数字）\n' +
+    '   diagnosis 诊断（含部位/病理/分期）；physician 主管医生；position 体位/固定装置\n' +
+    '   purpose 放疗目的（只能从 ' + PURPOSES.join('/') + ' 中选）\n' +
+    '   technique 放疗技术（只能从 ' + TECHNIQUES.join('/') + ' 中选）\n' +
+    '   planStatus 流程状态（只能从 ' + PLAN_STATUSES.join('/') + ' 中选）\n' +
+    '   totalDose 总剂量（只要数字，单位 Gy）；fractions 总次数（只要数字）；dosePerFraction 单次剂量（只要数字）\n' +
+    '   simDate 定位日期（YYYY-MM-DD）；startDate 放疗开始日期（YYYY-MM-DD，若写「X月X日开始」请转成日期）\n' +
+    '4. 材料中若含多个患者，全部提取\n' +
+    '5. 日期只有月日没有年份时，按当前年份 ' + new Date().getFullYear() + ' 推断';
+}
+
+function aiConfig() {
+  var d = lsGet('radiotherapy.ai', null) || {};
+  return {
+    provider: d.provider || 'zhipu',
+    baseUrl: d.baseUrl || '',
+    apiKey: d.apiKey || '',
+    model: d.model || '',
+    visionModel: d.visionModel || '',
+    prompt: d.prompt || ''
+  };
+}
+function setAiConfig(o) { lsSet('radiotherapy.ai', o); }
+function aiReady() { var c = aiConfig(); return !!(c.baseUrl && c.model); }
+function aiProviderPreset(key) {
+  for (var i = 0; i < AI_PROVIDERS.length; i++) if (AI_PROVIDERS[i].key === key) return AI_PROVIDERS[i];
+  return AI_PROVIDERS[AI_PROVIDERS.length - 1];
+}
+
+/* 图片压缩：手机原图动辄数 MB，压到最长边 1600px 再转 base64，避免请求过大 */
+function compressImage(file, cb) {
+  var reader = new FileReader();
+  reader.onload = function () {
+    var img = new Image();
+    img.onload = function () {
+      var maxSide = 1600;
+      var scale = Math.min(1, maxSide / Math.max(img.width, img.height));
+      var w = Math.max(1, Math.round(img.width * scale));
+      var h = Math.max(1, Math.round(img.height * scale));
+      var c = document.createElement('canvas');
+      c.width = w; c.height = h;
+      c.getContext('2d').drawImage(img, 0, 0, w, h);
+      try { cb(c.toDataURL('image/jpeg', 0.82)); }
+      catch (e) { cb(reader.result); }
+    };
+    img.onerror = function () { cb(null); };
+    img.src = reader.result;
+  };
+  reader.onerror = function () { cb(null); };
+  reader.readAsDataURL(file);
+}
+
+/* 从模型输出里稳妥地取出 JSON（可能被 markdown 包裹或带前后话术） */
+function extractJson(s) {
+  if (!s) return null;
+  var t = String(s).trim();
+  t = t.replace(/^```(?:json)?\s*/i, '').replace(/\s*```\s*$/, '');
+  try { return JSON.parse(t); } catch (e) { }
+  var i = t.indexOf('{'), j = t.lastIndexOf('}');
+  if (i >= 0 && j > i) { try { return JSON.parse(t.slice(i, j + 1)); } catch (e) { } }
+  return null;
+}
+
+/* 调用大模型。content 为字符串或（含图片时的）内容块数组 */
+function aiChat(cfg, userContent, opts) {
+  opts = opts || {};
+  var body = {
+    model: opts.model || cfg.model,
+    messages: [
+      { role: 'system', content: cfg.prompt || defaultAiPrompt() },
+      { role: 'user', content: userContent }
+    ],
+    temperature: 0.1,
+    max_tokens: opts.maxTokens || 4000
+  };
+  var headers = { 'Content-Type': 'application/json' };
+  if (cfg.apiKey) headers['Authorization'] = 'Bearer ' + cfg.apiKey;
+
+  var ctrl = typeof AbortController !== 'undefined' ? new AbortController() : null;
+  var timer = setTimeout(function () { if (ctrl) ctrl.abort(); }, opts.timeout || 120000);
+
+  return fetch(cfg.baseUrl, {
+    method: 'POST',
+    headers: headers,
+    body: JSON.stringify(body),
+    signal: ctrl ? ctrl.signal : undefined
+  }).then(function (r) {
+    return r.text().then(function (txt) {
+      clearTimeout(timer);
+      if (!r.ok) {
+        var msg = 'HTTP ' + r.status;
+        try { var e = JSON.parse(txt); msg += ' ' + ((e.error && (e.error.message || e.error.code)) || txt.slice(0, 200)); }
+        catch (err) { msg += ' ' + txt.slice(0, 200); }
+        throw new Error(msg);
+      }
+      var j = null;
+      try { j = JSON.parse(txt); } catch (e) { throw new Error('返回内容不是合法 JSON：' + txt.slice(0, 200)); }
+      var content = j && j.choices && j.choices[0] && j.choices[0].message && j.choices[0].message.content;
+      if (content == null) throw new Error('返回结构异常：' + txt.slice(0, 200));
+      return content;
+    });
+  }).catch(function (err) {
+    clearTimeout(timer);
+    if (err && (err.name === 'AbortError')) throw new Error('请求超时（' + Math.round((opts.timeout || 120000) / 1000) + ' 秒），可稍后重试或换更快的模型');
+    if (err && /Failed to fetch|NetworkError|Load failed/i.test(String(err.message))) {
+      throw new Error('网络请求失败。可能原因：①手机网络不通 ②该服务商不允许浏览器直连（CORS）③地址填错');
+    }
+    throw err;
+  });
+}
+
+/* 枚举值别名表：AI 常返回行业内说法，需映射到表单选项，否则会被清空要求人工重填 */
+var AI_ENUM_ALIAS = {
+  sex: { '男性': '男', 'MALE': '男', 'M': '男', '女性': '女', 'FEMALE': '女', 'F': '女' },
+  purpose: {
+    '术后辅助': '术后辅助', '辅助': '术后辅助', '术后': '术后辅助',
+    '术前新辅助': '术前新辅助', '新辅助': '术前新辅助', '术前': '术前新辅助',
+    '根治性': '根治性', '根治': '根治性', '根治性放疗': '根治性',
+    '姑息性': '姑息性', '姑息': '姑息性', '减症': '姑息性', '姑息减症': '姑息性'
+  },
+  technique: {
+    '容积旋转调强': 'VMAT', '旋转调强': 'VMAT', '容积调强': 'VMAT', 'VMAT': 'VMAT',
+    '立体定向放射': 'SBRT', '立体定向': 'SBRT', 'SBRT': 'SBRT',
+    '调强适形': 'IMRT', '调强': 'IMRT', 'IMRT': 'IMRT',
+    '三维适形': '3D-CRT', '3DCRT': '3D-CRT', '适形': '3D-CRT',
+    '螺旋断层': 'TOMO', '托姆': 'TOMO', 'TOMO': 'TOMO',
+    '电子束': '电子线', '电子线': '电子线'
+  },
+  planStatus: {
+    '已通过': '已通过', '已批准': '已通过', '通过': '已通过',
+    '待验证': '待验证', '验证': '待验证',
+    '待定位': '待定位', '定位': '待定位',
+    '待勾画': '待勾画', '勾画': '待勾画',
+    '待计划': '待计划', '计划': '待计划'
+  }
+};
+/* 把 AI 返回的说法映射到表单枚举；无法可靠判断时返回空串，交人工选择 */
+function matchEnum(v, options, aliasKey) {
+  if (v == null) return '';
+  var s = String(v).trim();
+  if (!s) return '';
+  if (options.indexOf(s) >= 0) return s;
+  var al = AI_ENUM_ALIAS[aliasKey] || {};
+  /* 长键优先，避免「容积旋转调强」被「调强」抢先匹配 */
+  var keys = Object.keys(al).sort(function (a, b) { return b.length - a.length; });
+  var sl = s.toLowerCase();
+  for (var i = 0; i < keys.length; i++) {
+    if (sl === keys[i].toLowerCase() || s.indexOf(keys[i]) >= 0) return al[keys[i]];
+  }
+  for (var j = 0; j < options.length; j++) {
+    if (s.indexOf(options[j]) >= 0) return options[j];
+  }
+  return '';
+}
+
+/* 把模型结果规整成患者对象数组 */
+function normalizeAiPatients(raw) {
+  var arr = [];
+  if (raw && Array.isArray(raw.patients)) arr = raw.patients;
+  else if (Array.isArray(raw)) arr = raw;
+  else if (raw && raw.name) arr = [raw];
+  var out = [];
+  arr.forEach(function (r) {
+    if (!r || typeof r !== 'object') return;
+    var o = {};
+    AI_FIELDS.forEach(function (k) {
+      var v = r[k];
+      o[k] = (v == null) ? '' : String(v).trim();
+    });
+    /* 枚举值映射：映射不到则清空，交人工选择（宁缺勿错） */
+    o.sex = matchEnum(o.sex, SEXES, 'sex');
+    o.purpose = matchEnum(o.purpose, PURPOSES, 'purpose');
+    o.technique = matchEnum(o.technique, TECHNIQUES, 'technique');
+    o.planStatus = matchEnum(o.planStatus, PLAN_STATUSES, 'planStatus');
+    o.age = String(o.age).replace(/[^\d]/g, '');
+    ['totalDose', 'fractions', 'dosePerFraction'].forEach(function (k) {
+      o[k] = String(o[k]).replace(/[^\d.]/g, '');
+    });
+    ['simDate', 'startDate'].forEach(function (k) {
+      var m = String(o[k]).match(/(\d{4})\D+(\d{1,2})\D+(\d{1,2})/);
+      if (m) o[k] = m[1] + '-' + pad2(m[2]) + '-' + pad2(m[3]);
+      else if (!/^\d{4}-\d{2}-\d{2}$/.test(o[k])) o[k] = '';
+    });
+    if (o.name || o.mrn) out.push(o);      /* 无姓名无住院号的丢弃 */
+  });
+  return out;
+}
+
+
 /* ================= 随访排期引擎 =================
    设计：随访计划以「完成/基线日期 + 间隔」表达，到期日 = 基准 + 间隔，自动推算。
    模板可为患者单独定制；完成后自动生成下一次随访，形成可延续的随访链。
@@ -837,7 +1051,9 @@ function renderTodo() {
 function renderWard() {
   var list = inTreat();
   var h = '<div class="section-title">在治患者 · ' + list.length + ' 位' +
-    '<button class="btn sm addbtn" data-act="add-patient">＋ 添加患者</button></div>';
+    '<span style="display:flex;gap:6px">' +
+    '<button class="btn sm" data-act="ai-import">✨ AI 导入</button>' +
+    '<button class="btn sm addbtn" data-act="add-patient">＋ 添加</button></span></div>';
   if (!list.length) h += '<div class="empty"><span class="big">🏥</span>暂无在治患者<br>点右上角「添加患者」开始</div>';
   list.forEach(function (p) {
     var un = unreadReactions(p).length;
@@ -1094,6 +1310,11 @@ function renderSettingsPage() {
     setRow('import-json', '📥', '导入备份（合并 / 覆盖）', '推荐「合并」：两边新增的患者都会保留') +
     '</div>';
   h += '<div class="setgrp">' +
+    setRow('ai-config', '✨', 'AI 识别设置',
+      aiReady() ? ('已配置 · ' + aiProviderPreset(aiConfig().provider).name + ' · ' + aiConfig().model)
+        : '未配置 · 用于批量导入患者（支持文字与图片）') +
+    '</div>';
+  h += '<div class="setgrp">' +
     setRow('treat-days', '📅', '默认治疗日', '每周：' + treatDaysCfg().map(function (d) { return WEEKDAYS[d]; }).join('、')) +
     setRow('toggle-makeup', '🔁', '调休上班日安排治疗', (makeupAsWorkday() ? '已开启' : '已关闭') + ' · 仅对「周一~周五」整周方案生效') +
     '</div>';
@@ -1211,6 +1432,218 @@ function numberInput(name, value, ph, step) { return '<input name="' + esc(name)
 function areaInput(name, value, ph) { return '<textarea name="' + esc(name) + '" placeholder="' + esc(ph || '') + '">' + esc(value) + '</textarea>'; }
 function selectInput(name, value, options) {
   return '<select name="' + esc(name) + '">' + options.map(function (o) { return '<option value="' + esc(o) + '"' + (o === value ? ' selected' : '') + '>' + esc(o) + '</option>'; }).join('') + '</select>';
+}
+
+/* ================= AI 界面：配置 / 导入 / 复核 ================= */
+
+/* 复核用：带空选项的下拉（AI 没识别出来时保持"未填"） */
+function aiSelect(name, value, options) {
+  var opts = ['<option value=""' + (!value ? ' selected' : '') + '>未填</option>']
+    .concat(options.map(function (o) { return '<option value="' + esc(o) + '"' + (o === value ? ' selected' : '') + '>' + esc(o) + '</option>'; }));
+  return '<select name="' + esc(name) + '">' + opts.join('') + '</select>';
+}
+
+/* ---------- 配置 ---------- */
+function sheetAiConfig() {
+  var c = aiConfig();
+  var preset = aiProviderPreset(c.provider);
+  openSheet({
+    title: 'AI 识别设置', okText: '保存',
+    body:
+      '<div class="hint" style="padding:9px 11px;background:var(--warn-soft);border-radius:9px;line-height:1.75;margin-bottom:12px">' +
+      '⚠ API Key 只保存在本机，不会上传。但使用 AI 识别时，你粘贴的文字与上传的图片会发送给所选服务商，请确认符合本院合规要求。</div>' +
+      '<div class="field"><label>服务商</label><select name="provider" id="aiProvider">' +
+      AI_PROVIDERS.map(function (p) {
+        return '<option value="' + p.key + '"' + (p.key === c.provider ? ' selected' : '') + '>' +
+          esc(p.name) + (p.note ? '（' + esc(p.note) + '）' : '') + '</option>';
+      }).join('') + '</select></div>' +
+      field('API 地址', textInput('baseUrl', c.baseUrl || preset.url, 'https://.../chat/completions')) +
+      field('API Key', textInput('apiKey', c.apiKey, '粘贴你的 API Key', 'password')) +
+      '<div class="field2">' +
+      '<div class="field"><label>文本模型</label>' + textInput('model', c.model || preset.model, '如 deepseek-chat') + '</div>' +
+      '<div class="field"><label>图片模型</label>' + textInput('visionModel', c.visionModel || preset.vision, '支持识图的模型') + '</div>' +
+      '</div>' +
+      '<div class="hint" style="margin:-6px 0 12px">识别图片必须填「图片模型」（如 glm-4v-flash、qwen-vl-max）；留空则用文本模型，多数不支持图片</div>' +
+      field('提示词（高级，留空用内置）', areaInput('prompt', c.prompt, '留空即使用内置提示词（已按本应用字段优化）')) +
+      '<div id="aiStatus" class="hint" style="margin-top:4px"></div>' +
+      '<div class="btnrow"><button type="button" class="btn sm" data-act="ai-test">测试连接</button>' +
+      '<button type="button" class="btn sm" data-act="ai-provider-fill">按服务商填充地址</button></div>',
+    onSave: function (v) {
+      if (!String(v.baseUrl || '').trim()) { toast('请填写 API 地址'); return false; }
+      if (!String(v.model || '').trim()) { toast('请填写文本模型'); return false; }
+      setAiConfig({
+        provider: v.provider || 'custom', baseUrl: String(v.baseUrl).trim(), apiKey: String(v.apiKey || '').trim(),
+        model: String(v.model).trim(), visionModel: String(v.visionModel || '').trim(), prompt: String(v.prompt || '').trim()
+      });
+      toast('已保存');
+    }
+  });
+}
+
+/* ---------- 导入 ---------- */
+var aiDraft = { images: [], patients: [] };
+
+function renderAiThumbs() {
+  var el = document.getElementById('aiThumbs');
+  if (!el) return;
+  el.innerHTML = aiDraft.images.map(function (im, i) {
+    return '<div style="position:relative;flex:0 0 auto">' +
+      '<img src="' + im.dataUrl + '" style="width:62px;height:62px;object-fit:cover;border-radius:8px;border:1px solid var(--line);display:block">' +
+      '<button type="button" data-act="ai-unpick" data-i="' + i + '" ' +
+      'style="position:absolute;top:-6px;right:-6px;width:20px;height:20px;border-radius:50%;border:0;background:var(--danger);color:#fff;font-size:13px;line-height:18px;padding:0;cursor:pointer">×</button>' +
+      '</div>';
+  }).join('');
+  var c = document.getElementById('aiImgCount');
+  if (c) c.textContent = aiDraft.images.length ? '已选 ' + aiDraft.images.length + ' 张' : '';
+}
+
+function sheetAiImport() {
+  if (!aiReady()) {
+    openSheet({
+      title: '尚未配置 AI', hideOk: true,
+      body: '<div class="hint" style="line-height:1.8;margin-bottom:12px">需要先填写 API 地址与模型，才能使用 AI 识别。</div>',
+      actions: [{ label: '去设置', act: 'ai-open-config', primary: true, full: true }, { label: '取消', act: 'sheet-close', full: true }]
+    });
+    return;
+  }
+  aiDraft = { images: [], patients: [] };
+  openSheet({
+    title: 'AI 识别导入', okText: '开始识别',
+    body:
+      '<div class="hint" style="margin-bottom:10px;line-height:1.7">把材料交给 AI 提取字段，识别结果会进入复核界面，确认后才写入。</div>' +
+      field('粘贴文字（病历 / 处方 / 交班记录，可含多位患者）', areaInput('aiText', '', '直接粘贴文字内容…')) +
+      '<div class="field"><label>或上传图片（处方单 / 病历 / 定位单，可多张）'
+        + ' <span id="aiImgCount" class="hint"></span></label>' +
+        '<div class="btnrow" style="margin-top:0"><button type="button" class="btn sm addbtn" data-act="ai-pick">＋ 选择图片</button>' +
+        '<button type="button" class="btn sm" data-act="ai-pick-camera" data-capture="1">📷 拍照</button></div>' +
+        '<div id="aiThumbs" style="display:flex;gap:10px;flex-wrap:wrap;margin-top:10px"></div>' +
+        '<div class="hint" style="margin-top:6px">图片会自动压缩后上传</div></div>' +
+      '<div id="aiStatus" class="hint" style="line-height:1.8"></div>',
+    onSave: function (v) {
+      var text = String(v.aiText || '').trim();
+      if (!text && !aiDraft.images.length) { toast('请粘贴文字或上传图片'); return false; }
+      runAiParse(text, aiDraft.images.slice());
+      return false;      /* 保持弹层打开以显示进度 */
+    }
+  });
+}
+
+/* 真正发起识别 */
+function runAiParse(text, images) {
+  var cfg = aiConfig();
+  var status = document.getElementById('aiStatus');
+  var started = Date.now();
+  var useVision = images.length > 0;
+  var model = useVision ? (cfg.visionModel || cfg.model) : cfg.model;
+  if (useVision && !cfg.visionModel) {
+    if (!confirm('未设置「图片模型」，将尝试用文本模型识别图片（多数模型不支持）。继续？')) return;
+  }
+  var tick = setInterval(function () {
+    if (status) status.textContent = '识别中… 已用 ' + Math.round((Date.now() - started) / 1000) + ' 秒';
+  }, 1000);
+  if (status) status.textContent = '识别中… 已用 0 秒';
+
+  /* 组装内容：有图片时用多模态内容块 */
+  var content;
+  if (useVision) {
+    content = [{ type: 'text', text: (text || '请从以下图片中提取患者信息。') }];
+    images.forEach(function (im) { content.push({ type: 'image_url', image_url: { url: im.dataUrl } }); });
+  } else {
+    content = text;
+  }
+
+  aiChat(cfg, content, { model: model, maxTokens: 4000 })
+    .then(function (out) {
+      clearInterval(tick);
+      var json = extractJson(out);
+      var list = normalizeAiPatients(json);
+      if (!list.length) {
+        if (status) status.innerHTML = '<span style="color:var(--danger)">未能识别出患者信息。可换个更清晰的图片，或改用更强的模型。</span>' +
+          '<br><span class="hint">模型原始输出：' + esc(String(out).slice(0, 300)) + '</span>';
+        return;
+      }
+      aiDraft.patients = list;
+      toast('识别到 ' + list.length + ' 位患者，请复核');
+      openAiReview();
+    })
+    .catch(function (err) {
+      clearInterval(tick);
+      if (status) status.innerHTML = '<span style="color:var(--danger)">识别失败：' + esc(err.message) + '</span>';
+    });
+}
+
+/* ---------- 复核 ---------- */
+function aiDraftKey(i, k) { return 'ai_' + i + '_' + k; }
+
+function openAiReview() {
+  var list = aiDraft.patients;
+  var body = '<div class="hint" style="padding:9px 11px;background:var(--warn-soft);border-radius:9px;line-height:1.75;margin-bottom:12px">' +
+    '⚠ 以下内容由 AI 识别，<b>请逐项核对后再导入</b>。识别不到或错误的字段请直接修改或清空。</div>';
+  body += '<div class="hint" style="margin-bottom:8px">共 ' + list.length + ' 位待导入</div>';
+
+  list.forEach(function (p, i) {
+    body += '<div class="event" style="padding:11px 12px">' +
+      '<div class="head" style="justify-content:space-between">' +
+      '<span class="chip pri">第 ' + (i + 1) + ' 位</span>' +
+      '<button type="button" class="btn sm danger" data-act="ai-drop" data-i="' + i + '" style="margin-left:auto">移除此条</button></div>' +
+      '<div class="field2" style="margin-top:8px">' +
+      '<div class="field" style="margin-bottom:8px"><label>姓名 *</label>' + textInput(aiDraftKey(i, 'name'), p.name, '必填') + '</div>' +
+      '<div class="field" style="margin-bottom:8px"><label>住院号</label>' + textInput(aiDraftKey(i, 'mrn'), p.mrn) + '</div></div>' +
+      '<div class="field2">' +
+      '<div class="field" style="margin-bottom:8px"><label>性别</label>' + aiSelect(aiDraftKey(i, 'sex'), p.sex, SEXES) + '</div>' +
+      '<div class="field" style="margin-bottom:8px"><label>年龄</label>' + textInput(aiDraftKey(i, 'age'), p.age) + '</div></div>' +
+      field('诊断', areaInput(aiDraftKey(i, 'diagnosis'), p.diagnosis, '含部位/病理/分期')) +
+      '<div class="field2">' +
+      '<div class="field" style="margin-bottom:8px"><label>放疗目的</label>' + aiSelect(aiDraftKey(i, 'purpose'), p.purpose, PURPOSES) + '</div>' +
+      '<div class="field" style="margin-bottom:8px"><label>放疗技术</label>' + aiSelect(aiDraftKey(i, 'technique'), p.technique, TECHNIQUES) + '</div></div>' +
+      '<div class="field2">' +
+      '<div class="field" style="margin-bottom:8px"><label>主管医生</label>' + textInput(aiDraftKey(i, 'physician'), p.physician) + '</div>' +
+      '<div class="field" style="margin-bottom:8px"><label>流程状态</label>' + aiSelect(aiDraftKey(i, 'planStatus'), p.planStatus, PLAN_STATUSES) + '</div></div>' +
+      '<div class="field2">' +
+      '<div class="field" style="margin-bottom:8px"><label>总剂量 Gy</label>' + numberInput(aiDraftKey(i, 'totalDose'), p.totalDose, '', '0.1') + '</div>' +
+      '<div class="field" style="margin-bottom:8px"><label>总次数</label>' + numberInput(aiDraftKey(i, 'fractions'), p.fractions, '', '1') + '</div>' +
+      '<div class="field" style="margin-bottom:8px"><label>单次 Gy</label>' + numberInput(aiDraftKey(i, 'dosePerFraction'), p.dosePerFraction, '', '0.01') + '</div></div>' +
+      '<div class="field2">' +
+      '<div class="field" style="margin-bottom:8px"><label>定位日期</label>' + textInput(aiDraftKey(i, 'simDate'), p.simDate, '', 'date') + '</div>' +
+      '<div class="field" style="margin-bottom:8px"><label>放疗开始日期</label>' + textInput(aiDraftKey(i, 'startDate'), p.startDate, '', 'date') + '</div></div>' +
+      '<div class="field" style="margin-bottom:0"><label>体位/固定装置</label>' + textInput(aiDraftKey(i, 'position'), p.position) + '</div>' +
+      '</div>';
+  });
+
+  openSheet({
+    title: '复核识别结果', hideOk: true,
+    body: body,
+    actions: [
+      { label: '取消', act: 'sheet-close' },
+      { label: '确认导入 ' + list.length + ' 位', act: 'ai-commit', primary: true }
+    ]
+  });
+}
+
+/* 从复核界面收集并写入 */
+function commitAiDraft() {
+  var vals = sheetValues();
+  var list = aiDraft.patients;
+  var added = 0, skipped = 0;
+  var names = [];
+  list.forEach(function (p, i) {
+    var o = {};
+    AI_FIELDS.forEach(function (k) { o[k] = String(vals[aiDraftKey(i, k)] == null ? '' : vals[aiDraftKey(i, k)]).trim(); });
+    if (!o.name) { skipped++; return; }
+    state.patients.push(normalize({
+      patients: [Object.assign(o, {
+        treatDays: treatDaysCfg(), pauses: [], extras: [], doneDates: [], reactions: [], followupPlans: [], notes: [], status: '在治'
+      })]
+    }).patients[0]);
+    added++;
+    names.push(o.name);
+  });
+  if (!added) { toast('没有可导入的患者（姓名不能为空）'); return false; }
+  save();
+  closeSheet();
+  view.page = 'tab'; view.tab = 'ward'; render();
+  toast('已导入 ' + added + ' 位' + (skipped ? '，跳过 ' + skipped + ' 条（无姓名）' : '') + '：' + names.join('、'));
+  return true;
 }
 
 /* ================= 表单：患者 ================= */
@@ -1647,6 +2080,57 @@ function sheetDayPatient(p, date) {
 
   openSheet({ title: (p.name || '') + ' · ' + date, body: body, actions: acts });
   reopenSheet = function () { var q = getPatient(p.id); if (q) sheetDayPatient(q, date); else closeSheet(); };
+}
+
+/* ================= AI 操作 ================= */
+function handleAiFiles(files, done) {
+  if (!files || !files.length) return;
+  var arr = Array.prototype.slice.call(files);
+  var left = arr.length;
+  arr.forEach(function (f) {
+    compressImage(f, function (dataUrl) {
+      if (dataUrl) aiDraft.images.push({ name: (f && f.name) || '图片', dataUrl: dataUrl });
+      if (--left === 0 && done) done();
+    });
+  });
+}
+function pickAiImages(capture) {
+  var inp = document.createElement('input');
+  inp.type = 'file';
+  inp.accept = 'image/*';
+  if (capture) inp.setAttribute('capture', 'environment'); else inp.multiple = true;
+  inp.onchange = function () { handleAiFiles(inp.files, renderAiThumbs); };
+  inp.click();
+}
+function testAiConnection() {
+  var v = sheetValues();
+  var cfg = {
+    baseUrl: String(v.baseUrl || '').trim(), apiKey: String(v.apiKey || '').trim(),
+    model: String(v.model || '').trim(), prompt: ''
+  };
+  if (!cfg.baseUrl || !cfg.model) { toast('请先填写 API 地址与模型'); return; }
+  var el = document.getElementById('aiStatus');
+  if (el) el.textContent = '测试中…';
+  aiChat(cfg, '回复两个字：正常', { maxTokens: 20, timeout: 30000 })
+    .then(function (out) {
+      if (el) el.innerHTML = '<span style="color:var(--ok)">✔ 连接正常</span>　模型回复：' + esc(String(out).slice(0, 60));
+    })
+    .catch(function (err) {
+      if (el) el.innerHTML = '<span style="color:var(--danger)">✘ ' + esc(err.message) + '</span>';
+    });
+}
+function fillAiProvider() {
+  var sel = document.getElementById('aiProvider');
+  if (!sel) return;
+  var p = aiProviderPreset(sel.value);
+  if (p.key === 'custom') { toast('自定义：请手动填写地址与模型'); return; }
+  var bu = document.querySelector('#sheetBody [name="baseUrl"]');
+  var md = document.querySelector('#sheetBody [name="model"]');
+  var vm = document.querySelector('#sheetBody [name="visionModel"]');
+  if (bu) bu.value = p.url;
+  if (md) md.value = p.model;
+  if (vm) vm.value = p.vision || '';
+  toast('已填充「' + p.name + '」的地址与模型');
 }
 
 /* ================= 导出 / 导入 ================= */
@@ -2218,6 +2702,21 @@ function bind() {
   var acts = {
     'open-patient': function (el) { var p = getPatient(el.dataset.id); closeSheet(); view.page = 'patient'; view.pid = el.dataset.id; if (p && p.startDate) { var d = parseD(p.startDate); if (d) { view.calY = d.getFullYear(); view.calM = d.getMonth() + 1; } } render(); },
     'add-patient': function () { sheetPatient(null); },
+    'ai-import': function () { sheetAiImport(); },
+    'ai-config': function () { sheetAiConfig(); },
+    'ai-open-config': function () { sheetAiConfig(); },
+    'ai-test': function () { testAiConnection(); },
+    'ai-provider-fill': function () { fillAiProvider(); },
+    'ai-pick': function () { pickAiImages(false); },
+    'ai-pick-camera': function () { pickAiImages(true); },
+    'ai-unpick': function (el) { aiDraft.images.splice(parseInt(el.dataset.i, 10), 1); renderAiThumbs(); },
+    'ai-drop': function (el) {
+      if (!confirm('移除这条识别结果？')) return;
+      aiDraft.patients.splice(parseInt(el.dataset.i, 10), 1);
+      if (!aiDraft.patients.length) { closeSheet(); toast('已清空识别结果'); return; }
+      openAiReview();
+    },
+    'ai-commit': function () { commitAiDraft(); },
     'edit-patient': function () { sheetPatient(getPatient(view.pid)); },
     'delete-patient': function () { deletePatient(getPatient(view.pid)); },
     'complete-patient': function () { completePatient(getPatient(view.pid)); },
