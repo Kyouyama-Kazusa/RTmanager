@@ -141,7 +141,7 @@ https://你的用户名.github.io/
 ### 发布步骤
 
 1. 把新的 `index.html`（及其他改动过的文件）上传覆盖到仓库
-2. **同步递增 `sw.js` 里的 `CACHE` 版本号**，例如 `radiotherapy-v3` → `radiotherapy-v4`
+2. **同步递增 `sw.js` 里的 `CACHE` 版本号**，例如 `radiotherapy-v4` → `radiotherapy-v5`
 
 > 为什么必须改版本号：浏览器通过版本号判断缓存是否过期。
 > 不改的话，已安装到桌面的用户可能长时间停留在旧版本。
