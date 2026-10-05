@@ -37,5 +37,5 @@
 
 ## 维护
 
-改动推送前，递增 `sw.js` 里的 `CACHE` 版本号（当前 `radiotherapy-v8`），
+改动推送前，递增 `sw.js` 里的 `CACHE` 版本号（当前 `radiotherapy-v9`），
 否则已安装到桌面的用户会停留在旧版本。

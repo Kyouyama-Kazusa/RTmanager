@@ -225,7 +225,7 @@ button,input,select,textarea{font:inherit;color:inherit}
 var LS_KEY = 'radiotherapy.v1';
 var SNAP_PREFIX = 'radiotherapy.snap.';
 var SNAP_KEEP = 7;
-var APP_VERSION = '0.6.0';
+var APP_VERSION = '0.7.0';
 
 var SEXES = ['男', '女'];
 var PURPOSES = ['根治性', '术后辅助', '术前新辅助', '姑息性'];
@@ -791,6 +791,53 @@ var FOLLOWUP_TEMPLATES = [
   },
   { name: '前列腺癌（3/6/12 月＋PSA）', items: [{ n: 3, u: 'm', note: '复查 PSA' }, { n: 6, u: 'm', note: '复查 PSA' }, { n: 12, u: 'm', note: '复查 PSA' }] }
 ];
+
+/* ============ 随访模板：内置层 + 用户覆盖层 ============
+   与节假日同一套思路：内置模板随版本升级，用户的自定义增删存在独立层，
+   升级不会丢失。{ 名称: {items:[...]} } 为新增/覆盖；{ 名称: null } 为删除内置项。 */
+function tplOverride() { var v = lsGet('radiotherapy.tpls', null); return (v && typeof v === 'object') ? v : {}; }
+
+/* 当前可用模板列表：[{name, items, builtin}]，按「内置在前、自定义在后」排列 */
+function followupTemplates() {
+  var ov = tplOverride();
+  var out = [];
+  FOLLOWUP_TEMPLATES.forEach(function (t) {
+    if (ov[t.name] === null) return;                       /* 被用户删除 */
+    var o = ov[t.name];
+    out.push({ name: t.name, items: (o && o.items) ? o.items : t.items, builtin: true });
+  });
+  Object.keys(ov).forEach(function (n) {
+    var o = ov[n];
+    if (o === null || !o || !o.items) return;
+    if (!isBuiltinTpl(n)) out.push({ name: n, items: o.items, builtin: false });
+  });
+  return out;
+}
+function isBuiltinTpl(name) {
+  return FOLLOWUP_TEMPLATES.some(function (t) { return t.name === name; });
+}
+function findTpl(name) {
+  var l = followupTemplates();
+  for (var i = 0; i < l.length; i++) if (l[i].name === name) return l[i];
+  return null;
+}
+/* 保存/覆盖一个模板 */
+function saveTpl(name, items) {
+  name = String(name || '').trim();
+  if (!name) return false;
+  var clean = (items || []).filter(function (x) { return parseInt(x.n, 10) > 0; })
+    .map(function (x) { return { n: parseInt(x.n, 10), u: x.u || 'm', note: x.note || '' }; });
+  if (!clean.length) return false;
+  var o = tplOverride();
+  o[name] = { items: clean };
+  lsSet('radiotherapy.tpls', o);
+  return true;
+}
+function delTpl(name) { var o = tplOverride(); o[name] = null; lsSet('radiotherapy.tpls', o); }
+function resetTpls() { lsSet('radiotherapy.tpls', {}); }
+function tplItemsText(items) {
+  return (items || []).map(function (x) { return intervalText(x.n, x.u); }).join(' / ');
+}
 
 /* 放疗结束日：优先用排程算出的最后治疗日；
    无排程（缺开始日期或总次数）时退回「治疗完成」的归档日。
@@ -1383,6 +1430,9 @@ function renderSettingsPage() {
     setRow('ai-config', '✨', 'AI 识别设置',
       aiReady() ? ('已配置 · ' + aiProviderPreset(aiConfig().provider).name + ' · ' + aiConfig().model)
         : '未配置 · 用于批量导入患者（支持文字与图片）') +
+    setRow('tpl-settings', '📋', '随访模板库',
+      followupTemplates().length + ' 个可用' +
+      (Object.keys(tplOverride()).length ? '（含自建/改动）' : '') + ' · 增删与自定义') +
     '</div>';
   h += '<div class="setgrp">' +
     setRow('treat-days', '📅', '默认治疗日', '每周：' + treatDaysCfg().map(function (d) { return WEEKDAYS[d]; }).join('、')) +
@@ -1888,6 +1938,23 @@ function sheetFollowup(p, f) {
   });
 }
 
+/* 把模板应用到某位患者：保留已完成记录，未完成部分按新模板重排（不重复已完成的次数） */
+function applyTplToPatient(p, t) {
+  var items = (t.items || []).filter(function (x) { return parseInt(x.n, 10) > 0; });
+  if (!items.length) return false;
+  var base = t.base || followupTplBase(p) || treatmentEndOf(p) || todayStr();
+  var done = (p.followupPlans || []).filter(function (f) { return f.baseDate !== 'TEMPLATE' && f.done; });
+  var doneKeys = {};
+  done.forEach(function (f) { doneKeys[f.offsetN + '|' + f.offsetUnit] = 1; });
+  var pendItems = items.filter(function (it) { return !doneKeys[it.n + '|' + (it.u || 'm')]; });
+  var tplRows = buildFollowupPlans(items, base).map(function (f) {
+    f.tplBase = base; f.baseDate = 'TEMPLATE'; return f;
+  });
+  p.followupPlans = done.concat(buildFollowupPlans(pendItems, base)).concat(tplRows);
+  save();
+  return true;
+}
+
 /* 随访模板：一次设定整条随访链，之后可随时改间隔并自动重排 */
 function sheetFollowupTemplate(p) {
   if (!p) { closeSheet(); return; }
@@ -1933,11 +2000,23 @@ function sheetFollowupTemplate(p) {
       '<div class="hint" style="margin-bottom:10px;line-height:1.7">设定「第几次、间隔多久」，保存后自动算出每次随访日期并排入待办。间隔以<b>放疗结束日</b>为第 0 个月计算。</div>' +
       field('起算日期（放疗结束日）', textInput('base', base, '', 'date'),
         schedEnd ? ('按排程算出的最后治疗日：' + schedEnd + '（＋' + treatmentEndNote(p) + '）') : '该患者尚无排程，可手动填写') +
-      '<div class="field"><label>常用模板（点一下套用，之后可逐行修改）</label><div class="seg">' +
-      FOLLOWUP_TEMPLATES.map(function (t, i) { return '<button type="button" class="tpl" data-i="' + i + '">' + esc(t.name) + '</button>'; }).join('') +
-      '</div><div class="hint" style="margin-top:6px">模板为通用参考，请按本科室规程调整间隔与复查项目。</div></div>' +
+      '<div class="field"><label>套用模板（点一下载入到下方序列，之后可逐行修改）</label><div class="seg">' +
+      followupTemplates().map(function (t) {
+        return '<button type="button" class="tpl" data-i="' + esc(t.name) + '">' + esc(t.name) +
+          (t.builtin ? '' : ' ·自建') + '</button>';
+      }).join('') +
+      '</div>' +
+      '<div class="btnrow" style="margin-top:8px">' +
+      '<button type="button" class="btn sm" id="tplManage">⚙ 管理模板（' + followupTemplates().length + '）</button>' +
+      '</div>' +
+      '<div class="hint" style="margin-top:6px">模板为通用参考，请按本科室规程调整间隔与复查项目。</div></div>' +
       '<div class="field"><label>随访序列</label><div id="tplRows">' + rowsHtml() + '</div>' +
       '<button type="button" class="btn sm addbtn" id="tplAdd">＋ 增加一次随访</button></div>' +
+      '<div class="field"><label>存为我的模板（可选）</label>' +
+      '<div style="display:flex;gap:8px">' +
+      '<input type="text" id="tplSaveName" placeholder="模板名称，如 本科室肺癌" style="flex:1;min-width:0;border:1px solid var(--line);border-radius:10px;padding:9px 11px;font-size:15px">' +
+      '<button type="button" class="btn sm primary" id="tplSave" style="flex:0 0 auto">保存</button>' +
+      '</div><div class="hint" style="margin-top:6px">把当前序列存成模板，以后一键套用；同名会覆盖。</div></div>' +
       '<div class="hint" id="tplPreview" style="line-height:1.9"></div>',
     onSave: function (v) {
       readRows();
@@ -1945,17 +2024,11 @@ function sheetFollowupTemplate(p) {
       if (!items.length) { toast('请至少设置一次随访'); return false; }
       if (!v.base) { toast('请填写起算日期'); return false; }
       /* 保留已完成的随访记录，且不把已完成的次数重新生成为待随访（否则会重复） */
-      var done = (p.followupPlans || []).filter(function (f) { return f.baseDate !== 'TEMPLATE' && f.done; });
-      var doneKeys = {};
-      done.forEach(function (f) { doneKeys[f.offsetN + '|' + f.offsetUnit] = 1; });
-      var pendItems = items.filter(function (it) { return !doneKeys[it.n + '|' + it.u]; });
-      var tplPlans = buildFollowupPlans(items, v.base).map(function (f) {
-        f.tplBase = v.base; f.baseDate = 'TEMPLATE'; return f;
-      });
-      p.followupPlans = done.concat(buildFollowupPlans(pendItems, v.base)).concat(tplPlans);
-      var plans = buildFollowupPlans(pendItems, v.base);
-      save(); render();
-      var skipped = items.length - pendItems.length;
+      var doneCnt = (p.followupPlans || []).filter(function (f) { return f.baseDate !== 'TEMPLATE' && f.done; }).length;
+      applyTplToPatient(p, { items: items, base: v.base });
+      var skipped = doneCnt;
+      var plans = pendingFollowups(p).sort(function (a, b) { return String(a.dueDate).localeCompare(String(b.dueDate)); });
+      render();
       toast('已按放疗结束日排出 ' + plans.length + ' 次随访' +
         (skipped ? '（' + skipped + ' 次已完成，不再重复）' : '') +
         (plans.length ? '，最早 ' + dateOnly(plans[0].dueDate) : ''));
@@ -1994,19 +2067,79 @@ function sheetFollowupTemplate(p) {
         rows.push({ n: (parseInt(last.n, 10) || 0) + (last.u === 'm' ? 3 : 1), u: last.u || 'm', note: '' });
         repaint();
       });
+      /* 套用模板：按名称查找（支持用户自建模板） */
       document.querySelectorAll('#sheetBody .tpl').forEach(function (b) {
         b.addEventListener('click', function () {
-          var t = FOLLOWUP_TEMPLATES[parseInt(b.dataset.i, 10)];
+          var t = findTpl(b.dataset.i);
+          if (!t) { toast('该模板已不存在'); return; }
           document.querySelectorAll('#sheetBody .tpl').forEach(function (x) { x.classList.remove('on'); });
           b.classList.add('on');
           rows = t.items.map(function (x) { return { n: x.n, u: x.u, note: x.note || '' }; });
           repaint();
+          toast('已套用「' + t.name + '」，可继续修改');
         });
       });
+      /* 把当前序列存成模板 */
+      document.getElementById('tplSave').addEventListener('click', function () {
+        readRows();
+        var nameEl = document.getElementById('tplSaveName');
+        var nm = (nameEl && nameEl.value || '').trim();
+        if (!nm) { toast('请先填写模板名称'); if (nameEl) nameEl.focus(); return; }
+        var items = rows.filter(function (r) { return parseInt(r.n, 10) > 0; });
+        if (!items.length) { toast('随访序列为空，无法保存'); return; }
+        if (isBuiltinTpl(nm) && !confirm('「' + nm + '」是内置模板，保存将覆盖它（可随时恢复内置）。确定继续？')) return;
+        else if (!isBuiltinTpl(nm) && findTpl(nm) && !confirm('已存在同名模板「' + nm + '」，确定覆盖？')) return;
+        if (!saveTpl(nm, items)) { toast('保存失败'); return; }
+        if (nameEl) nameEl.value = '';
+        toast('已保存模板「' + nm + '」');
+        sheetFollowupTemplate(p);         /* 重开表单以刷新模板列表 */
+      });
+      document.getElementById('tplManage').addEventListener('click', function () { sheetTplManage(p); });
       var bEl = document.querySelector('#sheetBody [name="base"]');
       if (bEl) bEl.addEventListener('change', updatePreview);
       bindRows(); updatePreview();
     }
+  });
+}
+
+/* 模板管理：查看 / 删除 / 恢复内置 */
+function sheetTplManage(p) {
+  var list = followupTemplates();
+  var hasOverride = Object.keys(tplOverride()).length > 0;
+  var body = '<div class="hint" style="margin-bottom:10px;line-height:1.7">' +
+    '内置模板可删除（随时恢复）；自建模板可删除。点「套用」把该模板载入到序列编辑。</div>';
+  if (!list.length) body += '<div class="hint">暂无可用模板，可在上一页把序列存为模板。</div>';
+
+  var builtin = list.filter(function (t) { return t.builtin; });
+  var custom = list.filter(function (t) { return !t.builtin; });
+
+  function row(t) {
+    return '<div class="event" style="padding:9px 11px"><div class="head" style="margin-bottom:4px">' +
+      '<span class="chip ' + (t.builtin ? 'pri' : 'warn') + '">' + (t.builtin ? '内置' : '自建') + '</span>' +
+      '<span style="flex:1;font-size:14px;font-weight:600">' + esc(t.name) + '</span></div>' +
+      '<div class="hint" style="line-height:1.6">' + t.items.length + ' 次 · ' + esc(tplItemsText(t.items)) + '</div>' +
+      '<div class="acts" style="margin-top:6px">' +
+      '<button type="button" class="btn sm" data-act="tpl-use" data-name="' + esc(t.name) + '">套用</button>' +
+      '<button type="button" class="btn sm danger" data-act="tpl-del" data-name="' + esc(t.name) + '">删除</button>' +
+      '</div></div>';
+  }
+
+  if (builtin.length) {
+    body += '<div class="hint" style="margin:10px 2px 6px;font-weight:600">内置模板（' + builtin.length + '）</div>';
+    body += builtin.map(row).join('');
+  }
+  if (custom.length) {
+    body += '<div class="hint" style="margin:14px 2px 6px;font-weight:600">我自建的（' + custom.length + '）</div>';
+    body += custom.map(row).join('');
+  }
+
+  openSheet({
+    title: '管理随访模板',
+    body: body,
+    actions: [
+      hasOverride ? { label: '恢复内置模板', act: 'tpl-reset' } : null,
+      { label: '返回编辑', act: 'tpl-back', full: !hasOverride }
+    ].filter(Boolean)
   });
 }
 
@@ -2909,6 +3042,39 @@ function bind() {
       render(); toast('已恢复内置数据');
       if (reopenSheet) reopenSheet();
     },
+    /* ---- 随访模板管理 ---- */
+    'tpl-manage': function () { sheetTplManage(getPatient(view.pid)); },
+    'tpl-settings': function () { sheetTplManage(null); },
+    'tpl-del': function (el) {
+      var nm = el.dataset.name;
+      var isB = isBuiltinTpl(nm);
+      if (!confirm('删除模板「' + nm + '」？' + (isB ? '（内置模板可随时恢复）' : '（自建模板删除后需重新保存）'))) return;
+      delTpl(nm);
+      toast('已删除模板「' + nm + '」');
+      sheetTplManage(getPatient(view.pid));
+    },
+    'tpl-reset': function () {
+      if (!confirm('恢复内置模板？将清除你新建的全部自建模板与删除操作。')) return;
+      resetTpls();
+      toast('已恢复内置模板');
+      sheetTplManage(getPatient(view.pid));
+    },
+    'tpl-use': function (el) {
+      var nm = el.dataset.name;
+      var t = findTpl(nm);
+      if (!t) { toast('该模板已不存在'); return; }
+      var pp = getPatient(view.pid);
+      if (!pp) { closeSheet(); toast('「' + t.name + '」共 ' + t.items.length + ' 次随访。请进入患者详情页套用。'); return; }
+      applyTplToPatient(pp, { name: t.name, items: t.items, base: followupTplBase(pp) || treatmentEndOf(pp) });
+      render();
+      toast('已按「' + t.name + '」排出 ' + t.items.length + ' 次随访');
+      sheetFollowupTemplate(pp);
+    },
+    'tpl-back': function () {
+      var pp = getPatient(view.pid);
+      if (pp) sheetFollowupTemplate(pp); else closeSheet();
+    },
+    'tpl-back': function () { sheetFollowupTemplate(getPatient(view.pid)); },
     'toggle-makeup': function () { setMakeupAsWorkday(!makeupAsWorkday()); render(); toast(makeupAsWorkday() ? '调休上班日已按工作日治疗' : '调休上班日不再治疗'); },
     'selftest': function () { runSelfTest(); },
     'export-raw': function () { exportRawData(); },
