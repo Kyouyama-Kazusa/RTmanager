@@ -225,7 +225,7 @@ button,input,select,textarea{font:inherit;color:inherit}
 var LS_KEY = 'radiotherapy.v1';
 var SNAP_PREFIX = 'radiotherapy.snap.';
 var SNAP_KEEP = 7;
-var APP_VERSION = '0.5.0';
+var APP_VERSION = '0.6.0';
 
 var SEXES = ['男', '女'];
 var PURPOSES = ['根治性', '术后辅助', '术前新辅助', '姑息性'];
@@ -759,13 +759,57 @@ var FOLLOWUP_UNITS = [
   { key: 'm', label: '个月', months: 1 },
   { key: 'y', label: '年', months: 12 }
 ];
-/* 常用随访模板（可一键套用，之后可自由改） */
+/* 常用随访模板（可一键套用，之后可自由改）
+   间隔均以「放疗结束日」为第 0 个月计算；各科可自行调整。 */
 var FOLLOWUP_TEMPLATES = [
-  { name: '标准（1/3/6/12月）', items: [{ n: 1, u: 'm' }, { n: 3, u: 'm' }, { n: 6, u: 'm' }, { n: 12, u: 'm' }] },
-  { name: '密集（1/3/6月）', items: [{ n: 1, u: 'm' }, { n: 3, u: 'm' }, { n: 6, u: 'm' }] },
-  { name: '长期（3/6/12/24月）', items: [{ n: 3, u: 'm' }, { n: 6, u: 'm' }, { n: 12, u: 'm' }, { n: 24, u: 'm' }] },
-  { name: '前列腺癌（3/6/12月＋PSA）', items: [{ n: 3, u: 'm', note: '复查 PSA' }, { n: 6, u: 'm', note: '复查 PSA' }, { n: 12, u: 'm', note: '复查 PSA' }] }
+  { name: '标准（1/3/6/12 月）', items: [{ n: 1, u: 'm' }, { n: 3, u: 'm' }, { n: 6, u: 'm' }, { n: 12, u: 'm' }] },
+  { name: '密集（1/3/6 月）', items: [{ n: 1, u: 'm' }, { n: 3, u: 'm' }, { n: 6, u: 'm' }] },
+  { name: '长期（3/6/12/24 月）', items: [{ n: 3, u: 'm' }, { n: 6, u: 'm' }, { n: 12, u: 'm' }, { n: 24, u: 'm' }] },
+  {
+    name: '乳腺癌（3/6/12/18/24/36/60 月）',
+    items: [
+      { n: 3, u: 'm', note: '复查乳腺超声、血常规、肝肾功能' },
+      { n: 6, u: 'm', note: '复查乳腺超声、胸部CT' },
+      { n: 12, u: 'm', note: '复查钼靶、胸腹CT、肿瘤标志物' },
+      { n: 18, u: 'm', note: '复查乳腺超声、胸部CT' },
+      { n: 24, u: 'm', note: '复查钼靶、胸腹CT、肿瘤标志物' },
+      { n: 36, u: 'm', note: '复查钼靶、胸腹CT、肿瘤标志物' },
+      { n: 60, u: 'm', note: '年度复查：钼靶、胸部CT、肿瘤标志物' }
+    ]
+  },
+  {
+    name: '肺癌（3/6/12/18/24/36/60 月）',
+    items: [
+      { n: 3, u: 'm', note: '复查胸部CT、血常规、肝肾功能' },
+      { n: 6, u: 'm', note: '复查胸部CT、肿瘤标志物' },
+      { n: 12, u: 'm', note: '复查胸部CT、腹部超声、肿瘤标志物' },
+      { n: 18, u: 'm', note: '复查胸部CT' },
+      { n: 24, u: 'm', note: '复查颅脑MRI、胸部CT、肿瘤标志物' },
+      { n: 36, u: 'm', note: '复查胸部CT、肿瘤标志物' },
+      { n: 60, u: 'm', note: '年度复查：胸部CT、肿瘤标志物' }
+    ]
+  },
+  { name: '前列腺癌（3/6/12 月＋PSA）', items: [{ n: 3, u: 'm', note: '复查 PSA' }, { n: 6, u: 'm', note: '复查 PSA' }, { n: 12, u: 'm', note: '复查 PSA' }] }
 ];
+
+/* 放疗结束日：优先用排程算出的最后治疗日；
+   无排程（缺开始日期或总次数）时退回「治疗完成」的归档日。
+   随访序列一律以此为第 0 个月起算，与归档时间无关。 */
+function treatmentEndOf(p) {
+  if (!p) return '';
+  var end = scheduleEnd(p);
+  if (end) return end;
+  return p.completedAt ? dateOnly(p.completedAt) : '';
+}
+/* 相对放疗结束日的天数说明，用于界面提示 */
+function treatmentEndNote(p) {
+  var end = treatmentEndOf(p);
+  if (!end) return '';
+  var d = daysBetween(end, todayStr());
+  if (d > 0) return '放疗结束第 ' + d + ' 天';
+  if (d === 0) return '今天是放疗结束日';
+  return '放疗结束后还有 ' + (-d) + ' 天';
+}
 
 /* 在日期上叠加间隔（月/年走自然月，闰年与月末自动处理） */
 function addInterval(base, n, unit) {
@@ -822,25 +866,34 @@ function buildFollowupPlans(items, base) {
     };
   }).sort(function (a, b) { return String(a.dueDate).localeCompare(String(b.dueDate)); });
 }
-/* 患者当前适用的随访基线：最近一次随访完成日 → 治疗完成日 → 空 */
+/* 患者当前适用的随访起算点：
+   1) 已有随访模板 → 模板记录的起算日
+   2) 否则 → 放疗结束日（排程最后一天），无排程时退回归档日 */
 function followupBase(p) {
-  var done = (p.followupPlans || []).filter(function (f) { return f.done && f.doneAt; })
-    .map(function (f) { return dateOnly(f.doneAt); }).sort();
-  if (done.length) return done[done.length - 1];
-  return p.completedAt ? dateOnly(p.completedAt) : '';
+  var tb = followupTplBase(p);
+  if (tb) return tb;
+  return treatmentEndOf(p);
 }
-/* 患者随访模板（按「治疗完成日」记为第 0 月的相对序列） */
+/* 患者随访模板（相对「放疗结束日」的序列） */
 function followupTemplate(p) {
-  var t = (p.followupPlans || []).filter(function (f) { return f.baseDate === 'TEMPLATE'; })
+  return (p.followupPlans || []).filter(function (f) { return f.baseDate === 'TEMPLATE'; })
     .sort(function (a, b) { return (a.offsetN || 0) - (b.offsetN || 0); });
-  if (t.length) return t;
-  /* 兼容旧数据：无模板时从现有计划反推 */
-  return [];
+}
+/* 模板记录的起算日 */
+function followupTplBase(p) {
+  var t = followupTemplate(p);
+  for (var i = 0; i < t.length; i++) if (t[i].tplBase) return dateOnly(t[i].tplBase);
+  return '';
 }
 function pendingFollowups(p) { return (p.followupPlans || []).filter(function (f) { return f.baseDate !== 'TEMPLATE' && !f.done; }); }
 function nextFollowup(p) {
   var pend = pendingFollowups(p).sort(function (a, b) { return String(a.dueDate).localeCompare(String(b.dueDate)); });
   return pend[0] || null;
+}
+/* 随访进度：已完成 / 总数（仅计真实计划，不含模板行） */
+function followupProgress(p) {
+  var real = (p.followupPlans || []).filter(function (f) { return f.baseDate !== 'TEMPLATE'; });
+  return { done: real.filter(function (f) { return f.done; }).length, total: real.length };
 }
 
 
@@ -1251,27 +1304,40 @@ function renderPatientPage() {
   });
   h += '</div>';
 
-  /* 随访：以「间隔」表达，自动推算到期日，完成后自动排下一次 */
-  var allFu = (p.followupPlans || []);
-  var realFu = allFu.filter(function (f) { return f.baseDate !== 'TEMPLATE'; });
+  /* 随访：以「放疗结束日」为第 0 个月推算到期日 */
+  var realFu = (p.followupPlans || []).filter(function (f) { return f.baseDate !== 'TEMPLATE'; });
   var pend = pendingFollowups(p).sort(function (a, b) { return String(a.dueDate).localeCompare(String(b.dueDate)); });
   var doneFu = realFu.filter(function (f) { return f.done; }).sort(function (a, b) { return String(b.doneAt).localeCompare(String(a.doneAt)); });
   var nxt = pend[0] || null;
+  var fprog = followupProgress(p);
+  var fbase = followupBase(p);
+  var tEnd = treatmentEndOf(p);
 
   h += '<div class="card"><div class="section-title">随访管理 ' +
-    '<span class="chip sm">已完成 ' + doneFu.length + ' 次</span></div>' +
-    '<div class="hint" style="margin-bottom:8px;line-height:1.7">到期日按「间隔」自动推算' +
-    (followupBase(p) ? '；当前基准 ' + dateOnly(followupBase(p)) : '') + '。完成一次后自动排下一次。</div>' +
-    (nxt ? '<div class="event" style="border-color:var(--pri)"><div class="head"><span class="chip pri">下一次随访</span>' +
-      (nxt.dueDate <= todayStr() ? '<span class="chip danger">已到期</span>' : '<span class="chip warn">待随访</span>') +
-      '<span class="chip sm">' + esc(intervalText(nxt.offsetN, nxt.offsetUnit)) + '</span></div>' +
-      '<div class="content">' + dateOnly(nxt.dueDate) + (nxt.note ? ' · ' + esc(nxt.note) : '') + '</div>' +
-      '<div class="acts"><button class="btn sm primary" data-act="followup-done" data-id="' + nxt.id + '">完成本次</button>' +
-      '<button class="btn sm" data-act="followup-edit" data-id="' + nxt.id + '">改间隔</button>' +
-      '<button class="btn sm" data-act="followup-del" data-id="' + nxt.id + '">删除</button></div></div>'
-      : '<div class="hint" style="padding:6px 0">暂无待随访（' + (realFu.length ? '全部已完成' : '尚未设置随访模板') + '）</div>') +
+    (fprog.total ? '<span class="chip sm">已随访 ' + fprog.done + '/' + fprog.total + ' 次</span>' : '<span class="chip sm">未设定</span>') +
+    '</div>' +
+    '<div class="hint" style="margin-bottom:8px;line-height:1.7">' +
+    (tEnd
+      ? '起算：放疗结束日 <b>' + dateOnly(tEnd) + '</b>（' + treatmentEndNote(p) + '）'
+      : '该患者尚无排程，随访起算日请在模板中手动指定') +
+    '。到期日按时长自动推算，完成一次后可继续排下一次。</div>' +
+    (nxt ? (function () {
+      var over = daysBetween(nxt.dueDate, todayStr());     /* >0 表示已逾期 */
+      var left = daysBetween(todayStr(), nxt.dueDate);
+      var badge = over > 0 ? '<span class="chip danger">逾期 ' + over + ' 天</span>'
+        : (nxt.dueDate === todayStr() ? '<span class="chip danger">今日到期</span>'
+          : '<span class="chip warn">还有 ' + left + ' 天</span>');
+      return '<div class="event" style="border-color:var(--pri)"><div class="head"><span class="chip pri">下一次随访</span>' +
+        badge + '<span class="chip sm">放疗后 ' + esc(intervalText(nxt.offsetN, nxt.offsetUnit)) + '</span></div>' +
+        '<div class="content">' + dateOnly(nxt.dueDate) + (nxt.note ? ' · ' + esc(nxt.note) : '') + '</div>' +
+        '<div class="acts"><button class="btn sm primary" data-act="followup-done" data-id="' + nxt.id + '">完成本次</button>' +
+        '<button class="btn sm" data-act="followup-edit" data-id="' + nxt.id + '">改间隔</button>' +
+        '<button class="btn sm" data-act="followup-del" data-id="' + nxt.id + '">删除</button></div></div>';
+    })()
+      : '<div class="hint" style="padding:6px 0">' +
+      (realFu.length ? '全部随访已完成' + (fprog.total ? '（共 ' + fprog.total + ' 次）' : '') : '尚未设定随访模板，点下方按钮按病种一键生成') + '</div>') +
     '<div class="btnrow">' +
-    '<button class="btn sm addbtn" data-act="followup-template">' + (realFu.length ? '修改随访模板 / 重新排期' : '设定随访模板（自动排期）') + '</button>' +
+    '<button class="btn sm addbtn" data-act="followup-template">' + (realFu.length ? '修改随访模板 / 重新排期' : '设定随访模板（按病种）') + '</button>' +
     '<button class="btn sm" data-act="add-followup">＋ 单次随访</button>' +
     (pend.length > 1 ? '<button class="btn sm" data-act="followup-all">全部随访（' + pend.length + '）</button>' : '') +
     (doneFu.length ? '<button class="btn sm" data-act="followup-history">随访历史（' + doneFu.length + '）</button>' : '') +
@@ -1760,15 +1826,16 @@ function sheetReactionFollow(p, r) {
 function sheetFollowup(p, f) {
   if (!p) { closeSheet(); return; }
   var isNew = !f;
-  var base = (f && f.baseDate && f.baseDate !== 'TEMPLATE') ? f.baseDate : (followupBase(p) || p.completedAt || todayStr());
+  var base = (f && f.baseDate && f.baseDate !== 'TEMPLATE') ? f.baseDate : (followupBase(p) || todayStr());
   var d = f || { offsetN: 3, offsetUnit: 'm', note: '' };
   var initDue = addInterval(base, d.offsetN, d.offsetUnit);
 
   openSheet({
     title: isNew ? '添加随访' : '编辑随访', okText: '保存',
     body:
-      '<div class="hint" style="margin-bottom:10px;line-height:1.7">到期日 = 基准日期 + 间隔，自动推算</div>' +
-      field('基准日期（从这天起算）', textInput('baseDate', base, '', 'date'), '通常为「治疗完成日」或「上次随访完成日」') +
+      '<div class="hint" style="margin-bottom:10px;line-height:1.7">到期日 = 起算日 + 间隔，自动推算</div>' +
+      field('起算日期（放疗结束日）', textInput('baseDate', base, '', 'date'),
+        treatmentEndOf(p) ? ('放疗结束日 ' + treatmentEndOf(p)) : '该患者尚无排程，可手动填写') +
       '<div class="field2">' +
       '<div class="field"><label>间隔</label>' + numberInput('offsetN', d.offsetN, '如 3', '1') + '</div>' +
       '<div class="field"><label>单位</label><select name="offsetUnit" id="fuUnit">' +
@@ -1827,7 +1894,9 @@ function sheetFollowupTemplate(p) {
   var tpl = followupTemplate(p);
   var rows = tpl.length ? tpl.map(function (t) { return { n: t.offsetN, u: t.offsetUnit, note: t.note || '' }; })
     : [{ n: 1, u: 'm' }, { n: 3, u: 'm' }, { n: 6, u: 'm' }, { n: 12, u: 'm' }];
-  var base = p.completedAt ? dateOnly(p.completedAt) : todayStr();
+  /* 起算日默认为「放疗结束日」，与归档时间无关 */
+  var base = followupTplBase(p) || treatmentEndOf(p) || todayStr();
+  var schedEnd = scheduleEnd(p);
 
   /* 从界面读回编辑后的序列。
      必须定义在外层作用域：onSave 与 afterRender 都要用（放在 afterRender 内会取不到）。 */
@@ -1861,11 +1930,12 @@ function sheetFollowupTemplate(p) {
   openSheet({
     title: '随访模板（自动排期）', okText: '保存并排期',
     body:
-      '<div class="hint" style="margin-bottom:10px;line-height:1.7">设定「第几次、间隔多久」，保存后自动算出每次随访日期并排入待办。</div>' +
-      field('起算日期（治疗完成日）', textInput('base', base, '', 'date')) +
-      '<div class="field"><label>常用模板（点一下套用，之后可改）</label><div class="seg">' +
+      '<div class="hint" style="margin-bottom:10px;line-height:1.7">设定「第几次、间隔多久」，保存后自动算出每次随访日期并排入待办。间隔以<b>放疗结束日</b>为第 0 个月计算。</div>' +
+      field('起算日期（放疗结束日）', textInput('base', base, '', 'date'),
+        schedEnd ? ('按排程算出的最后治疗日：' + schedEnd + '（＋' + treatmentEndNote(p) + '）') : '该患者尚无排程，可手动填写') +
+      '<div class="field"><label>常用模板（点一下套用，之后可逐行修改）</label><div class="seg">' +
       FOLLOWUP_TEMPLATES.map(function (t, i) { return '<button type="button" class="tpl" data-i="' + i + '">' + esc(t.name) + '</button>'; }).join('') +
-      '</div></div>' +
+      '</div><div class="hint" style="margin-top:6px">模板为通用参考，请按本科室规程调整间隔与复查项目。</div></div>' +
       '<div class="field"><label>随访序列</label><div id="tplRows">' + rowsHtml() + '</div>' +
       '<button type="button" class="btn sm addbtn" id="tplAdd">＋ 增加一次随访</button></div>' +
       '<div class="hint" id="tplPreview" style="line-height:1.9"></div>',
@@ -1874,13 +1944,21 @@ function sheetFollowupTemplate(p) {
       var items = rows.filter(function (r) { return parseInt(r.n, 10) > 0; });
       if (!items.length) { toast('请至少设置一次随访'); return false; }
       if (!v.base) { toast('请填写起算日期'); return false; }
-      /* 保留已完成的随访记录，重排全部未完成的 */
+      /* 保留已完成的随访记录，且不把已完成的次数重新生成为待随访（否则会重复） */
       var done = (p.followupPlans || []).filter(function (f) { return f.baseDate !== 'TEMPLATE' && f.done; });
-      var tplPlans = buildFollowupPlans(items, v.base).map(function (f) { f.baseDate = 'TEMPLATE'; return f; });
-      p.followupPlans = done.concat(buildFollowupPlans(items, v.base)).concat(tplPlans);
-      var plans = buildFollowupPlans(items, v.base);
+      var doneKeys = {};
+      done.forEach(function (f) { doneKeys[f.offsetN + '|' + f.offsetUnit] = 1; });
+      var pendItems = items.filter(function (it) { return !doneKeys[it.n + '|' + it.u]; });
+      var tplPlans = buildFollowupPlans(items, v.base).map(function (f) {
+        f.tplBase = v.base; f.baseDate = 'TEMPLATE'; return f;
+      });
+      p.followupPlans = done.concat(buildFollowupPlans(pendItems, v.base)).concat(tplPlans);
+      var plans = buildFollowupPlans(pendItems, v.base);
       save(); render();
-      toast('已生成 ' + plans.length + ' 次随访，最早 ' + dateOnly(plans[0].dueDate));
+      var skipped = items.length - pendItems.length;
+      toast('已按放疗结束日排出 ' + plans.length + ' 次随访' +
+        (skipped ? '（' + skipped + ' 次已完成，不再重复）' : '') +
+        (plans.length ? '，最早 ' + dateOnly(plans[0].dueDate) : ''));
     },
     afterRender: function () {
       function updatePreview() {
@@ -1890,8 +1968,10 @@ function sheetFollowupTemplate(p) {
         var items = rows.filter(function (r) { return parseInt(r.n, 10) > 0; });
         var plans = buildFollowupPlans(items, base2);
         document.getElementById('tplPreview').innerHTML = plans.length
-          ? '<b>将生成 ' + plans.length + ' 次随访：</b><br>' + plans.map(function (f, i) {
-            return '第 ' + (i + 1) + ' 次 · ' + dateOnly(f.dueDate) + '（' + intervalText(f.offsetN, f.offsetUnit) + '）' + (f.note ? ' · ' + esc(f.note) : '');
+          ? '<b>将生成 ' + plans.length + ' 次随访（自 ' + dateOnly(base2) + ' 起算）：</b><br>' + plans.map(function (f, i) {
+            var dd = daysBetween(base2, f.dueDate);
+            return '第 ' + (i + 1) + ' 次 · ' + dateOnly(f.dueDate) + '（放疗后 ' + intervalText(f.offsetN, f.offsetUnit) +
+              (dd > 0 ? '，约 ' + dd + ' 天' : '') + '）' + (f.note ? ' · ' + esc(f.note) : '');
           }).join('<br>')
           : '尚未设置随访';
       }
@@ -2437,7 +2517,8 @@ function nextAfter(p, f) {
   }
   if (idx < 0 || idx + 1 >= tpl.length) return null;   /* 已是最后一次 */
   var t = tpl[idx + 1];
-  var base = dateOnly(f.doneAt) || todayStr();
+  /* 起算点仍锚定「放疗结束日」，不随上一次实际完成时间漂移 */
+  var base = followupBase(p) || todayStr();
   /* 若该次已存在（未完成）则不重复生成 */
   var exist = pendingFollowups(p).filter(function (x) {
     return x.offsetN === t.offsetN && x.offsetUnit === t.offsetUnit;
@@ -2455,14 +2536,19 @@ function delPause(pid, id) { var p = getPatient(pid); if (!p) return; if (!confi
 function delExtra(pid, id) { var p = getPatient(pid); if (!p) return; if (!confirm('确定删除这条加照记录？')) return; p.extras = (p.extras || []).filter(function (x) { return x.id !== id; }); save(); render(); toast('已删除'); }
 function completePatient(p) {
   if (!p) { closeSheet(); return; }
+  var end = scheduleEnd(p);
+  var tot = parseInt(p.fractions, 10) || 0;
   openSheet({
     title: '完成治疗', okText: '确认完成',
-    body: '<div class="hint" style="margin-bottom:8px">已标记完成 ' + doneCount(p) + '/' + (parseInt(p.fractions, 10) || 0) + ' 次</div>' +
-      field('完成日期', textInput('doneDate', todayStr(), '', 'date')) +
-      field('下次随访日期（可选）', textInput('fuDate', '', '', 'date')),
+    body: '<div class="hint" style="margin-bottom:8px">按日期推算已完成 ' + doneCount(p) + '/' + tot + ' 次' +
+      (end ? '，排程最后治疗日 ' + end : '') + '</div>' +
+      field('完成日期', textInput('doneDate', end || todayStr(), '', 'date'),
+        end ? '默认取排程的最后治疗日；若实际结束时间不同请修改' : '该患者尚无排程，默认今天') +
+      '<div class="hint" style="padding:9px 11px;background:var(--pri-soft);border-radius:9px;line-height:1.75;margin:0 0 12px">' +
+      '归档后可在患者详情页设定随访模板，随访日期一律以「放疗结束日」为第 0 个月起算。</div>',
     onSave: function (v) {
-      p.status = '治疗完成'; p.completedAt = v.doneDate || todayStr();
-      if (v.fuDate) { p.followupPlans = p.followupPlans || []; p.followupPlans.push({ id: uid('fp'), dueDate: v.fuDate, note: '治疗结束后随访', done: false }); }
+      p.status = '治疗完成';
+      p.completedAt = v.doneDate || end || todayStr();
       save(); render(); toast('已标记治疗完成');
     }
   });
@@ -2668,8 +2754,20 @@ function buildDemoState() {
       startDate: d(2), status: '在治', doneDates: [], treatDays: [1, 2, 3, 4, 5], pauses: [], extras: [], reactions: [] },
     { name: '陈美华', sex: '女', age: '52', mrn: 'RT2026004', diagnosis: '直肠癌术后 pT3N1M0 ⅢB期', purpose: '术后辅助', technique: 'IMRT', physician: '赵医生',
       planStatus: '已通过', totalDose: '50.4', fractions: '28', dosePerFraction: '1.8', simDate: d(-72), position: '俯卧位',
-      startDate: d(-68), status: '治疗完成', _doneCount: 28, pauses: [], extras: [], completedAt: d(-31),
+      startDate: d(-68), status: '治疗完成', _doneCount: 28, pauses: [], extras: [], completedAt: d(-29),
       _followupTpl: [{ n: 1, u: 'm', note: '复查盆腔 MRI、CEA' }, { n: 3, u: 'm', note: '复查盆腔 MRI、CEA' }, { n: 6, u: 'm', note: '复查胸腹 CT' }, { n: 12, u: 'm', note: '全面复查' }] },
+    { name: '周敏', sex: '女', age: '46', mrn: 'RT2026007', diagnosis: '左乳浸润性导管癌 pT2N1M0 ⅡB期', purpose: '术后辅助', technique: 'IMRT', physician: '王医生',
+      planStatus: '已通过', totalDose: '50', fractions: '25', dosePerFraction: '2.0', simDate: d(-92), position: '仰卧位（乳腺托架）',
+      startDate: d(-85), status: '治疗完成', pauses: [], extras: [], completedAt: d(-50),
+      _followupTpl: [
+        { n: 3, u: 'm', note: '复查乳腺超声、血常规、肝肾功能' },
+        { n: 6, u: 'm', note: '复查乳腺超声、胸部CT' },
+        { n: 12, u: 'm', note: '复查钼靶、胸腹CT、肿瘤标志物' },
+        { n: 18, u: 'm', note: '复查乳腺超声、胸部CT' },
+        { n: 24, u: 'm', note: '复查钼靶、胸腹CT、肿瘤标志物' },
+        { n: 36, u: 'm', note: '复查钼靶、胸腹CT、肿瘤标志物' },
+        { n: 60, u: 'm', note: '年度复查：钼靶、胸部CT、肿瘤标志物' }
+      ] },
     { name: '刘国强', sex: '男', age: '67', mrn: 'RT2026005', diagnosis: '前列腺癌 T2cN0M0', purpose: '根治性', technique: 'VMAT', physician: '',
       planStatus: '已通过', totalDose: '76', fractions: '38', dosePerFraction: '2.0', simDate: d(-26), position: '仰卧位（膀胱充盈）',
       startDate: d(-22), status: '在治', _doneCount: 15,
@@ -2677,15 +2775,15 @@ function buildDemoState() {
       reactions: [{ site: '放射性膀胱炎', grade: '2级（中）', foundAt: d(-4) + 'T14:00', content: '尿频、尿急，排尿轻度疼痛', status: '已复查未解除', nextCheckAt: d(-1), plan: '多饮水，碱化尿液，必要时抗炎', planAt: d(-4) + 'T14:30', followups: [{ at: d(-1) + 'T11:00', content: '复查尿常规白细胞较前下降，症状稍有缓解' }] }] }
   ];
   var st = normalize({ version: 2, updatedAt: '', patients: P });
-  /* 完成次数由日期推算，无需预置；仅生成随访模板 */
+  /* 完成次数由日期推算，无需预置；处方次数已用尽，随访模板以「放疗结束日」起算 */
   st.patients.forEach(function (p, i) {
+    if (P[i] && P[i].completedAt) p.completedAt = P[i].completedAt;
     var tpl = P[i] && P[i]._followupTpl;
     if (tpl && tpl.length) {
-      var cb = p.completedAt ? dateOnly(p.completedAt) : todayStr();
+      var cb = treatmentEndOf(p) || todayStr();
       p.followupPlans = buildFollowupPlans(tpl, cb)
-        .concat(buildFollowupPlans(tpl, cb).map(function (f) { f.baseDate = 'TEMPLATE'; return f; }));
+        .concat(buildFollowupPlans(tpl, cb).map(function (f) { f.tplBase = cb; f.baseDate = 'TEMPLATE'; return f; }));
     }
-    if (P[i] && P[i].completedAt) p.completedAt = P[i].completedAt;
   });
   return st;
 }
