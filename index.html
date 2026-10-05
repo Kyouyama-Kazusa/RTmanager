@@ -226,7 +226,7 @@ button,input,select,textarea{font:inherit;color:inherit}
 var LS_KEY = 'radiotherapy.v1';
 var SNAP_PREFIX = 'radiotherapy.snap.';
 var SNAP_KEEP = 7;
-var APP_VERSION = '0.8.0';
+var APP_VERSION = '0.8.1';
 
 var SEXES = ['男', '女'];
 var PURPOSES = ['根治性', '术后辅助', '术前新辅助', '姑息性'];
@@ -555,13 +555,64 @@ var AI_PROVIDERS = [
 
 var AI_FIELDS = ['name', 'mrn', 'sex', 'age', 'diagnosis', 'purpose', 'technique', 'physician', 'planStatus', 'totalDose', 'fractions', 'dosePerFraction', 'simDate', 'startDate', 'position'];
 
+/* 字段中文名（用于缺失提示） */
+var AI_FIELD_LABEL = {
+  name: '姓名', mrn: '住院号', sex: '性别', age: '年龄', diagnosis: '诊断',
+  purpose: '放疗目的', technique: '放疗技术', physician: '主管医生', planStatus: '流程状态',
+  totalDose: '总剂量', fractions: '总次数', dosePerFraction: '单次剂量',
+  simDate: '定位日期', startDate: '开始日期', position: '体位'
+};
+/* 字段重要度：
+   required  必填（缺失则无法导入）
+   schedule  排程必需（缺失则无法自动生成治疗日历）
+   suggest   建议补充（不影响导入与排程）
+   未列入的字段不参与缺失提示，避免满屏标记 */
+var AI_FIELD_LEVEL = {
+  name: 'required',
+  startDate: 'schedule', fractions: 'schedule',
+  diagnosis: 'suggest', dosePerFraction: 'suggest', totalDose: 'suggest'
+};
+var AI_LEVEL_TAG = { required: '待补·必填', schedule: '待补·排程必需', suggest: '待补' };
+
+/* 是否所有字段都为空（完全空白的条目丢弃，有任意信息则保留） */
+function aiRowEmpty(o) {
+  for (var i = 0; i < AI_FIELDS.length; i++) if (o[AI_FIELDS[i]]) return false;
+  return true;
+}
+/* 统计某条识别结果的缺失字段 */
+function aiMissingOf(o) {
+  var miss = { required: [], schedule: [], suggest: [] };
+  AI_FIELDS.forEach(function (k) {
+    if (o[k]) return;
+    var lv = AI_FIELD_LEVEL[k];
+    if (miss[lv]) miss[lv].push(AI_FIELD_LABEL[k]);
+  });
+  miss.count = miss.required.length + miss.schedule.length + miss.suggest.length;
+  miss.blocking = miss.required.length > 0;      /* 缺必填 → 无法导入 */
+  miss.needCare = miss.schedule.length > 0;      /* 缺排程项 → 能导入但不能排程 */
+  miss.all = miss.required.concat(miss.schedule, miss.suggest);
+  return miss;
+}
+/* 复核界面用：带缺失标记的 label（返回 HTML，调用方不要再 esc） */
+function aiLabelHtml(p, key, text) {
+  var name = text || AI_FIELD_LABEL[key] || key;
+  if (p[key]) return esc(name);
+  var lv = AI_FIELD_LEVEL[key];
+  if (!lv) return esc(name);
+  var cls = lv === 'required' ? 'danger' : (lv === 'schedule' ? 'warn' : '');
+  return esc(name) + ' <span class="chip ' + cls + ' sm">' + AI_LEVEL_TAG[lv] + '</span>';
+}
+
 /* 默认提示词：约束枚举值，降低后续人工修改成本 */
 function defaultAiPrompt() {
   return '你是放疗科病历录入助手。从用户提供的材料（文字或图片）中提取患者信息，只输出 JSON。\n\n' +
     '严格要求：\n' +
     '1. 只输出 JSON 本体，不要任何解释文字，不要 markdown 代码块\n' +
     '2. 输出格式：{"patients":[{...}]}\n' +
-    '3. 字段（无法确定的填空字符串 ""，不要编造）：\n' +
+    '3. 材料中出现的每一位患者都必须输出一条记录，即使信息不完整；\n' +
+    '   某个字段材料里没写就填空字符串 ""，**绝对不要因为信息不全而跳过该患者**\n' +
+    '4. 同一位患者的信息若分散在多处，合并成一条记录\n' +
+    '5. 字段说明（无法确定的填空字符串 ""，不要编造，不要猜测）：\n' +
     '   name 姓名；mrn 住院号/病案号；sex 性别（只能是「男」或「女」）；age 年龄（只要数字）\n' +
     '   diagnosis 诊断（含部位/病理/分期）；physician 主管医生；position 体位/固定装置\n' +
     '   purpose 放疗目的（只能从 ' + PURPOSES.join('/') + ' 中选）\n' +
@@ -569,8 +620,7 @@ function defaultAiPrompt() {
     '   planStatus 流程状态（只能从 ' + PLAN_STATUSES.join('/') + ' 中选）\n' +
     '   totalDose 总剂量（只要数字，单位 Gy）；fractions 总次数（只要数字）；dosePerFraction 单次剂量（只要数字）\n' +
     '   simDate 定位日期（YYYY-MM-DD）；startDate 放疗开始日期（YYYY-MM-DD，若写「X月X日开始」请转成日期）\n' +
-    '4. 材料中若含多个患者，全部提取\n' +
-    '5. 日期只有月日没有年份时，按当前年份 ' + new Date().getFullYear() + ' 推断';
+    '6. 日期只有月日没有年份时，按当前年份 ' + new Date().getFullYear() + ' 推断';
 }
 
 function aiConfig() {
@@ -745,7 +795,8 @@ function normalizeAiPatients(raw) {
       if (m) o[k] = m[1] + '-' + pad2(m[2]) + '-' + pad2(m[3]);
       else if (!/^\d{4}-\d{2}-\d{2}$/.test(o[k])) o[k] = '';
     });
-    if (o.name || o.mrn) out.push(o);      /* 无姓名无住院号的丢弃 */
+    if (!aiRowEmpty(o)) out.push(o);       /* 只要有任意信息就保留，缺字段交人工补充；
+                                              完全空白的条目丢弃（多为模型误输出） */
   });
   return out;
 }
@@ -1732,7 +1783,12 @@ function runAiParse(text, images) {
         return;
       }
       aiDraft.patients = list;
-      toast('识别到 ' + list.length + ' 位患者，请复核');
+      var missCnt = list.filter(function (x) { var m = aiMissingOf(x); return m.count > 0; }).length;
+      var noNameCnt = list.filter(function (x) { return aiMissingOf(x).blocking; }).length;
+      var t = '识别到 ' + list.length + ' 位';
+      if (missCnt) t += '，其中 ' + missCnt + ' 位需补充信息';
+      if (noNameCnt) t += '（' + noNameCnt + ' 位缺姓名）';
+      toast(t + '，请复核');
       openAiReview();
     })
     .catch(function (err) {
@@ -1744,61 +1800,143 @@ function runAiParse(text, images) {
 /* ---------- 复核 ---------- */
 function aiDraftKey(i, k) { return 'ai_' + i + '_' + k; }
 
+/* 把用户在复核界面上改动过的值收回草稿。
+   重建界面前必须调用，否则会丢掉已填内容。 */
+function syncAiDraftFromSheet() {
+  var vals = sheetValues();
+  (aiDraft.patients || []).forEach(function (p, i) {
+    AI_FIELDS.forEach(function (k) {
+      var v = vals[aiDraftKey(i, k)];
+      if (v !== undefined) p[k] = String(v == null ? '' : v).trim();
+    });
+  });
+}
+/* 手动补录一条（应对 AI 完全漏掉的患者） */
+function addAiBlankRow() {
+  if (sheetCtx) syncAiDraftFromSheet();
+  var o = {};
+  AI_FIELDS.forEach(function (k) { o[k] = ''; });
+  aiDraft.patients.push(o);
+  openAiReview();
+  toast('已新增一条空记录，请填写后导入');
+}
+
 function openAiReview() {
   var list = aiDraft.patients;
-  var body = '<div class="hint" style="padding:9px 11px;background:var(--warn-soft);border-radius:9px;line-height:1.75;margin-bottom:12px">' +
-    '⚠ 以下内容由 AI 识别，<b>请逐项核对后再导入</b>。识别不到或错误的字段请直接修改或清空。</div>';
-  body += '<div class="hint" style="margin-bottom:8px">共 ' + list.length + ' 位待导入</div>';
+  /* 汇总缺失情况 */
+  var sum = { full: 0, needCare: 0, blocking: 0, missTotal: 0 };
+  var missNames = [];
+  list.forEach(function (p) {
+    var m = aiMissingOf(p);
+    sum.missTotal += m.count;
+    if (m.blocking) { sum.blocking++; return; }
+    if (m.needCare) { sum.needCare++; return; }
+    if (m.count === 0) sum.full++;
+    if (m.all.length) missNames.push(m.all.join('、'));
+  });
+
+  var head = '';
+  if (sum.blocking || sum.needCare) {
+    var lv = sum.blocking ? 'var(--danger-soft)' : 'var(--warn-soft)';
+    head = '<div class="hint" style="padding:9px 11px;background:' + lv + ';border-radius:9px;line-height:1.8;margin-bottom:10px">' +
+      '⚠ AI 识别结果<b>不完整</b>，已识别的字段已自动填入，请补充标记为「待补」的项目。<br>' +
+      '本批 ' + list.length + ' 位：' +
+      (sum.full ? '<b>' + sum.full + '</b> 位信息完整；' : '') +
+      (sum.needCare ? '<b>' + sum.needCare + '</b> 位缺排程信息；' : '') +
+      (sum.blocking ? '<b>' + sum.blocking + '</b> 位缺姓名（无法导入）' : '') +
+      '<br>共待补 <b>' + sum.missTotal + '</b> 项' +
+      '</div>';
+  } else if (sum.full === list.length && list.length) {
+    head = '<div class="hint" style="padding:9px 11px;background:var(--ok-soft);border-radius:9px;line-height:1.75;margin-bottom:10px">' +
+      '✔ ' + list.length + ' 位患者的关键信息均已识别到，请核对后导入。</div>';
+  }
+
+  var body = head +
+    '<div class="hint" style="padding:9px 11px;background:var(--pri-soft);border-radius:9px;line-height:1.75;margin-bottom:12px">' +
+    '⚠ 内容由 AI 识别，<b>请逐项核对后再导入</b>。识别错误或不需要的字段请直接修改或清空。</div>' +
+    (list.length ? '<div class="hint" style="margin-bottom:8px">共 <b>' + list.length + '</b> 位待导入' +
+      (missNames.length ? ' · 清单：' + esc(missNames.join('；')) : '') + '</div>' : '');
+
+  if (!list.length) {
+    body += '<div class="hint">识别结果为空，可手动补录或在上一页重新识别。</div>';
+  }
 
   list.forEach(function (p, i) {
-    body += '<div class="event" style="padding:11px 12px">' +
+    var m = aiMissingOf(p);
+    var badge;
+    if (m.blocking) badge = '<span class="chip danger sm">缺姓名</span>';
+    else if (m.count === 0) badge = '<span class="chip ok sm">信息完整</span>';
+    else badge = '<span class="chip warn sm">待补 ' + m.count + ' 项</span>';
+
+    body += '<div class="event" style="padding:11px 12px' + (m.blocking ? ';border-color:#f0c9c4' : '') + '">' +
       '<div class="head" style="justify-content:space-between">' +
-      '<span class="chip pri">第 ' + (i + 1) + ' 位</span>' +
+      '<span class="chip pri">第 ' + (i + 1) + ' 位</span>' + badge +
       '<button type="button" class="btn sm danger" data-act="ai-drop" data-i="' + i + '" style="margin-left:auto">移除此条</button></div>' +
+      (m.count ? '<div class="hint" style="margin-top:6px;line-height:1.7">待补充：' + esc(m.all.join('、')) + '</div>' : '') +
       '<div class="field2" style="margin-top:8px">' +
-      '<div class="field" style="margin-bottom:8px"><label>姓名 *</label>' + textInput(aiDraftKey(i, 'name'), p.name, '必填') + '</div>' +
-      '<div class="field" style="margin-bottom:8px"><label>住院号</label>' + textInput(aiDraftKey(i, 'mrn'), p.mrn) + '</div></div>' +
+      '<div class="field" style="margin-bottom:8px"><label>' + aiLabelHtml(p, 'name', '姓名') + ' *</label>' + textInput(aiDraftKey(i, 'name'), p.name, '必填') + '</div>' +
+      '<div class="field" style="margin-bottom:8px"><label>' + aiLabelHtml(p, 'mrn') + '</label>' + textInput(aiDraftKey(i, 'mrn'), p.mrn) + '</div></div>' +
       '<div class="field2">' +
-      '<div class="field" style="margin-bottom:8px"><label>性别</label>' + aiSelect(aiDraftKey(i, 'sex'), p.sex, SEXES) + '</div>' +
-      '<div class="field" style="margin-bottom:8px"><label>年龄</label>' + textInput(aiDraftKey(i, 'age'), p.age) + '</div></div>' +
-      field('诊断', areaInput(aiDraftKey(i, 'diagnosis'), p.diagnosis, '含部位/病理/分期')) +
+      '<div class="field" style="margin-bottom:8px"><label>' + aiLabelHtml(p, 'sex') + '</label>' + aiSelect(aiDraftKey(i, 'sex'), p.sex, SEXES) + '</div>' +
+      '<div class="field" style="margin-bottom:8px"><label>' + aiLabelHtml(p, 'age') + '</label>' + textInput(aiDraftKey(i, 'age'), p.age) + '</div></div>' +
+      '<div class="field"><label>' + aiLabelHtml(p, 'diagnosis') + '</label>' + areaInput(aiDraftKey(i, 'diagnosis'), p.diagnosis, '含部位/病理/分期') + '</div>' +
       '<div class="field2">' +
-      '<div class="field" style="margin-bottom:8px"><label>放疗目的</label>' + aiSelect(aiDraftKey(i, 'purpose'), p.purpose, PURPOSES) + '</div>' +
-      '<div class="field" style="margin-bottom:8px"><label>放疗技术</label>' + aiSelect(aiDraftKey(i, 'technique'), p.technique, TECHNIQUES) + '</div></div>' +
+      '<div class="field" style="margin-bottom:8px"><label>' + aiLabelHtml(p, 'purpose') + '</label>' + aiSelect(aiDraftKey(i, 'purpose'), p.purpose, PURPOSES) + '</div>' +
+      '<div class="field" style="margin-bottom:8px"><label>' + aiLabelHtml(p, 'technique') + '</label>' + aiSelect(aiDraftKey(i, 'technique'), p.technique, TECHNIQUES) + '</div></div>' +
       '<div class="field2">' +
-      '<div class="field" style="margin-bottom:8px"><label>主管医生</label>' + textInput(aiDraftKey(i, 'physician'), p.physician) + '</div>' +
-      '<div class="field" style="margin-bottom:8px"><label>流程状态</label>' + aiSelect(aiDraftKey(i, 'planStatus'), p.planStatus, PLAN_STATUSES) + '</div></div>' +
+      '<div class="field" style="margin-bottom:8px"><label>' + aiLabelHtml(p, 'physician') + '</label>' + textInput(aiDraftKey(i, 'physician'), p.physician) + '</div>' +
+      '<div class="field" style="margin-bottom:8px"><label>' + aiLabelHtml(p, 'planStatus') + '</label>' + aiSelect(aiDraftKey(i, 'planStatus'), p.planStatus, PLAN_STATUSES) + '</div></div>' +
       '<div class="field2">' +
-      '<div class="field" style="margin-bottom:8px"><label>总剂量 Gy</label>' + numberInput(aiDraftKey(i, 'totalDose'), p.totalDose, '', '0.1') + '</div>' +
-      '<div class="field" style="margin-bottom:8px"><label>总次数</label>' + numberInput(aiDraftKey(i, 'fractions'), p.fractions, '', '1') + '</div>' +
-      '<div class="field" style="margin-bottom:8px"><label>单次 Gy</label>' + numberInput(aiDraftKey(i, 'dosePerFraction'), p.dosePerFraction, '', '0.01') + '</div></div>' +
+      '<div class="field" style="margin-bottom:8px"><label>' + aiLabelHtml(p, 'totalDose') + '</label>' + numberInput(aiDraftKey(i, 'totalDose'), p.totalDose, '', '0.1') + '</div>' +
+      '<div class="field" style="margin-bottom:8px"><label>' + aiLabelHtml(p, 'fractions') + '</label>' + numberInput(aiDraftKey(i, 'fractions'), p.fractions, '', '1') + '</div>' +
+      '<div class="field" style="margin-bottom:8px"><label>' + aiLabelHtml(p, 'dosePerFraction') + '</label>' + numberInput(aiDraftKey(i, 'dosePerFraction'), p.dosePerFraction, '', '0.01') + '</div></div>' +
       '<div class="field2">' +
-      '<div class="field" style="margin-bottom:8px"><label>定位日期</label>' + textInput(aiDraftKey(i, 'simDate'), p.simDate, '', 'date') + '</div>' +
-      '<div class="field" style="margin-bottom:8px"><label>放疗开始日期</label>' + textInput(aiDraftKey(i, 'startDate'), p.startDate, '', 'date') + '</div></div>' +
-      '<div class="field" style="margin-bottom:0"><label>体位/固定装置</label>' + textInput(aiDraftKey(i, 'position'), p.position) + '</div>' +
+      '<div class="field" style="margin-bottom:8px"><label>' + aiLabelHtml(p, 'simDate') + '</label>' + textInput(aiDraftKey(i, 'simDate'), p.simDate, '', 'date') + '</div>' +
+      '<div class="field" style="margin-bottom:8px"><label>' + aiLabelHtml(p, 'startDate') + '</label>' + textInput(aiDraftKey(i, 'startDate'), p.startDate, '', 'date') + '</div></div>' +
+      '<div class="field" style="margin-bottom:0"><label>' + aiLabelHtml(p, 'position') + '</label>' + textInput(aiDraftKey(i, 'position'), p.position) + '</div>' +
       '</div>';
   });
 
   openSheet({
-    title: '复核识别结果', hideOk: true,
+    title: '复核识别结果',
     body: body,
     actions: [
+      { label: '＋ 手动补一位', act: 'ai-add-row' },
       { label: '取消', act: 'sheet-close' },
-      { label: '确认导入 ' + list.length + ' 位', act: 'ai-commit', primary: true }
+      { label: '确认导入 ' + list.length + ' 位', act: 'ai-commit', primary: true, full: true }
     ]
   });
 }
 
-/* 从复核界面收集并写入 */
+/* 从复核界面收集并写入。
+   允许信息不完整地导入——先建档，缺的字段通过「待办」提醒后续补充。 */
 function commitAiDraft() {
   var vals = sheetValues();
   var list = aiDraft.patients;
-  var added = 0, skipped = 0;
-  var names = [];
-  list.forEach(function (p, i) {
+  var added = 0, noName = 0, noSchedule = 0;
+  var names = [], needScheduleNames = [];
+
+  /* 先预检，让用户知道会发生什么 */
+  var preview = list.map(function (p, i) {
     var o = {};
     AI_FIELDS.forEach(function (k) { o[k] = String(vals[aiDraftKey(i, k)] == null ? '' : vals[aiDraftKey(i, k)]).trim(); });
-    if (!o.name) { skipped++; return; }
+    return o;
+  });
+  var willSkip = preview.filter(function (o) { return !o.name; }).length;
+  var willNeedSchedule = preview.filter(function (o) { return o.name && (!o.startDate || !parseInt(o.fractions, 10)); }).length;
+
+  if (willSkip || willNeedSchedule) {
+    var msg = [];
+    if (willSkip) msg.push('· ' + willSkip + ' 条缺少姓名，将被跳过（姓名是必填项）');
+    if (willNeedSchedule) msg.push('· ' + willNeedSchedule + ' 条缺少「开始日期」或「总次数」，导入后无法自动生成治疗日历，会出现在「待办」中提醒补充');
+    msg.push('');
+    msg.push('确定继续导入吗？');
+    if (!confirm('识别结果仍有缺项：\n\n' + msg.join('\n'))) return false;
+  }
+
+  preview.forEach(function (o) {
+    if (!o.name) { noName++; return; }
+    if (!o.startDate || !parseInt(o.fractions, 10)) { noSchedule++; needScheduleNames.push(o.name); }
     state.patients.push(normalize({
       patients: [Object.assign(o, {
         treatDays: treatDaysCfg(), pauses: [], extras: [], doneDates: [], reactions: [], followupPlans: [], notes: [], status: '在治'
@@ -1807,11 +1945,22 @@ function commitAiDraft() {
     added++;
     names.push(o.name);
   });
+
   if (!added) { toast('没有可导入的患者（姓名不能为空）'); return false; }
   save();
   closeSheet();
   view.page = 'tab'; view.tab = 'ward'; render();
-  toast('已导入 ' + added + ' 位' + (skipped ? '，跳过 ' + skipped + ' 条（无姓名）' : '') + '：' + names.join('、'));
+
+  var tip = '已导入 ' + added + ' 位：' + names.join('、');
+  if (noName) tip += '；跳过 ' + noName + ' 条（无姓名）';
+  toast(tip);
+  if (noSchedule) {
+    setTimeout(function () {
+      alert('另有 ' + noSchedule + ' 位患者的信息不完整，暂无法生成治疗日历：\n\n' +
+        needScheduleNames.join('、') + '\n\n' +
+        '这些患者已进入「待办」，点开补充「放疗开始日期」与「总次数」后即会自动排程。');
+    }, 300);
+  }
   return true;
 }
 
@@ -3113,10 +3262,12 @@ function bind() {
     'ai-unpick': function (el) { aiDraft.images.splice(parseInt(el.dataset.i, 10), 1); renderAiThumbs(); },
     'ai-drop': function (el) {
       if (!confirm('移除这条识别结果？')) return;
+      syncAiDraftFromSheet();          /* 先收回已填内容，避免重建界面时丢失 */
       aiDraft.patients.splice(parseInt(el.dataset.i, 10), 1);
       if (!aiDraft.patients.length) { closeSheet(); toast('已清空识别结果'); return; }
       openAiReview();
     },
+    'ai-add-row': function () { addAiBlankRow(); },
     'ai-commit': function () { commitAiDraft(); },
     'edit-patient': function () { sheetPatient(getPatient(view.pid)); },
     'delete-patient': function () { deletePatient(getPatient(view.pid)); },
