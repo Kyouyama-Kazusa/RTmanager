@@ -132,6 +132,7 @@ button,input,select,textarea{font:inherit;color:inherit}
 .cal-cell .d.we{color:var(--danger)}
 .cal-cell .tagline{font-size:10px;line-height:1.3;border-radius:4px;padding:1px 3px;background:var(--pri-soft);color:var(--pri);font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .cal-cell .tagline.done{opacity:.65;text-decoration:line-through}
+.cal-cell .tagline.boost{background:#EEEDFE;color:#534AB7}
 .cal-cell .tagline.miss{background:var(--danger-soft);color:var(--danger);text-decoration:none}
 .cal-cell .tagline.extra{background:var(--warn-soft);color:var(--warn)}
 .cal-cell .tagline.pause{background:#eef1f5;color:var(--sub)}
@@ -225,7 +226,7 @@ button,input,select,textarea{font:inherit;color:inherit}
 var LS_KEY = 'radiotherapy.v1';
 var SNAP_PREFIX = 'radiotherapy.snap.';
 var SNAP_KEEP = 7;
-var APP_VERSION = '0.7.0';
+var APP_VERSION = '0.8.0';
 
 var SEXES = ['男', '女'];
 var PURPOSES = ['根治性', '术后辅助', '术前新辅助', '姑息性'];
@@ -413,6 +414,10 @@ function normalize(d) {
       treatDays: (p.treatDays && p.treatDays.length) ? p.treatDays : treatDaysCfg(),
       pauses: (p.pauses || []).map(function (x) { return { id: x.id || uid('pa'), from: x.from || '', to: x.to || '', reason: x.reason || '' }; }),
       extras: (p.extras || []).map(function (x) { return { id: x.id || uid('ex'), date: x.date || '', reason: x.reason || '' }; }),
+      /* 计划调整：加量（原计划结束后追加）与提前终止（排程截止日） */
+      boostFractions: p.boostFractions == null ? '' : String(p.boostFractions),
+      boostNote: p.boostNote || '',
+      stopDate: p.stopDate || '',
       doneDates: done,
       reactions: (p.reactions || []).map(function (r) {
         return {
@@ -950,8 +955,14 @@ function followupProgress(p) {
 function computeSchedule(p) {
   var out = [];
   if (!p) return out;
-  var total = parseInt(p.fractions, 10);
-  if (!p.startDate || !total || total <= 0) return out;
+  var base = parseInt(p.fractions, 10);
+  if (!p.startDate || !base || base <= 0) return out;
+  /* 加量：原计划结束后追加的次数（总次数 = 处方次数 + 加量次数） */
+  var boost = parseInt(p.boostFractions, 10) || 0;
+  if (boost < 0) boost = 0;
+  var total = base + boost;
+  /* 提前终止：排程截止到该日（含），之后的治疗不再安排 */
+  var stopDate = p.stopDate ? dateOnly(p.stopDate) : '';
   var days = (p.treatDays && p.treatDays.length) ? p.treatDays : treatDaysCfg();
   var hol = holidays(), mk = makeups();
   var useMk = makeupAsWorkday();
@@ -970,6 +981,8 @@ function computeSchedule(p) {
   while (n < total && guard < 5000) {
     guard++;
     var ds = dstr(cur), dow = cur.getDay();
+    /* 达到提前终止日之后，不再安排任何治疗 */
+    if (stopDate && ds > stopDate) break;
     var isHoliday = Object.prototype.hasOwnProperty.call(hol, ds);
     var isMakeup = Object.prototype.hasOwnProperty.call(mk, ds);
     /* 调休上班日优先于节假日：同一日期既在节假日又在调休时，按工作日治疗 */
@@ -978,7 +991,11 @@ function computeSchedule(p) {
     var blocked = inPause(p, ds) || (isHoliday && !isMakeup && !isExtra);
     if ((baseOk || isExtra) && !blocked) {
       n++;
-      out.push({ date: ds, fraction: n, done: ds <= today, extra: isExtra, reason: isExtra ? extraMap[ds] : '' });
+      out.push({
+        date: ds, fraction: n, done: ds <= today,
+        extra: isExtra, reason: isExtra ? extraMap[ds] : '',
+        boost: n > base                    /* 标记加量次数，界面上区分显示 */
+      });
     }
     cur.setDate(cur.getDate() + 1);
   }
@@ -994,6 +1011,13 @@ function scheduleOn(p, date) { var s = computeSchedule(p); for (var i = 0; i < s
 function todayItemOf(p) { return scheduleOn(p, todayStr()); }
 /* 剩余未治疗次数 */
 function remainCount(p) { return Math.max(0, plannedCount(p) - doneCount(p)); }
+/* 本次放疗的处方总次数（含加量） */
+function totalFractionsOf(p) { return (parseInt(p.fractions, 10) || 0) + (parseInt(p.boostFractions, 10) || 0); }
+/* 提前终止了多少次未做（原计划 − 实际排出的次数） */
+function stoppedShortOf(p) {
+  if (!p.stopDate) return 0;
+  return Math.max(0, totalFractionsOf(p) - plannedCount(p));
+}
 /* 某日是否已完成：按日期推算（计划日期 ≤ 今天），不再依赖手工标记 */
 function isDoneOn(p, date) {
   var ds = dateOnly(date);
@@ -1032,11 +1056,18 @@ function buildTodo() {
         var tot = parseInt(p.fractions, 10);
         var dn = doneCount(p);
         var end = scheduleEnd(p);
+        var plannedN = plannedCount(p);
+        var stoppedN = stoppedShortOf(p);
         /* 疗程已排完（所有计划日期都已过去）但仍是「在治」→ 提示归档 */
-        if (end && end < today && dn >= tot) {
-          reasons.push('疗程已结束'); details.push('计划 ' + tot + ' 次已全部完成，可确认「治疗完成」归档');
-        } else if (dn >= Math.floor(tot * 0.95) && dn < tot) {
-          reasons.push('即将完成'); details.push('已完成 ' + dn + '/' + tot + ' 次');
+        if (end && end < today && dn >= plannedN) {
+          if (stoppedN > 0) {
+            reasons.push('已提前终止');
+            details.push('止于 ' + dateOnly(p.stopDate) + '，实际 ' + plannedN + '/' + totalFractionsOf(p) + ' 次（未执行 ' + stoppedN + ' 次），可确认「治疗完成」归档');
+          } else {
+            reasons.push('疗程已结束'); details.push('计划 ' + plannedN + ' 次已全部完成，可确认「治疗完成」归档');
+          }
+        } else if (dn >= Math.floor(plannedN * 0.95) && dn < plannedN) {
+          reasons.push('即将完成'); details.push('已完成 ' + dn + '/' + plannedN + ' 次');
         }
       }
     }
@@ -1295,17 +1326,35 @@ function renderPatientPage() {
       '<div class="hint">请先填写「放疗开始日期」与「总次数」，系统将自动排程并生成日历。</div>' +
       '<div class="btnrow"><button class="btn sm addbtn" data-act="edit-patient">去填写</button></div></div>';
   } else {
+    var boost = parseInt(p.boostFractions, 10) || 0;
+    var totAll = totalFractionsOf(p);
+    var planned = plannedCount(p);
+    var stopped = stoppedShortOf(p);
+    var dosePer = parseFloat(p.dosePerFraction) || 0;
+    var planDose = totAll * dosePer;
     h += '<div class="card"><div class="section-title">治疗进度' +
-      '<span class="chip pri">' + dn + '/' + tot + ' 次 · ' + accDose.toFixed(1) + ' Gy</span></div>' +
-      '<div class="progress' + (dn >= tot * 0.95 ? ' warn' : '') + '"><div class="fill" style="width:' + Math.min(100, tot ? dn / tot * 100 : 0) + '%"></div></div>' +
-      '<div class="hint" style="margin-top:6px">按日期自动推算：计划日期已过的即计入已完成，无需逐次标记。异常（当天未做）用「本次未做」修正。</div>' +
-      '<div class="kv" style="margin-top:6px"><div class="k">开始日期</div><div class="v">' + dateOnly(p.startDate) + '</div></div>' +
-      '<div class="kv"><div class="k">预计结束</div><div class="v">' + (end || '—') + (end ? '（' + WEEKDAYS[parseD(end).getDay()] + '）' : '') + (missY.length ? ' <span class="chip warn sm">含未录入年份</span>' : '') + '</div></div>' +
+      '<span class="chip pri">' + dn + '/' + planned + ' 次 · ' + accDose.toFixed(1) + ' Gy</span></div>' +
+      '<div class="progress' + (dn >= planned * 0.95 ? ' warn' : '') + '"><div class="fill" style="width:' + Math.min(100, planned ? dn / planned * 100 : 0) + '%"></div></div>' +
+      /* 处方构成：原定 + 加量 - 未执行 */
+      '<div class="kv" style="margin-top:6px"><div class="k">处方次数</div><div class="v">' +
+      tot + ' 次' + (boost ? ' ＋ 加量 <b>' + boost + '</b> 次 ＝ 共 <b>' + totAll + '</b> 次' : '') +
+      (dosePer ? '（计划剂量 ' + planDose.toFixed(1) + ' Gy）' : '') + '</div></div>' +
+      (boost ? '<div class="kv"><div class="k">加量</div><div class="v">' + boost + ' 次' + (p.boostNote ? ' · ' + esc(p.boostNote) : '') + '</div></div>' : '') +
+      (p.stopDate ? '<div class="kv"><div class="k">提前终止</div><div class="v"><span class="chip danger sm">已终止</span> 最后治疗日 ' + dateOnly(p.stopDate) +
+        '，未执行 <b>' + stopped + '</b> 次</div></div>' : '') +
+      '<div class="kv"><div class="k">开始日期</div><div class="v">' + dateOnly(p.startDate) + '</div></div>' +
+      '<div class="kv"><div class="k">' + (p.stopDate ? '实际结束' : '预计结束') + '</div><div class="v">' + (end || '—') + (end ? '（' + WEEKDAYS[parseD(end).getDay()] + '）' : '') +
+      (p.stopDate ? ' <span class="chip warn sm">按终止日重算</span>' : '') + (missY.length ? ' <span class="chip warn sm">含未录入年份</span>' : '') + '</div></div>' +
       (missY.length ? '<div class="hint" style="margin-top:8px;padding:8px 10px;background:var(--warn-soft);border-radius:8px;line-height:1.7">⚠ 排程涉及 <b>' + missY.join('、') + ' 年</b>，暂无该年节假日数据，已按「周一~周五工作日 + 周末休息」估算。补录假期后结束日期会自动重算。</div>' : '') +
       '<div class="kv"><div class="k">治疗日</div><div class="v">' + (p.treatDays || []).map(function (d) { return WEEKDAYS[d]; }).join('、') + '</div></div>' +
       '<div class="kv"><div class="k">已中断</div><div class="v">' + ((p.pauses || []).length ? (p.pauses || []).map(function (x) { return mdLabel(x.from) + '~' + mdLabel(x.to) + (x.reason ? '(' + esc(x.reason) + ')' : ''); }).join('；') : '无') + '</div></div>' +
+      '<div class="hint" style="margin-top:6px">按日期自动推算：计划日期已过的即计入已完成，无需逐次标记。异常（当天未做）用「本次未做」修正。</div>' +
       '<div class="btnrow"><button class="btn sm" data-act="add-pause">＋ 中断/调整</button>' +
       '<button class="btn sm" data-act="add-extra">＋ 加照</button>' +
+      '<button class="btn sm" data-act="add-boost">' + (boost ? '改加量（现有 ' + boost + ' 次）' : '＋ 加量') + '</button>' +
+      (p.stopDate
+        ? '<button class="btn sm" data-act="cancel-stop">取消终止（恢复原计划）</button>'
+        : '<button class="btn sm danger" data-act="add-stop">提前终止</button>') +
       (p.pauses && p.pauses.length ? '<button class="btn sm" data-act="list-pauses">查看中断（' + p.pauses.length + '）</button>' : '') +
       (p.extras && p.extras.length ? '<button class="btn sm" data-act="list-extras">查看加照（' + p.extras.length + '）</button>' : '') +
       '</div></div>';
@@ -1317,8 +1366,8 @@ function renderPatientPage() {
     var cells = {};
     Object.keys(byDate).forEach(function (ds) {
       var x = byDate[ds];
-      var cls = x.done ? 'done' : (x.extra ? 'extra' : '');
-      cells[ds] = '<div class="tagline ' + cls + '">第' + x.fraction + '次' + (x.done ? '✓' : '') + '</div>';
+      var cls = x.extra ? 'extra' : (x.boost ? 'boost' : (x.done ? 'done' : ''));
+      cells[ds] = '<div class="tagline ' + cls + '">第' + x.fraction + '次' + (x.done ? '✓' : '') + (x.boost ? '＋' : '') + '</div>';
     });
     (p.pauses || []).forEach(function (pa) {
       var a = parseD(pa.from), b = parseD(pa.to);
@@ -1330,7 +1379,7 @@ function renderPatientPage() {
     });
     h += '<div class="cal-wrap">' + calHeader(y, m) + calDowRow() + calBody(y, m, cells) +
       '<div class="cal-legend"><span><i style="background:#e5f3f1"></i>待治疗</span><span><i style="background:#e5f3f1;opacity:.6"></i>已完成</span>' +
-      '<span><i style="background:#fdf0e0"></i>加照</span><span><i style="background:#eef1f5"></i>中断</span></div>' +
+      '<span><i style="background:#fdf0e0"></i>加照</span><span><i style="background:#EEEDFE"></i>加量</span><span><i style="background:#eef1f5"></i>中断</span></div>' +
       '<div class="hint" style="margin-top:6px">点日历上的治疗日可登记「本次未做」或加照</div></div>';
   }
 
@@ -2196,7 +2245,8 @@ function sheetExtra(p) {
   if (!p) { closeSheet(); return; }
   openSheet({
     title: '加照（额外治疗日）', okText: '保存',
-    body: '<div class="hint" style="margin-bottom:8px">在该日期额外安排一次治疗（如周末补照）</div>' +
+    body: '<div class="hint" style="margin-bottom:10px;line-height:1.7">在某一天<b>额外补做一次</b>，用于补回漏做的次数。<br>' +
+      '总次数不变，疗程相应提前结束。<br>（若要「原计划结束后再增加几次」，请用「加量」）</div>' +
       field('日期', textInput('date', todayStr(), '', 'date')) +
       field('原因', areaInput('reason', '', '如 周末补照 / 假期前加照')),
     onSave: function (v) {
@@ -2208,6 +2258,105 @@ function sheetExtra(p) {
     }
   });
 }
+
+/* 加量：原计划结束后追加若干次（常见于局部加量 boost） */
+function sheetBoost(p) {
+  if (!p) { closeSheet(); return; }
+  var base = parseInt(p.fractions, 10) || 0;
+  var cur = parseInt(p.boostFractions, 10) || 0;
+  var endBefore = scheduleEnd(p);
+  openSheet({
+    title: '加量（追加治疗次数）', okText: '保存',
+    body:
+      '<div class="hint" style="margin-bottom:10px;line-height:1.7">在原定 ' + base + ' 次<b>结束之后</b>再追加若干次，' +
+      '总次数随之增加，疗程相应延长。<br>（若只是某天补做一次、次数不变，请用「加照」）</div>' +
+      field('加量次数', numberInput('boostFractions', cur || '', '如 5', '1')) +
+      field('加量说明', textInput('boostNote', p.boostNote, '如 局部加量 10Gy/5次 / 瘤床加量')) +
+      '<div class="hint" id="boostPreview" style="line-height:1.9">' +
+      (base ? '原计划 ' + base + ' 次' + (endBefore ? '，结束于 ' + endBefore : '') : '尚未排程') + '</div>',
+    onSave: function (v) {
+      var n = parseInt(v.boostFractions, 10);
+      if (v.boostFractions !== '' && v.boostFractions != null && (isNaN(n) || n < 0)) { toast('加量次数需为不小于 0 的整数'); return false; }
+      if (!n) {
+        if (!confirm('加量次数为 0，将取消加量。确定保存吗？')) return false;
+      }
+      p.boostFractions = n ? String(n) : '';
+      p.boostNote = n ? String(v.boostNote || '').trim() : '';
+      save(); render();
+      var endAfter = scheduleEnd(p);
+      toast(n
+        ? ('已加量 ' + n + ' 次，总次数 ' + (base + n) + ' 次，结束日期 ' + (endAfter || '—'))
+        : '已取消加量');
+    },
+    afterRender: function () {
+      var el = document.querySelector('#sheetBody [name="boostFractions"]');
+      if (!el) return;
+      function upd() {
+        var n = parseInt(el.value, 10) || 0;
+        var pv = document.getElementById('boostPreview');
+        if (!pv) return;
+        if (!base) { pv.textContent = '尚未排程'; return; }
+        if (!n) { pv.innerHTML = '原计划 <b>' + base + '</b> 次' + (endBefore ? '，结束于 ' + endBefore : ''); return; }
+        pv.innerHTML = '原计划 <b>' + base + '</b> 次 + 加量 <b>' + n + '</b> 次 = 总 <b>' + (base + n) + '</b> 次' +
+          '<br>加量部分将从 ' + (endBefore || '原计划结束后') + ' 之后继续顺排';
+      }
+      el.addEventListener('input', upd);
+      el.addEventListener('change', upd);
+      upd();
+    }
+  });
+}
+
+/* 提前终止：到某日为止，后续不再安排治疗 */
+function sheetStop(p) {
+  if (!p) { closeSheet(); return; }
+  var planned = plannedCount(p);
+  var tot = totalFractionsOf(p);
+  var last = scheduleEnd(p);
+  openSheet({
+    title: '提前终止治疗', okText: '确认终止',
+    body:
+      '<div class="hint" style="margin-bottom:10px;line-height:1.7">' +
+      '指定「最后一天治疗」，之后的计划不再执行。<b>原处方信息会保留</b>，便于记录与统计；' +
+      '未完成的次数会明确标出。随时可取消终止、恢复原计划。</div>' +
+      field('最后一天治疗（含当日）', textInput('stopDate', last || todayStr(), '', 'date'),
+        '该日之后的治疗不再安排') +
+      field('终止原因', areaInput('reason', '', '如 患者拒绝继续 / 出现放射性损伤 / 病情变化 / 转手术')) +
+      '<div class="hint" id="stopPreview" style="line-height:1.9"></div>',
+    onSave: function (v) {
+      if (!v.stopDate) { toast('请填写最后一天治疗'); return false; }
+      p.stopDate = v.stopDate;
+      var real = plannedCount(p);
+      save(); render();
+      toast('已终止于 ' + dateOnly(v.stopDate) + '，实际安排 ' + real + '/' + tot + ' 次');
+    },
+    afterRender: function () {
+      var el = document.querySelector('#sheetBody [name="stopDate"]');
+      if (!el) return;
+      function upd() {
+        var prev = document.getElementById('stopPreview');
+        if (!prev) return;
+        var d = el.value;
+        if (!d) { prev.textContent = ''; return; }
+        var tmp = JSON.parse(JSON.stringify({ fractions: p.fractions, boostFractions: p.boostFractions, startDate: p.startDate, treatDays: p.treatDays, pauses: p.pauses, extras: p.extras, stopDate: d }));
+        var cnt = computeSchedule(tmp).length;
+        prev.innerHTML = '处方共 <b>' + tot + '</b> 次，终止后实际安排 <b>' + cnt + '</b> 次，' +
+          '其中未执行 <b>' + Math.max(0, tot - cnt) + '</b> 次' +
+          (cnt ? '<br>最后一天治疗：' + computeSchedule(tmp)[cnt - 1].date : '');
+      }
+      el.addEventListener('change', upd);
+      el.addEventListener('input', upd);
+      upd();
+    }
+  });
+}
+function cancelStop(p) {
+  if (!p) return;
+  if (!confirm('取消提前终止？将恢复原计划的全部 ' + totalFractionsOf(p) + ' 次治疗。')) return;
+  p.stopDate = '';
+  save(); render(); toast('已取消终止，恢复原计划');
+}
+
 function sheetListPauses(p) {
   if (!p) { closeSheet(); return; }
   openSheet({
@@ -2364,14 +2513,17 @@ function downloadBlob(blob, filename) {
 function csvCell(s) { s = String(s == null ? '' : s); return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s; }
 function exportCsv() {
   var lines = [];
-  var rows1 = [['住院号', '姓名', '性别', '年龄', '诊断', '目的', '技术', '主管医生', '处方', '开始日期', '预计结束', '已治', '累计剂量(Gy)', '未闭环副反应', '今日待办', '中断']];
+  var rows1 = [['住院号', '姓名', '性别', '年龄', '诊断', '目的', '技术', '主管医生', '处方', '加量', '开始日期', '预计结束', '已治', '累计剂量(Gy)', '未执行', '未闭环副反应', '今日待办', '中断']];
   var todoMap = {};
   buildTodo().forEach(function (it) { todoMap[it.p.id] = it.reasons.join('；'); });
   inTreat().forEach(function (p) {
+    var boost = parseInt(p.boostFractions, 10) || 0;
     rows1.push([
       p.mrn || '', p.name || '', p.sex || '', p.age || '', p.diagnosis || '', p.purpose || '', p.technique || '', p.physician || '',
-      (p.totalDose ? p.totalDose + 'Gy/' + p.fractions + '次' : ''), dateOnly(p.startDate), scheduleEnd(p),
-      doneCount(p) + '/' + (parseInt(p.fractions, 10) || 0), accumulatedDose(p).toFixed(1),
+      (p.totalDose ? p.totalDose + 'Gy/' + p.fractions + '次' : ''), (boost ? boost + '次' + (p.boostNote ? '(' + p.boostNote + ')' : '') : ''),
+      dateOnly(p.startDate), scheduleEnd(p),
+      doneCount(p) + '/' + plannedCount(p), accumulatedDose(p).toFixed(1),
+      (p.stopDate ? ('终止于' + dateOnly(p.stopDate) + '，未执行' + stoppedShortOf(p) + '次') : ''),
       openReactions(p).length, todoMap[p.id] || '',
       (p.pauses || []).map(function (x) { return dateOnly(x.from) + '~' + dateOnly(x.to) + (x.reason ? '(' + x.reason + ')' : ''); }).join('；')
     ]);
@@ -2987,6 +3139,9 @@ function bind() {
     'pause-edit': function (el) { sheetPause(getPatient(view.pid), getPause(view.pid, el.dataset.id)); },
     'pause-del': function (el) { delPause(view.pid, el.dataset.id); },
     'add-extra': function () { sheetExtra(getPatient(view.pid)); },
+    'add-boost': function () { sheetBoost(getPatient(view.pid)); },
+    'add-stop': function () { sheetStop(getPatient(view.pid)); },
+    'cancel-stop': function () { cancelStop(getPatient(view.pid)); },
     'extra-del': function (el) { delExtra(view.pid, el.dataset.id); },
     'cal-prev': function () { shiftCal(-1); },
     'cal-next': function () { shiftCal(1); },

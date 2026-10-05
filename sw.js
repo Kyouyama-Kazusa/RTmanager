@@ -3,7 +3,7 @@
    - HTML 导航请求 → 网络优先（在线时总能拿到最新版），失败回退缓存（离线可用）
    - 静态资源（图标/清单）→ 缓存优先（快），后台顺带更新
    注意：每次发布新版本，请同步递增下面的 CACHE 版本号。 */
-const CACHE = 'radiotherapy-v9';
+const CACHE = 'radiotherapy-v10';
 const ASSETS = [
   './',
   './index.html',
