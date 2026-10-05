@@ -226,7 +226,7 @@ button,input,select,textarea{font:inherit;color:inherit}
 var LS_KEY = 'radiotherapy.v1';
 var SNAP_PREFIX = 'radiotherapy.snap.';
 var SNAP_KEEP = 7;
-var APP_VERSION = '0.8.1';
+var APP_VERSION = '0.8.2';
 
 var SEXES = ['男', '女'];
 var PURPOSES = ['根治性', '术后辅助', '术前新辅助', '姑息性'];
@@ -361,7 +361,7 @@ function load() {
     try {
       var bk = BACKUP_PREFIX + 'v' + fromV + '.' + todayStr();
       if (!localStorage.getItem(bk)) localStorage.setItem(bk, raw);
-      backupKeys().slice(BACKUP_KEEP).forEach(function (k) { localStorage.removeItem(k); });
+      backupKeysToDelete(BACKUP_KEEP).forEach(function (k) { localStorage.removeItem(k); });
       migrateNotice = '已自动备份更新前的数据（原始格式 v' + fromV + '）';
     } catch (e) { }
   }
@@ -374,6 +374,7 @@ function load() {
   }
 }
 
+/* 备份键：按时间升序。保留策略需要"删最旧、留最新"，见 BUG-11 */
 function backupKeys() {
   var ks = [];
   try {
@@ -383,6 +384,21 @@ function backupKeys() {
     }
   } catch (e) { }
   return ks.sort();
+}
+/* 保留最新的 n 份，返回应删除的键（升序中前面的即最旧） */
+function backupKeysToDelete(n) {
+  return backupKeys().slice(0, -n);
+}
+
+/* 归一化辅助：把来源对象里「目标尚未包含」的字段一并带上。
+   目的：以后新增字段时，normalize 只需声明需要转换/校验的字段，
+   其余字段自动保留，避免"新字段被静默丢弃"（如 BUG-03 的 tplBase）。 */
+function keepExtra(src, out) {
+  if (!src || typeof src !== 'object') return out;
+  Object.keys(src).forEach(function (k) {
+    if (!(k in out) && src[k] !== undefined) out[k] = src[k];
+  });
+  return out;
 }
 
 /* 把任意历史版本的数据归一化为当前格式。
@@ -404,7 +420,7 @@ function normalize(d) {
     var st = PATIENT_STATUSES.indexOf(p.status) >= 0 ? p.status
       : (LEGACY_STATUS_MAP[p.status] || '在治');
 
-    out.patients.push({
+    out.patients.push(keepExtra(p, {
       id: p.id || uid('p'), mrn: p.mrn || '', name: p.name || '', sex: SEXES.indexOf(p.sex) >= 0 ? p.sex : '', age: p.age || '',
       physician: p.physician || '', diagnosis: p.diagnosis || '', purpose: PURPOSES.indexOf(p.purpose) >= 0 ? p.purpose : '',
       technique: TECHNIQUES.indexOf(p.technique) >= 0 ? p.technique : '',
@@ -412,21 +428,21 @@ function normalize(d) {
       totalDose: p.totalDose || '', fractions: p.fractions || '', dosePerFraction: p.dosePerFraction || '',
       startDate: start,
       treatDays: (p.treatDays && p.treatDays.length) ? p.treatDays : treatDaysCfg(),
-      pauses: (p.pauses || []).map(function (x) { return { id: x.id || uid('pa'), from: x.from || '', to: x.to || '', reason: x.reason || '' }; }),
-      extras: (p.extras || []).map(function (x) { return { id: x.id || uid('ex'), date: x.date || '', reason: x.reason || '' }; }),
+      pauses: (p.pauses || []).map(function (x) { return keepExtra(x, { id: x.id || uid('pa'), from: x.from || '', to: x.to || '', reason: x.reason || '' }); }),
+      extras: (p.extras || []).map(function (x) { return keepExtra(x, { id: x.id || uid('ex'), date: x.date || '', reason: x.reason || '' }); }),
       /* 计划调整：加量（原计划结束后追加）与提前终止（排程截止日） */
       boostFractions: p.boostFractions == null ? '' : String(p.boostFractions),
       boostNote: p.boostNote || '',
       stopDate: p.stopDate || '',
       doneDates: done,
       reactions: (p.reactions || []).map(function (r) {
-        return {
+        return keepExtra(r, {
           id: r.id || uid('r'), site: REACTION_SITES.indexOf(r.site) >= 0 ? r.site : (r.site || '其他'), grade: GRADES.indexOf(r.grade) >= 0 ? r.grade : (r.grade || ''),
           foundAt: r.foundAt || '', content: r.content || '', plan: r.plan || '', planAt: r.planAt || '',
           status: REACTION_STATUSES.indexOf(r.status) >= 0 ? r.status : '未处理', nextCheckAt: r.nextCheckAt || '',
-          followups: (r.followups || []).map(function (f) { return { id: f.id || uid('f'), at: f.at || '', content: f.content || '' }; }),
+          followups: (r.followups || []).map(function (f) { return keepExtra(f, { id: f.id || uid('f'), at: f.at || '', content: f.content || '' }); }),
           closedAt: r.closedAt || '', readAt: r.readAt || ''
-        };
+        });
       }),
       followupPlans: (p.followupPlans || []).map(function (f) {
         /* 旧版随访只存 dueDate；这里按「治疗完成日 → 到期日」反推间隔，迁移到新结构 */
@@ -437,14 +453,15 @@ function normalize(d) {
           if (inf) { n = inf.n; u = inf.u; }
           else { n = 0; u = 'm'; }
         }
-        return {
+        var o = keepExtra(f, {
           id: f.id || uid('fp'), baseDate: base, offsetN: n, offsetUnit: u,
           dueDate: f.dueDate || '', note: f.note || '', done: !!f.done, doneAt: f.doneAt || ''
-        };
+        });
+        return o;
       }),
-      notes: (p.notes || []).map(function (n) { return { id: n.id || uid('n'), at: n.at || '', content: n.content || '' }; }),
+      notes: (p.notes || []).map(function (n) { return keepExtra(n, { id: n.id || uid('n'), at: n.at || '', content: n.content || '' }); }),
       status: st, completedAt: p.completedAt || ''
-    });
+    }));
   });
   return out;
 }
@@ -508,10 +525,8 @@ function holidays() { return mergeLayer(BUILTIN_HOLIDAYS, holidayOverride()); }
 function makeups() { return mergeLayer(BUILTIN_MAKEUPS, makeupOverride()); }
 function setHoliday(date, name) { var o = holidayOverride(); o[date] = name; lsSet('radiotherapy.holidays', o); }
 function delHoliday(date) { var o = holidayOverride(); o[date] = null; lsSet('radiotherapy.holidays', o); }
-function resetHoliday(date) { var o = holidayOverride(); delete o[date]; lsSet('radiotherapy.holidays', o); }
 function setMakeup(date, name) { var o = makeupOverride(); o[date] = name; lsSet('radiotherapy.makeups', o); }
-function delMakeup(date) { var o = makeupOverride(); o[date] = null; lsSet('radiotherapy.makeups', o); }
-function isBuiltinHol(date) { return Object.prototype.hasOwnProperty.call(BUILTIN_HOLIDAYS, date); }
+function delMakeup(date) { var o = makeupOverride(); o[date] = null; lsSet('radiotherapy.makeups', o); }function isBuiltinHol(date) { return Object.prototype.hasOwnProperty.call(BUILTIN_HOLIDAYS, date); }
 function isBuiltinMk(date) { return Object.prototype.hasOwnProperty.call(BUILTIN_MAKEUPS, date); }
 
 /* 已录入节假日数据的年份（内置年份 + 用户新增年份；删除个别日期不影响年份判断） */
@@ -977,10 +992,24 @@ function followupBase(p) {
   if (tb) return tb;
   return treatmentEndOf(p);
 }
-/* 患者随访模板（相对「放疗结束日」的序列） */
+/* 间隔折算成天数（月按 30.4375、年按 365.25），用于跨单位比较排序。
+   只用于排序，不参与日期计算（日期仍用 addInterval 的自然月推算）。 */
+function intervalDays(n, unit) {
+  n = parseInt(n, 10) || 0;
+  if (unit === 'd') return n;
+  if (unit === 'w') return n * 7;
+  if (unit === 'y') return n * 365.25;
+  return n * 30.4375;      /* 'm' 及其它 */
+}
+/* 患者随访模板（相对「放疗结束日」的序列，按真实时长排序） */
 function followupTemplate(p) {
   return (p.followupPlans || []).filter(function (f) { return f.baseDate === 'TEMPLATE'; })
-    .sort(function (a, b) { return (a.offsetN || 0) - (b.offsetN || 0); });
+    .sort(function (a, b) {
+      /* 按折算天数比较，避免「1 年」被排到「3 个月」之前（BUG-10） */
+      var d = intervalDays(a.offsetN, a.offsetUnit) - intervalDays(b.offsetN, b.offsetUnit);
+      if (d) return d;
+      return String(a.dueDate).localeCompare(String(b.dueDate));
+    });
 }
 /* 模板记录的起算日 */
 function followupTplBase(p) {
@@ -988,15 +1017,27 @@ function followupTplBase(p) {
   for (var i = 0; i < t.length; i++) if (t[i].tplBase) return dateOnly(t[i].tplBase);
   return '';
 }
-function pendingFollowups(p) { return (p.followupPlans || []).filter(function (f) { return f.baseDate !== 'TEMPLATE' && !f.done; }); }
+/* 真实随访计划：排除 TEMPLATE 影子行（仅作模板备份，永远 done=false 且带 dueDate）。
+   所有遍历 followupPlans 的地方都应经此函数，避免口径不一致导致统计/待办出错。 */
+function realFollowups(p) {
+  return (p.followupPlans || []).filter(function (f) { return f.baseDate !== 'TEMPLATE'; });
+}
+function pendingFollowups(p) {
+  return realFollowups(p).filter(function (f) { return !f.done; });
+}
 function nextFollowup(p) {
   var pend = pendingFollowups(p).sort(function (a, b) { return String(a.dueDate).localeCompare(String(b.dueDate)); });
   return pend[0] || null;
 }
 /* 随访进度：已完成 / 总数（仅计真实计划，不含模板行） */
 function followupProgress(p) {
-  var real = (p.followupPlans || []).filter(function (f) { return f.baseDate !== 'TEMPLATE'; });
+  var real = realFollowups(p);
   return { done: real.filter(function (f) { return f.done; }).length, total: real.length };
+}
+/* 是否有已到期未完成的随访 */
+function hasDueFollowup(p, today) {
+  today = today || todayStr();
+  return realFollowups(p).some(function (f) { return f.dueDate && f.dueDate <= today && !f.done; });
 }
 
 
@@ -1086,13 +1127,16 @@ function unreadReactions(p) { return openReactions(p).filter(function (r) { retu
 function inPause(p, date) { return (p.pauses || []).some(function (x) { return x.from && x.to && date >= dateOnly(x.from) && date <= dateOnly(x.to); }); }
 function pauseOn(p, date) { return (p.pauses || []).filter(function (x) { return x.from && x.to && date >= dateOnly(x.from) && date <= dateOnly(x.to); })[0] || null; }
 
+/* 已完成治疗并需要随访的患者（「失访」不再纳入，见 BUG-05） */
+function followedUp() { return state.patients.filter(function (p) { return p.status === '治疗完成'; }); }
+
 /* ================= 待办计算 ================= */
 function buildTodo() {
   var today = todayStr(), items = [];
   var targets = inTreat().slice();
-  completed().forEach(function (p) {
-    var due = (p.followupPlans || []).some(function (f) { return f.dueDate && f.dueDate <= today && !f.done; });
-    if (due) targets.push(p);
+  followedUp().forEach(function (p) {
+    /* 用 realFollowups 排除 TEMPLATE 影子行，否则随访全部完成后仍会残留（BUG-01） */
+    if (hasDueFollowup(p, today)) targets.push(p);
   });
   targets.forEach(function (p) {
     var reasons = [], details = [];
@@ -1104,7 +1148,6 @@ function buildTodo() {
       } else {
         var t = todayItems(p);
         if (t) { reasons.push('今日应治疗'); details.push('今日为第 ' + t.fraction + ' 次治疗日' + (t.extra ? '（加照）' : '')); }
-        var tot = parseInt(p.fractions, 10);
         var dn = doneCount(p);
         var end = scheduleEnd(p);
         var plannedN = plannedCount(p);
@@ -1130,7 +1173,7 @@ function buildTodo() {
         if (reasons.indexOf(label) < 0) { reasons.push(label); details.push(r.site + ' ' + label + ' ' + fmtDT(r.nextCheckAt)); }
       }
     });
-    (p.followupPlans || []).forEach(function (f) {
+    realFollowups(p).forEach(function (f) {
       if (f.dueDate && f.dueDate <= today && !f.done) { if (reasons.indexOf('随访到期') < 0) { reasons.push('随访到期'); details.push('随访计划到期 ' + dateOnly(f.dueDate)); } }
     });
     if (reasons.length) items.push({ p: p, reasons: reasons, details: details });
@@ -1242,7 +1285,9 @@ function renderWard() {
   if (!list.length) h += '<div class="empty"><span class="big">🏥</span>暂无在治患者<br>点右上角「添加患者」开始</div>';
   list.forEach(function (p) {
     var un = unreadReactions(p).length;
-    var tot = parseInt(p.fractions, 10) || 0;
+    /* 分母统一用 plannedCount（实际排出的次数，含加量），与患者详情页口径一致（BUG-06） */
+    var tot = plannedCount(p);
+    var boost = parseInt(p.boostFractions, 10) || 0;
     var dn = doneCount(p);
     var prog = tot ? Math.round(dn / tot * 100) : 0;
     var end = scheduleEnd(p);
@@ -1253,11 +1298,13 @@ function renderWard() {
       (p.sex ? '<span class="chip sm">' + esc(p.sex) + '</span>' : '') +
       (p.age ? '<span class="chip sm">' + esc(p.age) + '岁</span>' : '') +
       (pa ? '<span class="chip warn sm">中断中</span>' : '') +
+      (p.stopDate ? '<span class="chip danger sm">已终止</span>' : '') +
+      (boost ? '<span class="chip sm">＋加量' + boost + '</span>' : '') +
       (un ? '<span class="count">' + un + '</span>' : '') + '</div>' +
       '<div class="pdiag">' + esc(p.diagnosis || '') + '</div>' +
       (p.planStatus && p.planStatus !== '已通过' ? '<div class="pmeta">流程：<b>' + esc(p.planStatus) + '</b></div>' :
         (tot ? '<div class="pmeta">治疗 <b>' + dn + '/' + tot + '</b> 次 · 累计 <b>' + accumulatedDose(p).toFixed(1) + '</b> Gy' +
-          (end ? ' · 预计 <b>' + mdLabel(end) + '</b> 结束' : '') +
+          (end ? ' · ' + (p.stopDate ? '已止于 ' : '预计 ') + '<b>' + mdLabel(end) + '</b>' + (p.stopDate ? '' : ' 结束') : '') +
           '<div class="progress' + (prog >= 95 ? ' warn' : '') + '"><div class="fill" style="width:' + Math.min(100, prog) + '%"></div></div></div>'
           : '<div class="pmeta">' + (p.startDate ? '未填总次数' : '未排程（缺开始日期）') + '</div>')) +
       (pa ? '<div class="pmeta" style="color:var(--warn)">中断：' + esc(pa.reason || '') + '（至 ' + mdLabel(pa.to) + '）</div>' : '') +
@@ -1333,14 +1380,18 @@ function renderDone() {
   var h = '<div class="section-title">已完成 / 随访 · ' + list.length + ' 位</div>';
   if (!list.length) h += '<div class="empty"><span class="big">📁</span>暂无归档患者</div>';
   list.forEach(function (p) {
-    var tot = parseInt(p.fractions, 10) || 0, dn = doneCount(p);
-    var pendingFu = (p.followupPlans || []).filter(function (f) { return !f.done; }).length;
+    /* 分母统一用 plannedCount（实际排出的次数，含加量），与患者详情页口径一致（BUG-06） */
+    var planned = plannedCount(p), dn = doneCount(p);
+    var prog = followupProgress(p);
+    var pendingFu = prog.total - prog.done;
     h += '<div class="card pcard" data-act="open-patient" data-id="' + p.id + '">' +
       '<div class="badgebox"><div class="b">' + esc(p.name ? p.name.slice(0, 2) : '—') + '</div><div class="t">' + esc(p.mrn || '') + '</div></div>' +
-      '<div class="pbody"><div class="line1"><span class="pname">' + esc(p.name) + '</span><span class="chip">' + esc(p.status) + '</span></div>' +
+      '<div class="pbody"><div class="line1"><span class="pname">' + esc(p.name) + '</span><span class="chip">' + esc(p.status) + '</span>' +
+      (p.status === '失访' ? '<span class="chip sm">不随访</span>' : '') + '</div>' +
       '<div class="pdiag">' + esc(p.diagnosis || '') + '</div>' +
-      '<div class="pmeta">' + (tot ? '共完成 ' + dn + '/' + tot + ' 次 · ' : '') +
-      (pendingFu ? '待随访 ' + pendingFu + ' 项' : '随访完成') + '</div></div></div>';
+      '<div class="pmeta">' + (planned ? '共完成 ' + dn + '/' + planned + ' 次 · ' : '') +
+      (p.status === '失访' ? '已失访' : (prog.total ? (pendingFu ? '待随访 ' + pendingFu + '/' + prog.total + ' 项' : '随访完成（共 ' + prog.total + ' 次）') : '未设随访')) +
+      '</div></div></div>';
   });
   $('view').innerHTML = h + '<div style="height:60px"></div>';
 }
@@ -1420,12 +1471,20 @@ function renderPatientPage() {
       var cls = x.extra ? 'extra' : (x.boost ? 'boost' : (x.done ? 'done' : ''));
       cells[ds] = '<div class="tagline ' + cls + '">第' + x.fraction + '次' + (x.done ? '✓' : '') + (x.boost ? '＋' : '') + '</div>';
     });
+    /* 中断区间：按天标记（中断日本就不排治疗，故不能要求 byDate[ds] 存在 —— BUG-12） */
     (p.pauses || []).forEach(function (pa) {
       var a = parseD(pa.from), b = parseD(pa.to);
-      if (!a || !b) return;
-      for (var d = new Date(a); d <= b; d.setDate(d.getDate() + 1)) {
+      if (!a || !b || b < a) return;
+      var monthPre = y + '-' + pad2(m);
+      /* 裁剪到本月，避免长区间做无谓循环 */
+      var start = dstr(a).slice(0, 7) < monthPre ? new Date(y, m - 1, 1) : new Date(a);
+      var lastDay = new Date(y, m, 0);
+      var end = dstr(b).slice(0, 7) > monthPre ? lastDay : new Date(b);
+      for (var d = new Date(start); d <= end; d.setDate(d.getDate() + 1)) {
         var ds = dstr(d);
-        if (ds.slice(0, 7) === y + '-' + pad2(m) && byDate[ds]) cells[ds] = '<div class="tagline pause">停</div>';
+        if (ds.slice(0, 7) !== monthPre) continue;
+        /* 已排治疗日不覆盖（正常不会出现），其余标为「停」 */
+        cells[ds] = '<div class="tagline pause">停</div>';
       }
     });
     h += '<div class="cal-wrap">' + calHeader(y, m) + calDowRow() + calBody(y, m, cells) +
@@ -1447,7 +1506,8 @@ function renderPatientPage() {
       (r.followups || []).map(function (f) { return '<div class="fu"><span class="fut">' + fmtDT(f.at) + '</span><span class="fuc">' + esc(f.content) + '</span></div>'; }).join('') +
       '<div class="acts"><button class="btn sm" data-act="reaction-plan" data-id="' + r.id + '">处理</button>' +
       '<button class="btn sm" data-act="reaction-follow" data-id="' + r.id + '">追踪</button>' +
-      '<button class="btn sm" data-act="reaction-edit" data-id="' + r.id + '">编辑</button></div></div>';
+      '<button class="btn sm" data-act="reaction-edit" data-id="' + r.id + '">编辑</button>' +
+      '<button class="btn sm danger" data-act="reaction-del" data-id="' + r.id + '">删除</button></div></div>';
   });
   h += '</div>';
 
@@ -1503,15 +1563,47 @@ function renderPatientPage() {
     h += '</div>';
   }
 
+  /* 备注 / 交班记录（之前只有 schema 没有界面，数据只能靠合并导入悄悄累积） */
+  var noteList = (p.notes || []).slice().sort(function (a, b) { return String(b.at).localeCompare(String(a.at)); });
+  h += '<div class="section-title">备注 / 交班记录' + (noteList.length ? '（' + noteList.length + '）' : '') + '</div>';
+  if (noteList.length) {
+    noteList.forEach(function (n) {
+      h += '<div class="event"><div class="head"><span class="chip sm">' + esc(fmtDT(n.at) || '未记时间') + '</span></div>' +
+        '<div class="content" style="font-weight:400">' + esc(n.content || '') + '</div>' +
+        '<div class="acts"><button class="btn sm" data-act="note-add" data-id="' + n.id + '">编辑</button>' +
+        '<button class="btn sm danger" data-act="note-del" data-id="' + n.id + '">删除</button></div></div>';
+    });
+  } else {
+    h += '<div class="hint" style="padding:0 2px 8px">暂无备注，可记录交班事项、患者主诉、特殊情况等。</div>';
+  }
+  h += '<div class="btnrow" style="margin:0 2px"><button class="btn sm addbtn" data-act="note-add">＋ 添加备注</button></div>';
+
+  /* 状态操作：在治→完成/失访；已完成→转回在治；失访→转回在治 */
   h += '<div class="btnrow" style="margin:12px 2px"><button class="btn" data-act="edit-patient">编辑患者信息</button>' +
-    (p.status === '在治' ? '<button class="btn" data-act="complete-patient">完成治疗</button>' : '<button class="btn" data-act="reopen-patient">转回在治</button>') +
+    (p.status === '在治'
+      ? '<button class="btn" data-act="complete-patient">完成治疗</button>' +
+      '<button class="btn" data-act="lost-patient">标记失访</button>'
+      : '<button class="btn" data-act="reopen-patient">转回在治</button>') +
     '<button class="btn danger" data-act="delete-patient">删除</button></div>';
 
   $('view').innerHTML = h + '<div style="height:40px"></div>';
+
+  /* 打开详情页即视为已查看其副反应，消除「未读」红点（BUG-04） */
+  if (markReactionsRead(p)) updateDots();
+}
+
+/* 把该患者的未读副反应标记为已读；有变化时返回条数并保存 */
+function markReactionsRead(p) {
+  var n = 0;
+  openReactions(p).forEach(function (r) { if (!r.readAt) { r.readAt = nowLocalInput(); n++; } });
+  if (n && !loadError) save();
+  return n;
 }
 
 /* ================= 渲染：设置 ================= */
 function renderSettingsPage() {
+  /* 设置是全局语境，不带患者上下文；清空 pid 以免「套用模板」误改上一位患者（BUG-07） */
+  view.pid = null;
   $('btnBack').hidden = false; $('btnData').hidden = true; $('tabbar').hidden = true;
   $('title').textContent = '设置';
   var bytes = 0; try { bytes = (localStorage.getItem(LS_KEY) || '').length; } catch (e) { }
@@ -1572,6 +1664,18 @@ function renderSettingsPage() {
       var label = k.replace(BACKUP_PREFIX, '').replace('.', ' · ');
       h += '<div class="setrow" data-act="restore-backup" data-key="' + esc(k) + '">' +
         '<div class="n">' + esc(label) + '<div class="sub2">点一下用这份备份覆盖当前数据（用于回退）</div></div><div class="arw">›</div></div>';
+    });
+    h += '</div>';
+  }
+  var sns = snapKeys();
+  if (sns.length) {
+    h += '<div class="section-title">每日自动快照（' + sns.length + ' 份 · 最多保留 ' + SNAP_KEEP + ' 天）</div><div class="setgrp">';
+    sns.forEach(function (k) {
+      var label = k.replace(SNAP_PREFIX, '');
+      var cnt = 0;
+      try { cnt = (JSON.parse(localStorage.getItem(k) || '{}').patients || []).length; } catch (e) { }
+      h += '<div class="setrow" data-act="restore-snap" data-key="' + esc(k) + '">' +
+        '<div class="n">' + esc(label) + '<div class="sub2">' + cnt + ' 位患者的当日存档 · 点一下回退到这天的数据</div></div><div class="arw">›</div></div>';
     });
     h += '</div>';
   }
@@ -2533,6 +2637,39 @@ function sheetExtraList(p) {
   });
 }
 
+/* ================= 备注 / 交班记录 ================= */
+function sheetNote(p, note) {
+  if (!p) { closeSheet(); return; }
+  var isNew = !note;
+  openSheet({
+    title: isNew ? '添加备注' : '编辑备注',
+    body: '<div class="field"><label>内容</label>' +
+      '<textarea name="content" rows="4" placeholder="如：本周血象偏低已推迟一次；家属咨询放疗后复查安排…">' +
+      esc(note ? note.content : '') + '</textarea></div>' +
+      '<div class="field"><label>时间</label><input type="datetime-local" name="at" value="' +
+      esc(note && note.at ? note.at : nowLocalInput()) + '"></div>',
+    onSave: function (v) {
+      if (!String(v.content || '').trim()) { toast('请填写备注内容'); return false; }
+      if (isNew) {
+        p.notes = p.notes || [];
+        p.notes.push({ id: uid('n'), at: v.at || nowLocalInput(), content: String(v.content).trim() });
+      } else {
+        note.content = String(v.content).trim();
+        if (v.at) note.at = v.at;
+      }
+      save(); render(); toast(isNew ? '已添加备注' : '已保存');
+    }
+  });
+}
+function delNote(pid, nid) {
+  var p = getPatient(pid); if (!p) return;
+  var n = (p.notes || []).filter(function (x) { return x.id === nid; })[0];
+  if (!n) return;
+  if (!confirm('删除这条备注？\n\n' + (n.content || '') + '\n\n删除后不可恢复。')) return;
+  p.notes = (p.notes || []).filter(function (x) { return x.id !== nid; });
+  save(); render(); toast('已删除备注');
+}
+
 /* ================= 日历日操作 =================
    完成状态按日期自动推算，因此这里不再有「标记完成」，
    只保留异常修正：本次未做（后续顺延）、停止治疗、加照、恢复治疗。 */
@@ -2587,7 +2724,8 @@ function sheetDayPatient(p, date) {
 
   /* 操作按钮固定在底部，内容再长也始终可点 */
   var acts = [];
-  if (it && scheduleEnd(p) > todayStr() || (it && it.done)) {
+  /* 「本次未做」只对今天及过去显示（未来的治疗日尚未发生），与总日历口径一致 */
+  if (it && date <= todayStr()) {
     acts.push({ label: '本次未做（后续顺延）', act: 'skip-here', id: p.id, date: date });
   }
   acts.push(isPause
@@ -2765,23 +2903,39 @@ function mergeImport(inc) {
 }
 function pkey(p) { return (p.name || '') + '|' + (p.mrn || ''); }
 
+/* 合并时「按记录并集」的字段（有 id 的集合） */
+var MERGE_SET_FIELDS = ['reactions', 'pauses', 'extras', 'followupPlans', 'notes'];
+/* 合并时「按值并集」的字段（纯值数组，如已完成日期） */
+var MERGE_VALUE_FIELDS = ['doneDates'];
+/* 需要特殊处理的字段（不参与自动标量合并） */
+var MERGE_SKIP = ['id', 'treatDays', 'status', 'doneDates', 'pauses', 'extras',
+  'reactions', 'followupPlans', 'notes', 'stopDate'];
+
 function mergePatient(base, inc) {
-  /* 标量字段：本机为空时用备份的值补上（不用空值覆盖已有内容） */
-  ['mrn', 'sex', 'age', 'physician', 'diagnosis', 'purpose', 'technique',
-    'simDate', 'position', 'planStatus', 'totalDose', 'fractions',
-    'dosePerFraction', 'startDate', 'completedAt'].forEach(function (k) {
-      if (!base[k] && inc[k]) base[k] = inc[k];
-    });
+  /* 标量字段：遍历 normalize() 产出的实际键自动合并，
+     避免"新增字段忘记加入白名单"导致跨设备同步静默丢数据（BUG-02） */
+  Object.keys(inc).forEach(function (k) {
+    if (MERGE_SKIP.indexOf(k) >= 0) return;
+    if (MERGE_SET_FIELDS.indexOf(k) >= 0 || MERGE_VALUE_FIELDS.indexOf(k) >= 0) return;
+    if (base[k] === undefined) { base[k] = inc[k]; return; }
+    if ((base[k] === '' || base[k] === null) && inc[k] !== '' && inc[k] != null) base[k] = inc[k];
+  });
   /* 集合字段：按记录 id 并集去重 */
-  ['reactions', 'pauses', 'extras', 'followupPlans', 'notes'].forEach(function (k) {
+  MERGE_SET_FIELDS.forEach(function (k) {
     base[k] = unionById(base[k] || [], inc[k] || []);
   });
   /* 纯值数组 */
-  base.doneDates = unionValues(base.doneDates || [], inc.doneDates || []);
-  if (!(base.treatDays && base.treatDays.length) && inc.treatDays) base.treatDays = inc.treatDays;
-  /* 治疗日：取并集，避免丢失任一边的排程设定 */
-  if (base.treatDays && inc.treatDays && inc.treatDays.length) {
-    base.treatDays = unionValues(base.treatDays, inc.treatDays).map(Number).sort();
+  MERGE_VALUE_FIELDS.forEach(function (k) {
+    base[k] = unionValues(base[k] || [], inc[k] || []);
+  });
+  /* 治疗日：排程规则，不是记录集合 —— 取一侧，不做并集（BUG-09）。
+     本机未设置时用备份的 */
+  if (!(base.treatDays && base.treatDays.length) && inc.treatDays && inc.treatDays.length) {
+    base.treatDays = inc.treatDays.slice().map(Number).sort();
+  }
+  /* 提前终止：取更早的终止日（更严格的一侧），避免合并后疗程被放宽 */
+  if (inc.stopDate) {
+    if (!base.stopDate || dateOnly(inc.stopDate) < dateOnly(base.stopDate)) base.stopDate = inc.stopDate;
   }
   /* 状态：已完成优先保留，避免被「在治」覆盖 */
   if (inc.status === '治疗完成' && base.status !== '治疗完成') base.status = '治疗完成';
@@ -2915,6 +3069,9 @@ function resumeHere(pid, date) {
 function addExtraDate(pid, date) {
   var p = getPatient(pid); if (!p) return;
   if (isDoneOn(p, date)) { toast('该日已完成治疗'); return; }
+  if (inPause(p, date)) { toast('该日期在中断区间内，请先调整中断'); return; }   /* 与 sheetExtra 一致 */
+  var already = scheduleOn(p, date);
+  if (already) { toast('该日已是第 ' + already.fraction + ' 次治疗日，无需加照'); return; }
   openSheet({
     title: '本日加照', okText: '确认加照',
     body: '<div class="hint" style="margin-bottom:8px">在 ' + date + ' 额外安排一次治疗</div>' +
@@ -2925,6 +3082,16 @@ function addExtraDate(pid, date) {
       save(); render(); toast('已加照');
     }
   });
+}
+/* 删除一条副反应记录 */
+function delReaction(pid, rid) {
+  var p = getPatient(pid); if (!p) return;
+  var r = getReaction(pid, rid);
+  if (!r) return;
+  if (!confirm('删除这条副反应记录？\n\n' + (r.site || '') + ' · ' + (r.grade || '') + '\n' + (r.content || '') +
+    '\n\n删除后不可恢复，其追踪记录也会一并删除。')) return;
+  p.reactions = (p.reactions || []).filter(function (x) { return x.id !== rid; });
+  save(); render(); toast('已删除副反应记录');
 }
 function getReaction(pid, rid) { var p = getPatient(pid); return p && (p.reactions || []).filter(function (r) { return r.id === rid; })[0]; }
 function getFollowup(pid, fid) { var p = getPatient(pid); return p && (p.followupPlans || []).filter(function (f) { return f.id === fid; })[0]; }
@@ -2993,9 +3160,20 @@ function deletePatient(p) {
   state.patients = state.patients.filter(function (x) { return x.id !== p.id; });
   view.page = 'tab'; save(); render(); toast('已删除');
 }
+/* 快照恢复：快照是 normalize 之后的存档，仍走一遍 normalize 以防字段新增 */
 function restoreSnap(key) {
-  if (!confirm('用该快照覆盖当前数据？')) return;
-  try { state = normalize(JSON.parse(localStorage.getItem(key))); save(); render(); toast('已恢复快照'); } catch (e) { alert('恢复失败'); }
+  if (!key) return;
+  var day = key.replace(SNAP_PREFIX, '');
+  if (!confirm('用 ' + day + ' 的快照覆盖当前数据？\n\n当前数据会被替换，建议先导出一次现有数据。')) return;
+  if (!confirm('再次确认：覆盖当前数据？')) return;
+  var raw;
+  try { raw = localStorage.getItem(key); } catch (e) { }
+  if (!raw) { alert('该快照已不存在'); return; }
+  var keep = loadError;              /* 恢复成功后解除写保护 */
+  loadError = false;
+  try { state = normalize(JSON.parse(raw)); if (!save()) { loadError = keep; return; } }
+  catch (e) { loadError = keep; alert('恢复失败'); return; }
+  render(); toast('已恢复 ' + day + ' 的快照');
 }
 /* 从「更新前自动备份」回退（备份是原始格式，需经 normalize 转换） */
 function restoreBackup(key) {
@@ -3074,7 +3252,7 @@ function sheetHolidayManage() {
     body: body,
     actions: [
       { label: '添加节假日', act: 'hol-add', primary: true, full: !hasOverride },
-      hasOverride ? { label: '恢复内置数据', act: 'hol-reset' } : null,
+      hasOverride ? { label: '恢复内置节假日', act: 'hol-reset' } : null,
       hasOverride ? { label: '关闭', act: 'sheet-close' } : null
     ].filter(Boolean)
   });
@@ -3104,7 +3282,11 @@ function sheetMakeupManage() {
   openSheet({
     title: '调休上班日',
     body: body,
-    actions: [{ label: '添加调休上班日', act: 'mk-add', primary: true, full: true }]
+    actions: [
+      { label: '添加调休上班日', act: 'mk-add', primary: true, full: !Object.keys(makeupOverride()).length },
+      Object.keys(makeupOverride()).length ? { label: '恢复内置调休', act: 'mk-reset' } : null,
+      Object.keys(makeupOverride()).length ? { label: '关闭', act: 'sheet-close' } : null
+    ].filter(Boolean)
   });
   reopenSheet = sheetMakeupManage;
 }
@@ -3245,7 +3427,9 @@ function shiftCal(n) {
 
 function bind() {
   $('btnBack').addEventListener('click', function () { view.page = 'tab'; render(); });
-  $('btnData').addEventListener('click', function () { view.page = 'settings'; render(); });
+  /* 进入设置页时清空 view.pid：设置是全局语境，避免「随访模板库 → 套用」
+     误改到上一次打开的患者（BUG-07） */
+  $('btnData').addEventListener('click', function () { view.page = 'settings'; view.pid = null; render(); });
   document.querySelectorAll('.tabbar button').forEach(function (b) { b.addEventListener('click', function () { view.tab = b.dataset.tab; render(); }); });
   $('mask').addEventListener('click', function () { closeSheet(); });
 
@@ -3272,9 +3456,24 @@ function bind() {
     'edit-patient': function () { sheetPatient(getPatient(view.pid)); },
     'delete-patient': function () { deletePatient(getPatient(view.pid)); },
     'complete-patient': function () { completePatient(getPatient(view.pid)); },
-    'reopen-patient': function () { var p = getPatient(view.pid); p.status = '在治'; save(); render(); toast('已转回在治'); },
+    'reopen-patient': function () {
+      var p = getPatient(view.pid); if (!p) return;
+      p.status = '在治'; save(); render(); toast('已转回在治');
+    },
+    'lost-patient': function () {
+      var p = getPatient(view.pid); if (!p) return;
+      if (!confirm('把「' + (p.name || '') + '」标记为失访？\n\n失访后不再进入待办与随访提醒，可随时转回在治。')) return;
+      p.status = '失访'; save(); render(); toast('已标记失访（不再随访提醒）');
+    },
     'add-reaction': function () { sheetReaction(getPatient(view.pid), null); },
     'reaction-edit': function (el) { sheetReaction(getPatient(view.pid), getReaction(view.pid, el.dataset.id)); },
+    'reaction-del': function (el) { delReaction(view.pid, el.dataset.id); },
+    'note-add': function (el) {
+      var p = getPatient(view.pid); if (!p) return;
+      var n = el.dataset.id ? (p.notes || []).filter(function (x) { return x.id === el.dataset.id; })[0] : null;
+      sheetNote(p, n || null);
+    },
+    'note-del': function (el) { delNote(view.pid, el.dataset.id); },
     'reaction-plan': function (el) { sheetReactionPlan(getPatient(view.pid), getReaction(view.pid, el.dataset.id)); },
     'reaction-follow': function (el) { sheetReactionFollow(getPatient(view.pid), getReaction(view.pid, el.dataset.id)); },
     'add-followup': function () { sheetFollowup(getPatient(view.pid), null); },
@@ -3343,9 +3542,9 @@ function bind() {
       if (reopenSheet) reopenSheet();
     },
     'hol-reset': function () {
-      if (!confirm('恢复内置假期数据？将清除你添加/删除的全部假期设置。')) return;
-      lsSet('radiotherapy.holidays', {}); lsSet('radiotherapy.makeups', {});
-      render(); toast('已恢复内置数据');
+      if (!confirm('恢复内置假期数据？\n\n将清除你对「法定节假日」的全部自定义增删；调休上班日不受影响。')) return;
+      lsSet('radiotherapy.holidays', {});    /* 只清节假日，不动调休（BUG-08） */
+      render(); toast('已恢复内置假期数据');
       if (reopenSheet) reopenSheet();
     },
     /* ---- 随访模板管理 ---- */
@@ -3369,8 +3568,14 @@ function bind() {
       var nm = el.dataset.name;
       var t = findTpl(nm);
       if (!t) { toast('该模板已不存在'); return; }
+      /* 只在患者详情页套用；全局语境（设置页）下不落库，避免误改患者（BUG-07） */
+      if (view.page !== 'patient') {
+        closeSheet();
+        toast('「' + t.name + '」共 ' + t.items.length + ' 次随访。请进入患者详情页 → 随访管理 套用。');
+        return;
+      }
       var pp = getPatient(view.pid);
-      if (!pp) { closeSheet(); toast('「' + t.name + '」共 ' + t.items.length + ' 次随访。请进入患者详情页套用。'); return; }
+      if (!pp) { closeSheet(); toast('未找到患者，请重新进入患者详情页'); return; }
       applyTplToPatient(pp, { name: t.name, items: t.items, base: followupTplBase(pp) || treatmentEndOf(pp) });
       render();
       toast('已按「' + t.name + '」排出 ' + t.items.length + ' 次随访');
@@ -3380,7 +3585,12 @@ function bind() {
       var pp = getPatient(view.pid);
       if (pp) sheetFollowupTemplate(pp); else closeSheet();
     },
-    'tpl-back': function () { sheetFollowupTemplate(getPatient(view.pid)); },
+    'mk-reset': function () {
+      if (!confirm('恢复内置调休上班日？\n\n将清除你对「调休上班日」的全部自定义增删；法定节假日不受影响。')) return;
+      lsSet('radiotherapy.makeups', {});
+      render(); toast('已恢复内置调休上班日');
+      if (reopenSheet) reopenSheet();
+    },
     'toggle-makeup': function () { setMakeupAsWorkday(!makeupAsWorkday()); render(); toast(makeupAsWorkday() ? '调休上班日已按工作日治疗' : '调休上班日不再治疗'); },
     'selftest': function () { runSelfTest(); },
     'export-raw': function () { exportRawData(); },
@@ -3418,6 +3628,32 @@ function showDataNotice() {
   }
 }
 
+/* ================= 新版本提示 ================= */
+/* 发布新版本后，SW 在 activate 阶段广播 RT_SW_UPDATED；
+   页面据此提示用户刷新（HTML 走网络优先，刷新即拿到新版）。 */
+var updateBarShown = false;
+function showUpdateBar() {
+  if (updateBarShown) return;
+  updateBarShown = true;
+  var bar = document.createElement('div');
+  bar.style.cssText = 'position:fixed;left:12px;right:12px;bottom:72px;z-index:98;background:#0f766e;color:#fff;' +
+    'border-radius:12px;padding:10px 12px;display:flex;align-items:center;gap:10px;font-size:14px;' +
+    'box-shadow:0 8px 24px rgba(15,118,110,.32)';
+  var txt = document.createElement('div');
+  txt.style.cssText = 'flex:1;line-height:1.45';
+  txt.textContent = '应用已更新到新版本，刷新后生效';
+  var go = document.createElement('button');
+  go.textContent = '刷新';
+  go.style.cssText = 'border:0;border-radius:8px;padding:7px 14px;background:#fff;color:#0f766e;font-size:14px;font-weight:600';
+  go.addEventListener('click', function () { location.reload(); });
+  var no = document.createElement('button');
+  no.textContent = '稍后';
+  no.style.cssText = 'border:0;background:transparent;color:rgba(255,255,255,.85);font-size:13px;padding:6px 4px';
+  no.addEventListener('click', function () { if (bar.parentElement) bar.parentElement.removeChild(bar); });
+  bar.appendChild(txt); bar.appendChild(go); bar.appendChild(no);
+  document.body.appendChild(bar);
+}
+
 /* ================= 初始化 ================= */
 function init() {
   load();
@@ -3431,7 +3667,21 @@ function init() {
   render();
   showDataNotice();
   if ('serviceWorker' in navigator && location.protocol.indexOf('http') === 0) {
-    navigator.serviceWorker.register('./sw.js').catch(function () { });
+    navigator.serviceWorker.register('./sw.js').then(function (reg) {
+      /* 已存在等待中的新版本（例如后台更新已完成）→ 直接提示 */
+      if (reg.waiting && navigator.serviceWorker.controller) showUpdateBar();
+      reg.addEventListener('updatefound', function () {
+        var nw = reg.installing;
+        if (!nw) return;
+        nw.addEventListener('statechange', function () {
+          if (nw.state === 'installed' && navigator.serviceWorker.controller) showUpdateBar();
+        });
+      });
+    }).catch(function () { });
+    /* SW 广播的版本更新消息 */
+    navigator.serviceWorker.addEventListener('message', function (ev) {
+      if (ev.data && ev.data.type === 'RT_SW_UPDATED') showUpdateBar();
+    });
   }
 }
 init();

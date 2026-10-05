@@ -3,10 +3,11 @@
   "short_name": "放疗管理",
   "description": "放疗科患者管理（离线使用，数据只存本机）",
   "lang": "zh-CN",
+  "id": "./",
   "start_url": "./",
   "scope": "./",
   "display": "standalone",
-  "orientation": "portrait",
+  "orientation": "any",
   "background_color": "#f2f4f7",
   "theme_color": "#0f766e",
   "icons": [
