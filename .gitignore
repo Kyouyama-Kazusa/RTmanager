@@ -1,0 +1,14 @@
+# 临时与调试文件
+_*.html
+_chk.js
+_diag.js
+*.log
+
+# 系统文件
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# 编辑器
+.vscode/
+.idea/
