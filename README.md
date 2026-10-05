@@ -5,6 +5,49 @@
 
 ---
 
+## 本仓库信息
+
+| 项 | 值 |
+|---|---|
+| 仓库 | <https://github.com/Kyouyama-Kazusa/radiotherapy> |
+| 访问地址 | <https://kyouyama-kazusa.github.io/radiotherapy/> |
+| 远程 | `git@github.com:Kyouyama-Kazusa/radiotherapy.git`（SSH） |
+| 分支 | `main` |
+
+### 首次使用需开启 GitHub Pages
+
+仓库 `Settings → Pages`：
+
+- **Source**：`Deploy from a branch`
+- **Branch**：`main`，目录 `/ (root)`
+- 点 **Save**
+
+约 1~2 分钟后访问地址即可打开。
+
+---
+
+## 日常更新流程（改完代码后）
+
+```bash
+cd radiotherapy-ward
+
+# 1. 改完代码后，务必递增 sw.js 的缓存版本号
+#    （radiotherapy-v4 → radiotherapy-v5），否则客户端会停留在旧版本
+
+# 2. 提交
+git add -A
+git commit -m "说明这次改了什么"
+
+# 3. 推送
+git push
+```
+
+推送后 GitHub Pages 会自动重新部署，约 1 分钟生效。
+
+> 忘记递增缓存版本号的后果：已安装到桌面的用户会长时间看到旧版本。
+
+---
+
 ## 文件清单
 
 | 文件 | 作用 | 必需 |
