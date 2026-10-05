@@ -225,7 +225,7 @@ button,input,select,textarea{font:inherit;color:inherit}
 var LS_KEY = 'radiotherapy.v1';
 var SNAP_PREFIX = 'radiotherapy.snap.';
 var SNAP_KEEP = 7;
-var APP_VERSION = '0.4.0';
+var APP_VERSION = '0.5.0';
 
 var SEXES = ['男', '女'];
 var PURPOSES = ['根治性', '术后辅助', '术前新辅助', '姑息性'];
@@ -857,39 +857,48 @@ function computeSchedule(p) {
   var useMk = makeupAsWorkday();
   var extraMap = {};
   (p.extras || []).forEach(function (e) { if (e.date) extraMap[dateOnly(e.date)] = e.reason || '加照'; });
-  var doneSet = {};
-  (p.doneDates || []).forEach(function (d) { doneSet[dateOnly(d)] = 1; });
 
   var cur = parseD(p.startDate);
   if (!cur) return out;
   /* 患者是否按「整周工作日」治疗（周一~周五全选）。
      只有这种节奏才随国家调休上班日加班；周一三五等自定义节奏不受调休影响。 */
   var fullWeek = [1, 2, 3, 4, 5].every(function (d) { return days.indexOf(d) >= 0; });
+  /* 完成状态按日期推算：计划日期 ≤ 今天即视为已完成。
+     异常（当天确实未做）通过「中断/顺延」修正，无需逐次手工标记。 */
+  var today = todayStr();
   var n = 0, guard = 0;
   while (n < total && guard < 5000) {
     guard++;
     var ds = dstr(cur), dow = cur.getDay();
     var isHoliday = Object.prototype.hasOwnProperty.call(hol, ds);
     var isMakeup = Object.prototype.hasOwnProperty.call(mk, ds);
+    /* 调休上班日优先于节假日：同一日期既在节假日又在调休时，按工作日治疗 */
     var baseOk = days.indexOf(dow) >= 0 || (useMk && isMakeup && fullWeek);
     var isExtra = Object.prototype.hasOwnProperty.call(extraMap, ds);
-    /* 显式「加照」的日期优先于节假日规则（医生已明确指定要治疗）；
-       但中断期间一律不排（患者不在治疗状态）。 */
     var blocked = inPause(p, ds) || (isHoliday && !isMakeup && !isExtra);
     if ((baseOk || isExtra) && !blocked) {
       n++;
-      out.push({ date: ds, fraction: n, done: !!doneSet[ds], extra: isExtra, reason: isExtra ? extraMap[ds] : '' });
+      out.push({ date: ds, fraction: n, done: ds <= today, extra: isExtra, reason: isExtra ? extraMap[ds] : '' });
     }
     cur.setDate(cur.getDate() + 1);
   }
   return out;
 }
 function scheduleEnd(p) { var s = computeSchedule(p); return s.length ? s[s.length - 1].date : ''; }
+/* 已完成次数 = 计划中日期已过去的次数（按日期推算，无需手工标记） */
 function doneCount(p) { return computeSchedule(p).filter(function (x) { return x.done; }).length; }
 function plannedCount(p) { return computeSchedule(p).length; }
 function accumulatedDose(p) { return doneCount(p) * (parseFloat(p.dosePerFraction) || 0); }
 function scheduleOn(p, date) { var s = computeSchedule(p); for (var i = 0; i < s.length; i++) if (s[i].date === date) return s[i]; return null; }
-function isDoneOn(p, date) { return (p.doneDates || []).indexOf(dateOnly(date)) >= 0; }
+/* 今日治疗项（若有） */
+function todayItemOf(p) { return scheduleOn(p, todayStr()); }
+/* 剩余未治疗次数 */
+function remainCount(p) { return Math.max(0, plannedCount(p) - doneCount(p)); }
+/* 某日是否已完成：按日期推算（计划日期 ≤ 今天），不再依赖手工标记 */
+function isDoneOn(p, date) {
+  var ds = dateOnly(date);
+  return !!scheduleOn(p, ds) && ds <= todayStr();
+}
 function todayItems(p) { var it = scheduleOn(p, todayStr()); return it || null; }
 
 /* ================= 患者查询 ================= */
@@ -919,21 +928,15 @@ function buildTodo() {
         reasons.push('待排程'); details.push('请填写放疗开始日期与总次数，自动生成治疗日历');
       } else {
         var t = todayItems(p);
-        if (t) {
-          if (t.done) { /* 今日已完成，不提示 */ }
-          else { reasons.push('今日应治疗'); details.push('今日为第 ' + t.fraction + ' 次治疗日' + (t.extra ? '（加照）' : '') + '，尚未标记完成'); }
-        }
-        /* 近期遗漏：最近 7 天内已过、未完成且不在中断期的治疗日 */
-        var miss = computeSchedule(p).filter(function (x) {
-          return !x.done && x.date < today && daysBetween(x.date, today) <= 7 && !inPause(p, x.date);
-        });
-        if (miss.length) {
-          reasons.push('遗漏 ' + miss.length + ' 次');
-          details.push('未标记完成：' + miss.map(function (x) { return mdLabel(x.date) + '(第' + x.fraction + '次)'; }).join('、'));
-        }
-        if (p.totalDose && plannedCount(p) >= parseInt(p.fractions, 10)) {
-          var dn = doneCount(p), tot = parseInt(p.fractions, 10);
-          if (dn >= Math.floor(tot * 0.95) && dn < tot) { reasons.push('即将完成'); details.push('已完成 ' + dn + '/' + tot + ' 次'); }
+        if (t) { reasons.push('今日应治疗'); details.push('今日为第 ' + t.fraction + ' 次治疗日' + (t.extra ? '（加照）' : '')); }
+        var tot = parseInt(p.fractions, 10);
+        var dn = doneCount(p);
+        var end = scheduleEnd(p);
+        /* 疗程已排完（所有计划日期都已过去）但仍是「在治」→ 提示归档 */
+        if (end && end < today && dn >= tot) {
+          reasons.push('疗程已结束'); details.push('计划 ' + tot + ' 次已全部完成，可确认「治疗完成」归档');
+        } else if (dn >= Math.floor(tot * 0.95) && dn < tot) {
+          reasons.push('即将完成'); details.push('已完成 ' + dn + '/' + tot + ' 次');
         }
       }
     }
@@ -1195,6 +1198,7 @@ function renderPatientPage() {
     h += '<div class="card"><div class="section-title">治疗进度' +
       '<span class="chip pri">' + dn + '/' + tot + ' 次 · ' + accDose.toFixed(1) + ' Gy</span></div>' +
       '<div class="progress' + (dn >= tot * 0.95 ? ' warn' : '') + '"><div class="fill" style="width:' + Math.min(100, tot ? dn / tot * 100 : 0) + '%"></div></div>' +
+      '<div class="hint" style="margin-top:6px">按日期自动推算：计划日期已过的即计入已完成，无需逐次标记。异常（当天未做）用「本次未做」修正。</div>' +
       '<div class="kv" style="margin-top:6px"><div class="k">开始日期</div><div class="v">' + dateOnly(p.startDate) + '</div></div>' +
       '<div class="kv"><div class="k">预计结束</div><div class="v">' + (end || '—') + (end ? '（' + WEEKDAYS[parseD(end).getDay()] + '）' : '') + (missY.length ? ' <span class="chip warn sm">含未录入年份</span>' : '') + '</div></div>' +
       (missY.length ? '<div class="hint" style="margin-top:8px;padding:8px 10px;background:var(--warn-soft);border-radius:8px;line-height:1.7">⚠ 排程涉及 <b>' + missY.join('、') + ' 年</b>，暂无该年节假日数据，已按「周一~周五工作日 + 周末休息」估算。补录假期后结束日期会自动重算。</div>' : '') +
@@ -1213,7 +1217,7 @@ function renderPatientPage() {
     var cells = {};
     Object.keys(byDate).forEach(function (ds) {
       var x = byDate[ds];
-      var cls = x.done ? 'done' : (ds < todayStr() ? 'miss' : (x.extra ? 'extra' : ''));
+      var cls = x.done ? 'done' : (x.extra ? 'extra' : '');
       cells[ds] = '<div class="tagline ' + cls + '">第' + x.fraction + '次' + (x.done ? '✓' : '') + '</div>';
     });
     (p.pauses || []).forEach(function (pa) {
@@ -1226,8 +1230,8 @@ function renderPatientPage() {
     });
     h += '<div class="cal-wrap">' + calHeader(y, m) + calDowRow() + calBody(y, m, cells) +
       '<div class="cal-legend"><span><i style="background:#e5f3f1"></i>待治疗</span><span><i style="background:#e5f3f1;opacity:.6"></i>已完成</span>' +
-      '<span><i style="background:#fdecea"></i>未标记</span><span><i style="background:#fdf0e0"></i>加照</span><span><i style="background:#eef1f5"></i>中断</span></div>' +
-      '<div class="hint" style="margin-top:6px">点日历上的治疗日可标记完成 / 取消</div></div>';
+      '<span><i style="background:#fdf0e0"></i>加照</span><span><i style="background:#eef1f5"></i>中断</span></div>' +
+      '<div class="hint" style="margin-top:6px">点日历上的治疗日可登记「本次未做」或加照</div></div>';
   }
 
   /* 副反应 */
@@ -2018,7 +2022,9 @@ function sheetExtraList(p) {
   });
 }
 
-/* ================= 日历日操作 ================= */
+/* ================= 日历日操作 =================
+   完成状态按日期自动推算，因此这里不再有「标记完成」，
+   只保留异常修正：本次未做（后续顺延）、停止治疗、加照、恢复治疗。 */
 function sheetDayOverall(date) {
   if (!date) return;
   var arr = [];
@@ -2027,27 +2033,29 @@ function sheetDayOverall(date) {
     if (it) arr.push({ p: p, it: it });
   });
   var hol = holidays(), mk = makeups();
-  var tag = Object.prototype.hasOwnProperty.call(hol, date) ? '<span class="chip danger">法定节假日 ' + esc(hol[date]) + '</span>'
-    : (Object.prototype.hasOwnProperty.call(mk, date) ? '<span class="chip warn">调休上班 ' + esc(mk[date]) + '</span>' : '');
-  var pending = arr.filter(function (a) { return !a.it.done; });
+  var isHol = Object.prototype.hasOwnProperty.call(hol, date);
+  var isMk = Object.prototype.hasOwnProperty.call(mk, date);
+  var tag = '';
+  if (isHol && isMk) tag = '<span class="chip warn">节假日·已设为调休上班</span>';
+  else if (isHol) tag = '<span class="chip danger">法定节假日 ' + esc(hol[date]) + '</span>';
+  else if (isMk) tag = '<span class="chip warn">调休上班 ' + esc(mk[date]) + '</span>';
+  var isPast = date < todayStr();
+  var isToday = date === todayStr();
   openSheet({
     title: date + ' ' + WEEKDAYS[parseD(date).getDay()],
     body: '<div style="margin-bottom:8px">' + tag + '<span class="chip sm">共 ' + arr.length + ' 人</span>' +
-      (pending.length ? '<span class="chip warn sm">待治疗 ' + pending.length + '</span>' : '<span class="chip ok sm">全部完成</span>') + '</div>' +
+      (isToday ? '<span class="chip pri sm">今天</span>' : '') + '</div>' +
       (arr.length ? arr.map(function (a) {
         return '<div class="event"><div class="head"><span class="chip pri">第 ' + a.it.fraction + ' 次</span>' +
           (a.it.extra ? '<span class="chip warn sm">加照</span>' : '') +
           (a.it.done ? '<span class="chip ok sm">已完成</span>' : '<span class="chip sm">待治疗</span>') + '</div>' +
           '<div class="content">' + esc(a.p.name) + ' <span class="hint">' + esc(a.p.diagnosis || '') + '</span></div>' +
           '<div class="acts">' +
-          (a.it.done ? '<button class="btn sm" data-act="unmark" data-id="' + a.p.id + '" data-date="' + date + '">取消完成</button>'
-            : '<button class="btn sm primary" data-act="mark" data-id="' + a.p.id + '" data-date="' + date + '">标记完成</button>') +
+          (a.it.done || isToday
+            ? '<button class="btn sm" data-act="skip-here" data-id="' + a.p.id + '" data-date="' + date + '">本次未做（顺延）</button>' : '') +
           '<button class="btn sm" data-act="open-patient" data-id="' + a.p.id + '">查看</button></div></div>';
       }).join('') : '<div class="hint">当天未安排治疗</div>'),
-    actions: [
-      (pending.length ? { label: '全部标记完成（' + pending.length + '）', act: 'mark-all', date: date, primary: true, full: true } : null),
-      { label: '关闭', act: 'sheet-close', full: !pending.length }
-    ].filter(Boolean)
+    actions: [{ label: '关闭', act: 'sheet-close', full: true }]
   });
   reopenSheet = function () { sheetDayOverall(date); };
 }
@@ -2057,25 +2065,25 @@ function sheetDayPatient(p, date) {
   var pa = pauseOn(p, date);
   var isPause = !!pa;
   var body = '<div style="margin-bottom:8px">';
-  if (it) body += '<span class="chip pri">第 ' + it.fraction + ' 次</span>' + (it.extra ? '<span class="chip warn sm">加照</span>' : '');
+  if (it) body += '<span class="chip pri">第 ' + it.fraction + ' 次</span>' + (it.extra ? '<span class="chip warn sm">加照</span>' : '') +
+    (it.done ? '<span class="chip ok sm">已完成</span>' : '<span class="chip sm">待治疗</span>');
   else if (isPause) body += '<span class="chip warn">中断中</span>';
   else body += '<span class="chip sm">非治疗日</span>';
   body += '</div>';
   if (isPause) body += '<div class="hint" style="margin-bottom:8px">中断：' + esc(pa.reason || '') + '（' + dateOnly(pa.from) + ' ~ ' + dateOnly(pa.to) + '）</div>';
+  if (it && it.done) body += '<div class="hint" style="margin-bottom:8px">该次已按日期计入「已完成」。若当天实际未治疗，请点下方「本次未做」。</div>';
   if (!it && !isPause) body += '<div class="hint" style="margin-bottom:8px">该日不在治疗计划内，可加照（额外安排一次治疗）或设为中断起点。</div>';
 
   /* 操作按钮固定在底部，内容再长也始终可点 */
   var acts = [];
-  if (it) {
-    acts.push(it.done
-      ? { label: '取消「已完成」', act: 'unmark', id: p.id, date: date }
-      : { label: '标记本次已完成', act: 'mark', id: p.id, date: date, primary: true });
+  if (it && scheduleEnd(p) > todayStr() || (it && it.done)) {
+    acts.push({ label: '本次未做（后续顺延）', act: 'skip-here', id: p.id, date: date });
   }
   acts.push(isPause
     ? { label: '从此日恢复治疗', act: 'resume-here', id: p.id, date: date }
     : { label: '本日停止治疗（后续顺延）', act: 'stop-here', id: p.id, date: date });
   if (!it && !isPause) {
-    acts.push({ label: '本日加照', act: 'add-extra-date', id: p.id, date: date });
+    acts.push({ label: '本日加照', act: 'add-extra-date', id: p.id, date: date, primary: true });
   }
 
   openSheet({ title: (p.name || '') + ' · ' + date, body: body, actions: acts });
@@ -2163,7 +2171,7 @@ function exportCsv() {
   state.patients.forEach(function (p) {
     computeSchedule(p).forEach(function (it) {
       lines.push([p.mrn || '', p.name || '', it.fraction, it.date, WEEKDAYS[parseD(it.date).getDay()],
-        it.done ? '已完成' : (it.date < todayStr() ? '未标记' : '待治疗'), it.extra ? '加照' : '',
+        it.done ? '已完成' : '待治疗', it.extra ? '加照' : '',
         it.reason || (inPause(p, it.date) ? '中断期' : '')].map(csvCell).join(','));
     });
   });
@@ -2344,40 +2352,25 @@ function toast(msg) {
 }
 
 /* ================= 操作 ================= */
-/* 批量：把某天所有待治疗患者一次性标记完成（交班时用） */
-function markAllDone(date) {
-  var arr = [];
-  inTreat().forEach(function (p) {
-    var it = scheduleOn(p, date);
-    if (it && !it.done) arr.push(p);
-  });
-  if (!arr.length) { toast('该日没有待治疗的患者'); return; }
-  if (!confirm('把 ' + date + ' 当天 ' + arr.length + ' 位患者全部标记为「已完成」？\n\n（' + arr.map(function (p) { return p.name; }).join('、') + '）')) return;
-  arr.forEach(function (p) {
-    p.doneDates = p.doneDates || [];
-    if (p.doneDates.indexOf(date) < 0) p.doneDates.push(date);
-  });
-  save(); render();
-  if (reopenSheet) reopenSheet();
-  toast('已标记 ' + arr.length + ' 位患者完成');
-}
-
-function markDone(pid, date) {
-  var p = getPatient(pid); if (!p) return;
-  p.doneDates = p.doneDates || [];
-  var ds = dateOnly(date);
-  if (p.doneDates.indexOf(ds) < 0) p.doneDates.push(ds);
-  save(); render();
-  if (reopenSheet) reopenSheet();
-  toast('已标记完成（第 ' + doneCount(p) + '/' + (parseInt(p.fractions, 10) || 0) + ' 次）');
-}
-function unmarkDone(pid, date) {
+/* 异常修正：某次实际未做 → 记 1 天中断，该次不计入已完成，后续自动顺延。
+   （完成状态本身由日期推算，无需手工标记；这里只处理"计划外偏差"） */
+function skipHere(pid, date) {
   var p = getPatient(pid); if (!p) return;
   var ds = dateOnly(date);
-  p.doneDates = (p.doneDates || []).filter(function (x) { return dateOnly(x) !== ds; });
-  save(); render();
-  if (reopenSheet) reopenSheet();
-  toast('已取消完成标记');
+  if (inPause(p, ds)) { toast('该日已在中断区间内'); return; }
+  openSheet({
+    title: '本次未做（顺延）', okText: '确认',
+    body: '<div class="hint" style="margin-bottom:10px;line-height:1.75">' +
+      ds + ' 的治疗不会计入已完成，该次及之后的日程顺延一天。</div>' +
+      field('原因', areaInput('reason', '', '如 患者未到 / 身体不适 / 设备故障')),
+    onSave: function (v) {
+      p.pauses = p.pauses || [];
+      p.pauses.push({ id: uid('pa'), from: ds, to: ds, reason: v.reason || '本次未做' });
+      save(); render();
+      if (reopenSheet) reopenSheet();
+      toast('已记录未做，日程已顺延');
+    }
+  });
 }
 function stopHere(pid, date) {
   var p = getPatient(pid); if (!p) return;
@@ -2529,19 +2522,28 @@ function missingHolidayYearsForUi() {
 }
 function sheetHolidayManage() {
   var hol = holidays();
+  var mk = makeups();
   var dates = Object.keys(hol).sort();
   var hasOverride = Object.keys(holidayOverride()).length > 0;
   var missY = missingHolidayYearsForUi();
+  var overlaps = dates.filter(function (d) { return Object.prototype.hasOwnProperty.call(mk, d); });
   var body = '<div class="hint" style="margin-bottom:10px;line-height:1.7">排程时会跳过这些日期。可增删，改动立即生效。</div>';
+  if (overlaps.length) {
+    body += '<div class="hint" style="padding:9px 11px;background:var(--warn-soft);border-radius:9px;line-height:1.75;margin-bottom:10px">' +
+      '⚠ 有 ' + overlaps.length + ' 天同时被设为「调休上班」（' + overlaps.map(function (d) { return mdLabel(d); }).join('、') + '）。' +
+      '这种情况下<b>按调休上班处理</b>，即当天照常安排治疗。若要恢复为休息，请在「调休上班日」中删除该日期。</div>';
+  }
   if (!dates.length) body += '<div class="hint">暂无节假日数据</div>';
   Object.keys(groupByYear(dates)).forEach(function (y) {
     var ds = groupByYear(dates)[y];
     body += '<div class="event" style="padding:9px 11px"><div class="head" style="margin-bottom:4px">' +
       '<span class="chip pri">' + y + ' 年</span><span class="chip sm">' + ds.length + ' 天</span></div>' +
       ds.map(function (d) {
-        return '<div style="display:flex;align-items:center;gap:10px;padding:5px 0;font-size:14px;border-top:1px dashed var(--line)">' +
+        var isBoth = Object.prototype.hasOwnProperty.call(mk, d);
+        return '<div style="display:flex;align-items:center;gap:8px;padding:5px 0;font-size:14px;border-top:1px dashed var(--line)">' +
           '<span style="flex:0 0 auto;color:var(--sub);font-size:13px">' + d.slice(5).replace('-', '/') + '</span>' +
-          '<span style="flex:1">' + esc(hol[d]) + (isBuiltinHol(d) ? ' <span class="hint">内置</span>' : ' <span class="chip sm">自定义</span>') + '</span>' +
+          '<span style="flex:1">' + esc(hol[d]) + (isBuiltinHol(d) ? ' <span class="hint">内置</span>' : ' <span class="chip sm">自定义</span>') +
+          (isBoth ? ' <span class="chip warn sm">也是调休上班</span>' : '') + '</span>' +
           '<button style="flex:0 0 auto;border:0;background:transparent;color:var(--danger);font-size:16px;cursor:pointer;padding:2px 6px" data-act="hol-del" data-date="' + d + '">✕</button>' +
           '</div>';
       }).join('') + '</div>';
@@ -2561,17 +2563,20 @@ function sheetHolidayManage() {
 /* 调休上班日管理 */
 function sheetMakeupManage() {
   var mk = makeups();
+  var hol = holidays();
   var dates = Object.keys(mk).sort();
-  var body = '<div class="hint" style="margin-bottom:10px;line-height:1.7">这些周末按工作日安排治疗。是否生效取决于上方「调休上班日安排治疗」开关。</div>';
+  var body = '<div class="hint" style="margin-bottom:10px;line-height:1.7">这些日期按工作日安排治疗，<b>优先于节假日</b>。是否生效取决于上方「调休上班日安排治疗」开关。</div>';
   if (!dates.length) body += '<div class="hint">暂无调休上班日</div>';
   Object.keys(groupByYear(dates)).forEach(function (y) {
     var ds = groupByYear(dates)[y];
     body += '<div class="event" style="padding:9px 11px"><div class="head" style="margin-bottom:4px">' +
       '<span class="chip pri">' + y + ' 年</span><span class="chip sm">' + ds.length + ' 天</span></div>' +
       ds.map(function (d) {
-        return '<div style="display:flex;align-items:center;gap:10px;padding:5px 0;font-size:14px;border-top:1px dashed var(--line)">' +
+        var alsoHol = Object.prototype.hasOwnProperty.call(hol, d);
+        return '<div style="display:flex;align-items:center;gap:8px;padding:5px 0;font-size:14px;border-top:1px dashed var(--line)">' +
           '<span style="flex:0 0 auto;color:var(--sub);font-size:13px">' + d.slice(5).replace('-', '/') + ' ' + WEEKDAYS[parseD(d).getDay()] + '</span>' +
-          '<span style="flex:1">' + esc(mk[d]) + (isBuiltinMk(d) ? ' <span class="hint">内置</span>' : ' <span class="chip sm">自定义</span>') + '</span>' +
+          '<span style="flex:1">' + esc(mk[d]) + (isBuiltinMk(d) ? ' <span class="hint">内置</span>' : ' <span class="chip sm">自定义</span>') +
+          (alsoHol ? ' <span class="chip danger sm">也是节假日</span>' : '') + '</span>' +
           '<button style="flex:0 0 auto;border:0;background:transparent;color:var(--danger);font-size:16px;cursor:pointer;padding:2px 6px" data-act="mk-del" data-date="' + d + '">✕</button>' +
           '</div>';
       }).join('') + '</div>';
@@ -2597,6 +2602,14 @@ function sheetAddHoliday() {
       if (to < v.from) { toast('结束日期不能早于开始日期'); return false; }
       var n = daysBetween(v.from, to);
       if (n > 60) { toast('区间过长（最多 60 天）'); return false; }
+      /* 与调休上班日重叠时先提示：该日期实际仍会安排治疗 */
+      var mk = makeups(), clash = [];
+      for (var k = 0; k <= n; k++) {
+        var d0 = addDays(v.from, k);
+        if (Object.prototype.hasOwnProperty.call(mk, d0)) clash.push(d0);
+      }
+      if (clash.length && !confirm('以下日期已设为「调休上班日」：' + clash.join('、') +
+        '\n\n同一日期既在节假日又在调休时，排程按「调休上班」处理，当天仍会安排治疗。\n仍要作为节假日添加吗？')) return false;
       for (var i = 0; i <= n; i++) setHoliday(addDays(v.from, i), v.name || '节假日');
       render(); toast('已添加 ' + (n + 1) + ' 天');
       sheetHolidayManage();      /* 保存后回到列表 */
@@ -2617,6 +2630,14 @@ function sheetAddMakeup() {
       if (to < v.from) { toast('结束日期不能早于开始日期'); return false; }
       var n = daysBetween(v.from, to);
       if (n > 30) { toast('区间过长（最多 30 天）'); return false; }
+      /* 与节假日重叠时说明优先级：调休优先，当天照常治疗 */
+      var hol = holidays(), clash = [];
+      for (var k = 0; k <= n; k++) {
+        var d0 = addDays(v.from, k);
+        if (Object.prototype.hasOwnProperty.call(hol, d0)) clash.push(d0 + '（' + hol[d0] + '）');
+      }
+      if (clash.length && !confirm('以下日期本来是法定节假日：' + clash.join('、') +
+        '\n\n设为调休上班后，这些天将按工作日安排治疗。\n确定继续吗？')) return false;
       for (var i = 0; i <= n; i++) setMakeup(addDays(v.from, i), v.name || '调休上班');
       render(); toast('已添加 ' + (n + 1) + ' 天');
       sheetMakeupManage();       /* 保存后回到列表 */
@@ -2656,11 +2677,8 @@ function buildDemoState() {
       reactions: [{ site: '放射性膀胱炎', grade: '2级（中）', foundAt: d(-4) + 'T14:00', content: '尿频、尿急，排尿轻度疼痛', status: '已复查未解除', nextCheckAt: d(-1), plan: '多饮水，碱化尿液，必要时抗炎', planAt: d(-4) + 'T14:30', followups: [{ at: d(-1) + 'T11:00', content: '复查尿常规白细胞较前下降，症状稍有缓解' }] }] }
   ];
   var st = normalize({ version: 2, updatedAt: '', patients: P });
-  /* 按自动排程反推已完成日期，确保与日历一致（自动跳过节假日与中断） */
+  /* 完成次数由日期推算，无需预置；仅生成随访模板 */
   st.patients.forEach(function (p, i) {
-    var n = P[i] && P[i]._doneCount;
-    if (n != null && n > 0) p.doneDates = computeSchedule(p).slice(0, n).map(function (x) { return x.date; });
-    /* 随访模板：由 _followupTpl 生成「计划 + 模板」两类记录 */
     var tpl = P[i] && P[i]._followupTpl;
     if (tpl && tpl.length) {
       var cb = p.completedAt ? dateOnly(p.completedAt) : todayStr();
@@ -2747,9 +2765,7 @@ function bind() {
       if (view.page === 'patient' && view.pid) sheetDayPatient(getPatient(view.pid), date);
       else sheetDayOverall(date);
     },
-    'mark': function (el) { markDone(el.dataset.id, el.dataset.date); },
-    'mark-all': function (el) { markAllDone(el.dataset.date); },
-    'unmark': function (el) { unmarkDone(el.dataset.id, el.dataset.date); },
+    'skip-here': function (el) { skipHere(el.dataset.id, el.dataset.date); },
     'stop-here': function (el) { stopHere(el.dataset.id, el.dataset.date); },
     'resume-here': function (el) { resumeHere(el.dataset.id, el.dataset.date); },
     'add-extra-date': function (el) { addExtraDate(el.dataset.id, el.dataset.date); },
