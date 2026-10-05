@@ -23,6 +23,19 @@
 - 换设备用「导出 → 导入」，**选「合并导入」不会丢数据**
 - 不要更换域名 —— 数据按域名隔离存储；同一域名下换路径不受影响
 
+## 云同步（可选，加密存到 GitHub）
+
+`⋯ → 云同步（加密存到 GitHub）`，用你自己的 GitHub 账号做跨设备同步，**不需要服务器**。
+
+- 云端只存**加密后的数据**，密钥和 Token 只在本机。GitHub 的 Secret Gist 并非真正私有
+  （知道链接就能访问），所以加密是前提，不是可选项
+- 换设备只需「同一个 Token + 同一个密码」，或粘贴云端地址
+- 拉取默认走**合并导入**，两台设备各改各的都不会互相覆盖
+- 需要 https 打开才能加密（线上地址或本机 localhost，`file://` 不可用）
+
+配置步骤见设置页内的引导。Token 只需 `gist` 权限：
+Classic token 勾选 `gist`；Fine-grained token 把 `Gists` 设为 Read and write。
+
 ## 文件
 
 | 文件 | 作用 |
@@ -35,7 +48,7 @@
 | `.nojekyll` | 让 GitHub Pages 跳过 Jekyll 处理，空文件 |
 | `README.md` | 本说明 |
 
-数据都放在浏览器 `localStorage`（键名前缀 `radiotherapy.`），共四类：
+数据都放在浏览器 `localStorage`（键名前缀 `radiotherapy.`），共五类：
 
 | 键 | 内容 |
 |---|---|
@@ -43,16 +56,21 @@
 | `radiotherapy.snap.*` | 每日自动快照（保留最近 7 天，可在设置里按日期回退） |
 | `radiotherapy.backup.*` | 更新前自动备份（保留最近 3 份，可回退） |
 | `radiotherapy.holidays`／`.makeups`／`.tpls` | 用户自定义的节假日、调休上班日、随访模板（升级不丢） |
+| `radiotherapy.sync` | 云同步配置（GitHub Token、密码、云端地址） |
+
+> 云同步的密码默认保存在本机（可在设置里取消勾选）。**忘记密码将无法解密云端数据**，
+> 且没有任何找回方式 —— 请单独记好。本机数据不受影响。
 
 ## 维护
 
-改动推送前，递增 `sw.js` 里的 `CACHE` 版本号（当前 `radiotherapy-v12`），
+改动推送前，递增 `sw.js` 里的 `CACHE` 版本号（当前 `radiotherapy-v13`），
 否则已安装到桌面的用户会停留在旧版本。也可以直接用 `dev-tools/push.sh` 自动递增并推送。
 
-回归测试（`dev-tools/`，共 873 项断言，全部只读取 `index.html`，不修改源码）：
+回归测试（`dev-tools/`，共 973 项断言，全部只读取 `index.html`，不修改源码）：
 
 ```bash
 node qa-audit.js                    # 缺陷修复验收（108 项，覆盖 12 项已知缺陷）
+node test-sync.js                   # 云同步全链路（模拟 GitHub API，81 项）
 node test-*.js                      # 排程 / 迁移 / 合并 / 随访 / 模板 / AI / SW ...
 node qa-perf.js                     # 渲染耗时与存储占用探针
 ```

@@ -5,7 +5,7 @@
    - 全部兜底都会返回真正的 Response，绝不 resolve 成 undefined（否则离线时页面报错）
    - 检测到旧缓存被替换（即发生过版本升级）→ 向页面广播消息，由页面提示「有新版本」
    注意：每次发布新版本，请同步递增下面的 CACHE 版本号。 */
-const CACHE = 'radiotherapy-v12';
+const CACHE = 'radiotherapy-v13';
 const ASSETS = [
   './',
   './index.html',

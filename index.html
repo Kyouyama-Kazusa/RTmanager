@@ -226,7 +226,7 @@ button,input,select,textarea{font:inherit;color:inherit}
 var LS_KEY = 'radiotherapy.v1';
 var SNAP_PREFIX = 'radiotherapy.snap.';
 var SNAP_KEEP = 7;
-var APP_VERSION = '0.8.2';
+var APP_VERSION = '0.9.0';
 
 var SEXES = ['男', '女'];
 var PURPOSES = ['根治性', '术后辅助', '术前新辅助', '姑息性'];
@@ -327,6 +327,16 @@ var migrateNotice = '';     /* 迁移提示文案 */
 
 var BACKUP_PREFIX = 'radiotherapy.backup.';
 var BACKUP_KEEP = 3;
+
+/* 云同步（加密后存到 GitHub Gist）
+   - 配置只存本机（radiotherapy.sync），Token 与密码都不上传
+   - 云端只存密文：PBKDF2-SHA256 派生密钥 + AES-GCM-256 加密
+   - 读写一律走 api.github.com，且禁用缓存（Gist API 带 max-age=60，
+     否则「刚上传完立刻拉取」会读到旧数据） */
+var SYNC_KEY = 'radiotherapy.sync';
+var SYNC_FILE = 'rt-sync.json.enc';
+var SYNC_ITER = 250000;
+var SYNC_API = 'https://api.github.com';
 
 function emptyState() { return { version: SCHEMA_VERSION, updatedAt: '', patients: [] }; }
 
@@ -1619,6 +1629,9 @@ function renderSettingsPage() {
     setRow('import-json', '📥', '导入备份（合并 / 覆盖）', '推荐「合并」：两边新增的患者都会保留') +
     '</div>';
   h += '<div class="setgrp">' +
+    setRow('sync-panel', '☁️', '云同步（加密存到 GitHub）', syncSubText()) +
+    '</div>';
+  h += '<div class="setgrp">' +
     setRow('ai-config', '✨', 'AI 识别设置',
       aiReady() ? ('已配置 · ' + aiProviderPreset(aiConfig().provider).name + ' · ' + aiConfig().model)
         : '未配置 · 用于批量导入患者（支持文字与图片）') +
@@ -2858,18 +2871,22 @@ function importJson(file) {
   reader.readAsText(file);
 }
 
-function askImportMode(inc) {
+/* from 可选：{ label, desc } —— 用于标注来源（文件导入 / 云端拉取） */
+function askImportMode(inc, from) {
   pendingImport = inc;
+  var src = from || {};
+  var srcLabel = src.label || '备份文件';
   var mine = state.patients.length, theirs = inc.patients.length;
   var mineNames = state.patients.map(function (p) { return p.name; }).join('、') || '无';
   openSheet({
     title: '选择导入方式',
-    body: '<div class="hint" style="margin-bottom:10px;line-height:1.75">备份文件含 <b>' + theirs + '</b> 位患者；本机现有 <b>' + mine + '</b> 位。</div>' +
+    body: '<div class="hint" style="margin-bottom:10px;line-height:1.75">' + esc(srcLabel) + '含 <b>' + theirs + '</b> 位患者；本机现有 <b>' + mine + '</b> 位。' +
+      (src.desc ? '<br><span style="color:var(--sub)">' + esc(src.desc) + '</span>' : '') + '</div>' +
       '<div class="event"><div class="head"><span class="chip pri">合并导入（推荐）</span></div>' +
       '<div class="content" style="font-weight:400">两边新增的患者与记录都会保留，按患者自动去重合并，<b>不会丢数据</b>。</div>' +
       '<div class="t">适合两台设备各自录过数据后合并</div></div>' +
       '<div class="event"><div class="head"><span class="chip warn">覆盖导入</span></div>' +
-      '<div class="content" style="font-weight:400">用备份文件<b>完全替换</b>本机数据，本机现有内容将丢失。</div>' +
+      '<div class="content" style="font-weight:400">用' + esc(srcLabel) + '<b>完全替换</b>本机数据，本机现有内容将丢失。</div>' +
       '<div class="t">仅在换新手机、需要完整搬迁时使用</div></div>' +
       '<div class="hint" style="padding:12px 4px 4px;line-height:1.7;border-top:1px dashed var(--line);margin-top:12px">本机现有：' + esc(mineNames) + '</div>',
     actions: [
@@ -3522,6 +3539,13 @@ function bind() {
       save(); closeSheet(); view.page = 'tab'; render();
       toast('已覆盖导入');
     },
+    'sync-panel': function () { sheetSync(); },
+    'sync-setup': function () { sheetSyncSetup(); },
+    'sync-push': function () { syncPush(); },
+    'sync-pull': function () { syncPull(); },
+    'sync-test': function () { syncTest(); },
+    'sync-copy': function () { syncCopyUrl(); },
+    'sync-forget': function () { syncForget(); },
     'restore-snap': function (el) { restoreSnap(el.dataset.key); },
     'restore-backup': function (el) { restoreBackup(el.dataset.key); },
     'treat-days': function () { sheetTreatDays(); },
@@ -3604,6 +3628,436 @@ function bind() {
     var hit = findAct(e.target, acts);
     if (hit) hit.fn(hit.el);
   });
+}
+
+/* ================= 云同步（加密后存到 GitHub Gist） =================
+   为什么这样设计：
+   1. 密钥与 Token 只存本机，云端只有密文。GitHub 的 Secret Gist 并非真正私有
+      （官方文档明确：知道 URL 就能访问），所以加密是必须的，不是可选项。
+   2. 读写一律走 api.github.com 且禁用缓存。Gist API 带 Cache-Control: max-age=60，
+      raw 路径还有 5 分钟 CDN 缓存（X-Cache: HIT），否则会「刚上传完拉取到旧数据」。
+   3. 拉取后走「合并导入」，复用已有的合并逻辑 —— 两台设备各改各的不会互相覆盖。
+
+   配置结构（localStorage: radiotherapy.sync）：
+   { token, gistId, password, remember, device, lastSyncAt, lastRemoteUpdatedAt, lastEtag } */
+
+function syncCfg() {
+  var v = lsGet(SYNC_KEY, null);
+  return (v && typeof v === 'object') ? v : {};
+}
+function setSyncCfg(o) { lsSet(SYNC_KEY, o || {}); }
+function syncHasToken() { return !!String(syncCfg().token || '').trim(); }
+function syncHasGist() { return !!String(syncCfg().gistId || '').trim(); }
+/* 加密依赖 crypto.subtle：必须 https 或 localhost，file:// 下多数浏览器不可用 */
+function syncSupported() { return !!(window.crypto && window.crypto.subtle && window.TextEncoder); }
+
+function syncSubText() {
+  if (!syncSupported()) return '当前环境不可用（需 https 或 localhost 打开）';
+  var c = syncCfg();
+  if (!syncHasToken()) return '未配置 · 加密备份到你的 GitHub，跨设备可用';
+  if (!c.gistId) return '已配置 · 尚未上传（首次上传会自动创建云端数据）';
+  return '已连接 · 上次同步 ' + (c.lastSyncAt ? fmtDT(String(c.lastSyncAt).slice(0, 16)) : '从未');
+}
+
+/* ---------- base64（分块，避免大数组触发 apply 参数上限） ---------- */
+function syncToB64(buf) {
+  var bytes = new Uint8Array(buf), s = '', CH = 0x8000;
+  for (var i = 0; i < bytes.length; i += CH) {
+    s += String.fromCharCode.apply(null, bytes.subarray(i, Math.min(i + CH, bytes.length)));
+  }
+  return btoa(s);
+}
+function syncFromB64(str) {
+  var bin = atob(str), a = new Uint8Array(bin.length);
+  for (var i = 0; i < bin.length; i++) a[i] = bin.charCodeAt(i);
+  return a;
+}
+
+/* ---------- 加密：PBKDF2-SHA256 派生 + AES-GCM-256 ----------
+   密文自带 salt 与 iv，所以跨设备只需要「同一个密码」即可解密。
+   AES-GCM 带认证标签：密码错或密文被改动都会直接失败，不会解出乱码。 */
+function syncDeriveKey(pass, salt) {
+  var enc = new TextEncoder();
+  return crypto.subtle.importKey('raw', enc.encode(pass), 'PBKDF2', false, ['deriveKey'])
+    .then(function (base) {
+      return crypto.subtle.deriveKey(
+        { name: 'PBKDF2', salt: salt, iterations: SYNC_ITER, hash: 'SHA-256' },
+        base, { name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']);
+    });
+}
+function syncEncrypt(pass, plain) {
+  var salt = crypto.getRandomValues(new Uint8Array(16));
+  var iv = crypto.getRandomValues(new Uint8Array(12));
+  return syncDeriveKey(pass, salt).then(function (key) {
+    return crypto.subtle.encrypt({ name: 'AES-GCM', iv: iv }, key, new TextEncoder().encode(plain));
+  }).then(function (ct) {
+    return JSON.stringify({
+      v: 1, app: 'RTmanager', alg: 'PBKDF2-SHA256/AES-GCM-256', iter: SYNC_ITER,
+      salt: syncToB64(salt), iv: syncToB64(iv), data: syncToB64(ct)
+    });
+  });
+}
+function syncDecrypt(pass, blobStr) {
+  var b;
+  try { b = JSON.parse(blobStr); } catch (e) { return Promise.reject(new Error('云端内容不是有效的加密数据')); }
+  if (!b || b.app !== 'RTmanager' || !b.salt || !b.iv || !b.data) {
+    return Promise.reject(new Error('云端内容不是本应用的加密数据'));
+  }
+  return syncDeriveKey(pass, syncFromB64(b.salt)).then(function (key) {
+    return crypto.subtle.decrypt({ name: 'AES-GCM', iv: syncFromB64(b.iv) }, key, syncFromB64(b.data));
+  }).then(function (pt) {
+    return new TextDecoder().decode(pt);
+  }, function () {
+    throw new Error('解密失败：同步密码不对（两台设备必须使用同一个密码）');
+  });
+}
+
+/* ---------- GitHub API ---------- */
+function ghFetch(path, opts) {
+  opts = opts || {};
+  var token = opts.token || String(syncCfg().token || '').trim();
+  var headers = {
+    'Authorization': 'Bearer ' + token,
+    'Accept': 'application/vnd.github+json',
+    'X-GitHub-Api-Version': '2022-11-28'
+  };
+  if (opts.body) headers['Content-Type'] = 'application/json';
+  return fetch(SYNC_API + path, {
+    method: opts.method || 'GET',
+    headers: headers,
+    body: opts.body,
+    cache: 'no-store'          /* 关键：Gist API 带 max-age=60，不禁用会读到旧数据 */
+  }).then(function (r) {
+    return r.text().then(function (t) {
+      var j = null;
+      try { j = JSON.parse(t); } catch (e) { }
+      return { ok: r.ok, status: r.status, json: j, text: t, etag: r.headers.get('etag') || '' };
+    });
+  }, function () {
+    throw new Error('网络请求失败：请检查网络连接（浏览器直连 api.github.com）');
+  });
+}
+function ghErrMsg(r) {
+  var m = (r && r.json && r.json.message) || '';
+  if (!r) return '请求失败';
+  if (r.status === 401) return 'Token 无效或已过期（401）';
+  if (r.status === 403) return 'Token 权限不足或已限流（403）' + (m ? '：' + m : '');
+  if (r.status === 404) return '找不到云端数据（404）：地址可能不对，或 Token 无权访问';
+  if (r.status === 422) return '内容被拒绝（422）' + (m ? '：' + m : '');
+  return 'HTTP ' + r.status + (m ? '：' + m : '');
+}
+/* 支持粘贴 gist 网页链接或纯 id */
+function parseGistId(s) {
+  s = String(s || '').trim();
+  if (!s) return '';
+  var m = s.match(/gist\.github\.com\/(?:[^\/\s]+\/)?([0-9a-f]{16,})/i);
+  if (m) return m[1];
+  m = s.match(/([0-9a-f]{16,})/i);
+  if (m) return m[1];
+  return '';
+}
+/* 设备标识：只用于在两台设备之间辨认「这份数据是谁传的」 */
+function syncDeviceLabel() {
+  var c = syncCfg();
+  if (c.device) return c.device;
+  var ua = navigator.userAgent || '';
+  var kind = /iPhone|iPad|iPod/.test(ua) ? 'iOS'
+    : (/Android/.test(ua) ? 'Android' : (/Macintosh/.test(ua) ? 'Mac' : '电脑'));
+  var label = kind + '-' + Math.random().toString(36).slice(2, 6);
+  var o = syncCfg(); o.device = label; setSyncCfg(o);
+  return label;
+}
+function syncPayload() {
+  return {
+    app: 'RTmanager',
+    appVersion: APP_VERSION,
+    schema: SCHEMA_VERSION,
+    savedAt: new Date().toISOString(),
+    device: syncDeviceLabel(),
+    state: state
+  };
+}
+function syncSetStatus(html) {
+  var el = document.getElementById('syncStatus');
+  if (el) el.innerHTML = html;
+}
+function syncFiles(blob) { var f = {}; f[SYNC_FILE] = { content: blob }; return f; }
+
+/* 需要密码时：优先用已保存的，否则弹窗输入一次（不落库） */
+function syncWithPassword(ok) {
+  var p = String(syncCfg().password || '');
+  if (p) { ok(p); return; }
+  openSheet({
+    title: '输入同步密码', okText: '继续',
+    body: field('同步密码', textInput('password', '', '加密/解密用的密码', 'password'),
+      '本机未保存密码，本次操作需要输入一次'),
+    onSave: function (v) {
+      var s = String(v.password || '');
+      if (!s) { toast('请输入同步密码'); return false; }
+      ok(s);
+      return false;
+    }
+  });
+}
+
+/* ---------- 上传 ---------- */
+function syncPush() {
+  if (!syncSupported()) { toast('当前环境不支持加密，请用 https 或 localhost 打开'); return; }
+  if (!syncHasToken()) { toast('请先完成云同步设置'); sheetSyncSetup(); return; }
+  if (!state.patients.length && !confirm('本机暂无患者数据。\n\n仍要上传吗？上传会覆盖云端已有的数据。')) return;
+
+  syncWithPassword(function (pw) {
+    syncSetStatus('正在加密本机数据…');
+    syncEncrypt(pw, JSON.stringify(syncPayload())).then(function (blob) {
+      if (!syncHasGist()) return syncCreate(blob);
+      return syncUpdate(blob);
+    }).then(function () {
+      var o = syncCfg();
+      o.lastSyncAt = new Date().toISOString();
+      o.lastRemoteSavedAt = o.lastSyncAt;
+      setSyncCfg(o);
+      render();
+      toast('已上传到云端 · ' + state.patients.length + ' 位患者');
+      if (reopenSheet) reopenSheet();
+    }).catch(function (e) {
+      if (e && e.cancelled) { syncSetStatus('已取消上传'); return; }
+      var msg = (e && e.message) ? e.message : String(e);
+      syncSetStatus('<span style="color:var(--danger)">✘ ' + esc(msg) + '</span>');
+      alert('上传失败：' + msg);
+    });
+  });
+}
+function syncCreate(blob) {
+  syncSetStatus('正在创建云端数据…');
+  return ghFetch('/gists', {
+    method: 'POST',
+    body: JSON.stringify({
+      description: 'RTmanager 加密同步数据 · 请勿删除',
+      public: false,
+      files: syncFiles(blob)
+    })
+  }).then(function (r) {
+    if (!r.ok) throw new Error(ghErrMsg(r));
+    var o = syncCfg();
+    o.gistId = r.json.id;
+    o.lastRemoteUpdatedAt = r.json.updated_at || '';
+    o.lastEtag = r.etag || '';
+    setSyncCfg(o);
+  });
+}
+function syncUpdate(blob) {
+  syncSetStatus('正在检查云端版本…');
+  var c = syncCfg();
+  return ghFetch('/gists/' + c.gistId).then(function (r) {
+    if (!r.ok) throw new Error(ghErrMsg(r));
+    var remoteUpdated = r.json.updated_at || '';
+    if (c.lastRemoteUpdatedAt && remoteUpdated && remoteUpdated !== c.lastRemoteUpdatedAt) {
+      if (!confirm('⚠ 云端数据在上次同步之后被改动过，可能是另一台设备上传的。\n\n' +
+        '继续上传会覆盖云端那一份。\n建议先「从云端拉取」合并，再上传。\n\n仍要覆盖上传吗？')) {
+        var err = new Error('已取消上传');
+        err.cancelled = true;
+        throw err;
+      }
+    }
+    syncSetStatus('正在上传…');
+    return ghFetch('/gists/' + c.gistId, {
+      method: 'PATCH',
+      body: JSON.stringify({ files: syncFiles(blob) })
+    });
+  }).then(function (r) {
+    if (!r.ok) throw new Error(ghErrMsg(r));
+    var o = syncCfg();
+    o.lastRemoteUpdatedAt = (r.json && r.json.updated_at) || '';
+    o.lastEtag = r.etag || '';
+    setSyncCfg(o);
+  });
+}
+
+/* ---------- 拉取 ---------- */
+function syncPull() {
+  if (!syncSupported()) { toast('当前环境不支持解密，请用 https 或 localhost 打开'); return; }
+  if (!syncHasToken()) { toast('请先完成云同步设置'); sheetSyncSetup(); return; }
+  if (!syncHasGist()) { toast('还没有云端数据，请先在本机上传一次'); return; }
+
+  syncWithPassword(function (pw) {
+    var gid = syncCfg().gistId;
+    syncSetStatus('正在从云端下载…');
+    var remoteUpdated = '', remoteEtag = '';
+    ghFetch('/gists/' + gid).then(function (r) {
+      if (!r.ok) throw new Error(ghErrMsg(r));
+      var file = (r.json.files || {})[SYNC_FILE];
+      if (!file) {
+        var ks = Object.keys(r.json.files || {});
+        throw new Error('云端数据里找不到 ' + SYNC_FILE + (ks.length ? '（现有文件：' + ks.join('、') + '）' : ''));
+      }
+      if (file.truncated) throw new Error('云端数据过大被截断，无法完整读取');
+      remoteUpdated = r.json.updated_at || '';
+      remoteEtag = r.etag || '';
+      syncSetStatus('正在解密…');
+      return syncDecrypt(pw, file.content);
+    }).then(function (text) {
+      var payload;
+      try { payload = JSON.parse(text); } catch (e) { throw new Error('解密成功但内容格式不对，可能不是本应用的数据'); }
+      if (!payload || payload.app !== 'RTmanager' || !payload.state || !Array.isArray(payload.state.patients)) {
+        throw new Error('云端数据不是本应用的备份');
+      }
+      var o = syncCfg();
+      o.lastRemoteUpdatedAt = remoteUpdated;
+      o.lastEtag = remoteEtag;
+      o.lastSyncAt = new Date().toISOString();
+      o.lastRemoteSavedAt = payload.savedAt || '';
+      o.lastRemoteDevice = payload.device || '';
+      setSyncCfg(o);
+      syncSetStatus('已解密云端数据');
+      askImportMode(normalize(payload.state), {
+        label: '云端数据',
+        desc: '由「' + (payload.device || '未知设备') + '」于 ' +
+          fmtDT(String(payload.savedAt || '').slice(0, 16)) + ' 上传（应用 v' + (payload.appVersion || '?') + '）'
+      });
+    }).catch(function (e) {
+      var msg = (e && e.message) ? e.message : String(e);
+      syncSetStatus('<span style="color:var(--danger)">✘ ' + esc(msg) + '</span>');
+      alert('拉取失败：' + msg);
+    });
+  });
+}
+
+/* ---------- 测试连接 ---------- */
+function syncTest() {
+  var v = sheetValues();
+  var token = String(v.token || syncCfg().token || '').trim();
+  var gidRaw = String(v.gistId || '').trim();
+  var el = document.getElementById('syncTest');
+  if (!token) { toast('请先填写 Token'); return; }
+  if (el) el.textContent = '测试中…';
+  ghFetch('/user', { token: token }).then(function (r) {
+    if (!r.ok) throw new Error(ghErrMsg(r));
+    var login = (r.json && r.json.login) || '?';
+    /* 顺带验证 gist 权限 */
+    return ghFetch('/gists?per_page=1', { token: token }).then(function (r2) {
+      if (r2.status === 403) throw new Error('Token 缺少 gist 权限（403）：请勾选 gist 或 Gists: Read and write');
+      if (!r2.ok) throw new Error(ghErrMsg(r2));
+      var gid = parseGistId(gidRaw);
+      var extra = '';
+      if (gid) {
+        return ghFetch('/gists/' + gid, { token: token }).then(function (r3) {
+          if (!r3.ok) throw new Error('云端地址读取失败：' + ghErrMsg(r3));
+          extra = '　云端数据可访问（更新于 ' + String(r3.json.updated_at || '').slice(0, 16).replace('T', ' ') + '）';
+          if (el) el.innerHTML = '<span style="color:var(--ok)">✔ 连接正常：' + esc(login) + '</span>' + esc(extra);
+        });
+      }
+      if (el) el.innerHTML = '<span style="color:var(--ok)">✔ 连接正常：' + esc(login) + '，可用 gist</span>' + esc(extra);
+    });
+  }).catch(function (e) {
+    if (el) el.innerHTML = '<span style="color:var(--danger)">✘ ' + esc(e.message || String(e)) + '</span>';
+  });
+}
+
+/* ---------- 界面 ---------- */
+function sheetSync() {
+  reopenSheet = sheetSync;
+  var c = syncCfg();
+  var status;
+  if (!syncSupported()) {
+    status = '<div style="background:var(--danger-soft);border-radius:10px;padding:11px 12px;line-height:1.75;font-size:14px">' +
+      '当前环境不支持加密（<b>crypto.subtle</b> 需要 https 或 localhost）。<br>' +
+      '请用线上地址打开，或在本机用 <span class="mono">http://localhost</span> 访问；' +
+      '直接用 <span class="mono">file://</span> 打开网页版不可用。</div>';
+  } else if (!syncHasToken()) {
+    status = '<div class="hint" style="line-height:1.85">尚未配置。<br>' +
+      '需要一枚 GitHub Token（只需 gist 权限）和一个自定的同步密码。<br>' +
+      'Token 与密码<b>只存在本机</b>，云端只存加密后的数据。</div>';
+  } else {
+    status = '<div style="line-height:1.95;font-size:14px">' +
+      '状态：<b style="color:var(--ok)">已配置</b><br>' +
+      '云端数据：' + (c.gistId ? '<span class="mono">' + esc(c.gistId.slice(0, 10)) + '…</span>' : '尚未创建（首次上传时自动创建）') + '<br>' +
+      '密码：' + (c.password ? '已保存在本机' : '未保存（每次操作时输入）') + '<br>' +
+      '上次同步：' + (c.lastSyncAt ? esc(fmtDT(String(c.lastSyncAt).slice(0, 16))) : '从未') +
+      '</div>';
+  }
+  var actions = [
+    { label: '⬆ 上传到云端（备份本机）', act: 'sync-push', primary: true, full: true, disabled: !syncSupported() },
+    { label: '⬇ 从云端拉取（合并导入）', act: 'sync-pull', full: true, disabled: !syncSupported() },
+    { label: '同步设置（Token / 密码）', act: 'sync-setup', full: true }
+  ];
+  if (c.gistId) actions.push({ label: '复制云端地址（给另一台设备）', act: 'sync-copy', full: true });
+  if (syncHasToken()) actions.push({ label: '清除同步设置', act: 'sync-forget', full: true });
+  actions.push({ label: '关闭', act: 'sheet-close', full: true });
+
+  openSheet({
+    title: '云同步（加密存到 GitHub）',
+    body: status + '<div id="syncStatus" class="hint" style="margin-top:10px;min-height:1px"></div>' +
+      '<div class="hint" style="margin-top:12px;line-height:1.85;border-top:1px dashed var(--line);padding-top:10px">' +
+      '· 云端存的是<b>加密后的乱码</b>，没有密码读不出任何患者信息<br>' +
+      '· 换设备只需「同一个 Token + 同一个密码」，或粘贴云端地址<br>' +
+      '· 拉取默认<b>合并</b>：两边各自的记录都会保留，不丢数据</div>',
+    actions: actions
+  });
+}
+
+function sheetSyncSetup() {
+  var c = syncCfg();
+  reopenSheet = sheetSync;
+  openSheet({
+    title: '云同步设置', okText: '保存',
+    body:
+      '<div class="hint" style="padding:9px 11px;background:var(--warn-soft);border-radius:9px;line-height:1.75;margin-bottom:12px">' +
+      'Token 与密码只保存在本机浏览器，不会上传。云端只存加密后的数据。</div>' +
+      field('GitHub Token', textInput('token', c.token || '', 'ghp_… 或 github_pat_…', 'password'),
+        '只需 gist 权限。Classic：勾选 gist；Fine-grained：Gists 设为 Read and write') +
+      field('同步密码', textInput('password', c.password || '', '自定密码，两台设备要一致'),
+        '用于加解密，建议 8 位以上。忘记密码将无法解密云端数据（本机数据不受影响）。') +
+      field('云端地址（可留空）', textInput('gistId', c.gistId || '', '留空则首次上传时自动创建'),
+        '换设备时把另一台设备的云端地址粘贴到这里，支持粘贴完整网页链接') +
+      '<label style="display:flex;align-items:center;gap:8px;margin-top:14px;font-size:14px;color:var(--text)">' +
+      '<input type="checkbox" name="remember" ' + (c.remember !== false ? 'checked' : '') + ' style="width:auto">' +
+      '<span>在本机记住密码（下次免输入）</span></label>' +
+      '<div class="btnrow"><button type="button" class="btn sm" data-act="sync-test">测试连接</button></div>' +
+      '<div id="syncTest" class="hint" style="margin-top:8px;min-height:1px"></div>',
+    onSave: function (v) {
+      var token = String(v.token || '').trim();
+      var pass = String(v.password || '');
+      var gidRaw = String(v.gistId || '').trim();
+      if (!token) { toast('请填写 GitHub Token'); return false; }
+      if (!pass) { toast('请设置同步密码'); return false; }
+      if (pass.length < 8) { toast('同步密码至少 8 位'); return false; }
+      var gid = parseGistId(gidRaw);
+      if (gidRaw && !gid) { toast('云端地址无法识别，请粘贴 gist 网页链接或 gist id'); return false; }
+      var o = syncCfg();
+      o.token = token;
+      o.gistId = gid;
+      /* 复选框：正常取值是布尔；测试环境取不到时沿用原设置 */
+      o.remember = (v.remember === undefined) ? (o.remember !== false) : !!v.remember;
+      o.password = o.remember ? pass : '';
+      setSyncCfg(o);
+      render(); toast('已保存云同步设置');
+      sheetSync();
+      return false;                  /* 不关闭，直接回到同步面板 */
+    }
+  });
+}
+
+function syncCopyUrl() {
+  var c = syncCfg();
+  if (!c.gistId) { toast('还没有云端数据'); return; }
+  var url = 'https://gist.github.com/' + c.gistId;
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(url).then(function () {
+      toast('已复制云端地址，可在另一台设备粘贴');
+    }, function () {
+      if (typeof prompt === 'function') prompt('复制下面的地址：', url);
+    });
+  } else if (typeof prompt === 'function') {
+    prompt('复制下面的地址：', url);
+  }
+}
+
+function syncForget() {
+  if (!confirm('清除本机保存的云同步设置？\n\nToken 与密码会从本机删除，' +
+    '云端已上传的数据不会受影响；本机患者数据也不受影响。')) return;
+  lsSet(SYNC_KEY, {});
+  render(); toast('已清除云同步设置');
+  sheetSync();
 }
 
 /* ================= 数据迁移 / 读取失败提示 ================= */
