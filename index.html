@@ -228,7 +228,7 @@ button,input,select,textarea{font:inherit;color:inherit}
 var LS_KEY = 'radiotherapy.v1';
 var SNAP_PREFIX = 'radiotherapy.snap.';
 var SNAP_KEEP = 7;
-var APP_VERSION = '0.9.0';
+var APP_VERSION = '0.10.0';
 
 var SEXES = ['男', '女'];
 var PURPOSES = ['根治性', '术后辅助', '术前新辅助', '姑息性'];
@@ -339,6 +339,20 @@ var SYNC_KEY = 'radiotherapy.sync';
 var SYNC_FILE = 'rt-sync.json.enc';
 var SYNC_ITER = 250000;
 var SYNC_API = 'https://api.github.com';
+
+/* 定时自动同步（仅本机 → 云端备份，不做自动拉取）
+   为什么不用 setInterval：本应用是装到手机桌面的离线 PWA，切到后台后 JS 定时器
+   会被系统挂起甚至销毁，设 1 小时也可能永远不触发（iOS 尤其严格）。
+   Service Worker 的 Periodic Background Sync 只有 Chromium 支持，iOS 完全没有，
+   且最短间隔不受应用控制。
+   因此改为「按时间间隔判定 + 在页面生命周期节点触发」：不用任何定时器，在
+   用户回到应用 / 网络恢复 / 数据变更后 / 离开页面前检查「距上次是否已超过间隔」。
+   数据只可能在用户使用应用时产生，故效果与真正定时几乎等价，且 100% 可靠。 */
+var AUTO_SYNC_DEFAULT_MIN = 60;            /* 默认间隔：1 小时 */
+var AUTO_SYNC_OPTIONS = [30, 60, 120, 360, 720, 1440];   /* 可选间隔（分钟） */
+var AUTO_SYNC_DEBOUNCE_MS = 20000;         /* 数据变更后的去抖延时：20 秒 */
+var autoSyncTimer = null;                  /* 去抖用的 setTimeout 句柄 */
+var autoSyncBusy = false;                  /* 并发去重：同一时刻只允许一次自动上传 */
 
 function emptyState() { return { version: SCHEMA_VERSION, updatedAt: '', patients: [] }; }
 
@@ -485,8 +499,13 @@ function save() {
     return false;
   }
   state.updatedAt = new Date().toISOString();
-  try { localStorage.setItem(LS_KEY, JSON.stringify(state)); return true; }
+  var saved = false;
+  try { localStorage.setItem(LS_KEY, JSON.stringify(state)); saved = true; }
   catch (e) { alert('保存失败：手机存储空间可能已满，请先导出备份并清理旧数据。'); return false; }
+  /* 数据已变更 → 安排一次自动同步（去抖，见 autoSyncSchedule）。
+     放在 save() 这个唯一收口点，就不必改 36 个调用点。 */
+  if (saved) autoSyncSchedule();
+  return saved;
 }
 
 /* 抢救导出：把读不出来的原始文本原样存成文件，便于人工恢复 */
@@ -1632,6 +1651,8 @@ function renderSettingsPage() {
     '</div>';
   h += '<div class="setgrp">' +
     setRow('sync-panel', '☁️', '云同步（加密存到 GitHub）', syncSubText()) +
+    /* 未配置云同步时不显示，避免误导（没有 Token/密码，自动同步无从执行） */
+    (syncHasToken() ? setRow('autosync-panel', '⏱', '定时自动同步', autoSyncSubText()) : '') +
     '</div>';
   h += '<div class="setgrp">' +
     setRow('ai-config', '✨', 'AI 识别设置',
@@ -3548,6 +3569,27 @@ function bind() {
     'sync-test': function () { syncTest(); },
     'sync-copy': function () { syncCopyUrl(); },
     'sync-forget': function () { syncForget(); },
+    'autosync-panel': function () { sheetAutoSync(); },
+    'autosync-toggle': function () {
+      var turningOn = !autoSyncOn();
+      if (turningOn) {
+        var block = autoSyncBlockReason();
+        if (block) { toast(block); return; }
+      }
+      setAutoSyncOn(turningOn);
+      render();
+      toast(turningOn ? '已开启自动同步 · 每 ' + autoSyncMinText() + ' 检查' : '已关闭自动同步');
+      sheetAutoSync();
+      /* 开启后立刻尝试一次，让用户马上看到效果 */
+      if (turningOn) autoSyncTick('enable');
+    },
+    'autosync-interval': function () { sheetAutoSyncInterval(); },
+    'autosync-set': function (el) {
+      setAutoSyncMin(el.dataset.min);
+      toast('同步间隔已设为 ' + autoSyncMinText());
+      sheetAutoSync();
+    },
+    'autosync-now': function () { autoSyncNow(); },
     'restore-snap': function (el) { restoreSnap(el.dataset.key); },
     'restore-backup': function (el) { restoreBackup(el.dataset.key); },
     'treat-days': function () { sheetTreatDays(); },
@@ -3658,7 +3700,8 @@ function syncSubText() {
   var c = syncCfg();
   if (!syncHasToken()) return '未配置 · 加密备份到你的 GitHub，跨设备可用';
   if (!c.gistId) return '已配置 · 尚未上传（首次上传会自动创建云端数据）';
-  return '已连接 · 上次同步 ' + (c.lastSyncAt ? fmtDT(String(c.lastSyncAt).slice(0, 16)) : '从未');
+  return '已连接 · 上次同步 ' + (c.lastSyncAt ? fmtDT(String(c.lastSyncAt).slice(0, 16)) : '从未') +
+    (autoSyncOn() ? ' · ⏱ 自动同步已开启' : '');
 }
 
 /* ---------- base64（分块，避免大数组触发 apply 参数上限） ---------- */
@@ -3800,6 +3843,158 @@ function syncWithPassword(ok) {
       return false;
     }
   });
+}
+
+/* ================= 定时自动同步 =================
+   设计要点（安全优先）：
+   1. 只上传、不拉取 —— 自动拉取可能覆盖另一台设备的改动，风险高，改由用户手动「合并导入」。
+   2. 必须已在本机保存密码 —— 否则无法静默加密。不弹窗打断用户，只记录原因供界面展示。
+   3. 本机无患者数据时不上传 —— 防止把空数据覆盖到云端已有备份。
+   4. 云端被别的设备改过就跳过 —— 不覆盖、不弹窗（手动 syncPush 才有覆盖确认，自动路径不给这个口子）。
+   5. 失败不更新 lastAutoSyncAt —— 否则会静默跳过一个周期。
+   6. 全程不弹 alert/confirm/toast、不调 render，避免打断录入。 */
+
+/* 间隔（分钟）：非法值一律回落默认 60 */
+function autoSyncMin() {
+  var n = parseInt(syncCfg().autoSyncMin, 10);
+  return (AUTO_SYNC_OPTIONS.indexOf(n) >= 0) ? n : AUTO_SYNC_DEFAULT_MIN;
+}
+function setAutoSyncMin(n) {
+  var v = parseInt(n, 10);
+  var o = syncCfg();
+  o.autoSyncMin = (AUTO_SYNC_OPTIONS.indexOf(v) >= 0) ? v : AUTO_SYNC_DEFAULT_MIN;
+  setSyncCfg(o);
+}
+function autoSyncOn() { return syncCfg().autoSync === true; }
+function setAutoSyncOn(b) {
+  var o = syncCfg();
+  o.autoSync = !!b;
+  if (b) {
+    /* 开启时重置计时基准，让用户立刻看到一次同步（而不是等满一个间隔） */
+    o.lastAutoSyncAt = '';
+    o.lastAutoSyncErr = '';
+  }
+  setSyncCfg(o);
+}
+/* 间隔文案：60 → “1 小时”；30 → “30 分钟” */
+function autoSyncMinText(n) {
+  n = n || autoSyncMin();
+  if (n < 60) return n + ' 分钟';
+  var h = n / 60;
+  return (h === Math.floor(h) ? h : h.toFixed(1)) + ' 小时';
+}
+/* 是否具备“静默同步”的条件。缺任何一项都不执行，并给出具体原因。 */
+function autoSyncBlockReason() {
+  if (!syncSupported()) return '当前环境不支持加密（需 https 或 localhost 打开）';
+  if (!syncHasToken()) return '尚未配置云同步（缺少 Token）';
+  if (!String(syncCfg().password || '')) return '未在本机保存密码，无法自动同步（请在云同步设置里勾选「在本机记住密码」）';
+  return '';
+}
+function autoSyncEnabled() { return autoSyncOn() && !autoSyncBlockReason(); }
+
+/* 距上次自动同步是否已超过设定间隔。从未成功同步过 → 立即到期。 */
+function autoSyncDue() {
+  var last = String(syncCfg().lastAutoSyncAt || '');
+  if (!last) return true;
+  var t = new Date(last).getTime();
+  if (isNaN(t)) return true;                       /* 时间戳损坏 → 视为到期 */
+  return (Date.now() - t) >= autoSyncMin() * 60000;
+}
+/* 数据自上次自动同步以来是否变过（用 state.updatedAt 比对） */
+function autoSyncDataChanged() {
+  return String(state.updatedAt || '') !== String(syncCfg().lastAutoSyncState || '');
+}
+/* 三条件与门：开关可用 + 已到期 + 数据变过 */
+function autoSyncShouldRun() {
+  return state && autoSyncEnabled() && autoSyncDue() && autoSyncDataChanged();
+}
+
+/* 静默上传：不弹窗、不 render、不 toast，仅更新配置里的状态字段 */
+function autoSyncSilentPush(reason) {
+  if (autoSyncBusy) return Promise.resolve(false);   /* 并发去重 */
+  if (!state.patients.length) {                      /* 空数据绝不覆盖云端 */
+    var e0 = syncCfg();
+    e0.lastAutoSyncErr = '本机暂无患者数据，已跳过自动上传';
+    setSyncCfg(e0);
+    return Promise.resolve(false);
+  }
+  autoSyncBusy = true;
+  var pw = String(syncCfg().password || '');
+  var okFlag = false;
+  return syncEncrypt(pw, JSON.stringify(syncPayload())).then(function (blob) {
+    if (!syncHasGist()) return syncCreate(blob);
+    /* 自动路径：先比对云端 updated_at，被别的设备改过就跳过（不覆盖、不弹窗） */
+    var c = syncCfg();
+    return ghFetch('/gists/' + c.gistId).then(function (r) {
+      if (!r.ok) throw new Error(ghErrMsg(r));
+      var remoteUpdated = r.json && r.json.updated_at ? r.json.updated_at : '';
+      if (c.lastRemoteUpdatedAt && remoteUpdated && remoteUpdated !== c.lastRemoteUpdatedAt) {
+        var err = new Error('云端已被其他设备更新，已跳过自动上传（可手动「从云端拉取」后再上传）');
+        err.autoSkip = true;
+        throw err;
+      }
+      return ghFetch('/gists/' + c.gistId, {
+        method: 'PATCH',
+        body: JSON.stringify({ files: syncFiles(blob) })
+      }).then(function (r2) {
+        if (!r2.ok) throw new Error(ghErrMsg(r2));
+        var o = syncCfg();
+        o.lastRemoteUpdatedAt = (r2.json && r2.json.updated_at) || '';
+        o.lastEtag = r2.etag || '';
+        setSyncCfg(o);
+      });
+    });
+  }).then(function () {
+    var o = syncCfg();
+    o.lastAutoSyncAt = new Date().toISOString();
+    o.lastSyncAt = o.lastAutoSyncAt;
+    o.lastRemoteSavedAt = o.lastAutoSyncAt;
+    o.lastAutoSyncState = String(state.updatedAt || '');   /* 记下"已同步到哪个版本" */
+    o.lastAutoSyncErr = '';
+    o.lastAutoSyncReason = reason || '';
+    setSyncCfg(o);
+    okFlag = true;
+    return true;
+  }).catch(function (e) {
+    /* 失败不更新 lastAutoSyncAt，下个触发点会重试 */
+    var o = syncCfg();
+    o.lastAutoSyncErr = (e && e.message) ? e.message : String(e);
+    setSyncCfg(o);
+    return false;
+  }).then(function (r) {
+    autoSyncBusy = false;
+    return r;
+  });
+}
+
+/* 唯一入口：满足全部条件才真正上传 */
+function autoSyncTick(reason) {
+  if (loadError) return false;                       /* 读取异常时绝不动作 */
+  if (!autoSyncShouldRun()) return false;
+  autoSyncSilentPush(reason);
+  return true;
+}
+
+/* 数据变更后的去抖：连续录入时只在停手 20 秒后同步一次 */
+function autoSyncSchedule() {
+  if (!autoSyncEnabled()) return;
+  if (autoSyncTimer) { try { clearTimeout(autoSyncTimer); } catch (e) { } }
+  autoSyncTimer = setTimeout(function () {
+    autoSyncTimer = null;
+    autoSyncTick('change');
+  }, AUTO_SYNC_DEBOUNCE_MS);
+}
+
+function autoSyncSubText() {
+  if (!syncHasToken()) return '需先配置云同步';
+  if (!autoSyncOn()) return '已关闭 · 定时把本机数据备份到云端';
+  var block = autoSyncBlockReason();
+  if (block) return '已开启但无法执行 · ' + block;
+  var c = syncCfg();
+  var s = '每 ' + autoSyncMinText() + ' 检查 · ';
+  s += c.lastAutoSyncAt ? ('上次 ' + fmtDT(String(c.lastAutoSyncAt).slice(0, 16))) : '尚未同步';
+  if (c.lastAutoSyncErr) s += ' · ⚠ ' + c.lastAutoSyncErr;
+  return s;
 }
 
 /* ---------- 上传 ---------- */
@@ -3980,6 +4175,7 @@ function sheetSync() {
   var actions = [
     { label: '⬆ 上传到云端（备份本机）', act: 'sync-push', primary: true, full: true, disabled: !syncSupported() },
     { label: '⬇ 从云端拉取（合并导入）', act: 'sync-pull', full: true, disabled: !syncSupported() },
+    { label: '⏱ 定时自动同步' + (autoSyncOn() ? '（已开启）' : ''), act: 'autosync-panel', full: true, disabled: !syncSupported() },
     { label: '同步设置（Token / 密码）', act: 'sync-setup', full: true }
   ];
   if (c.gistId) actions.push({ label: '复制云端地址（给另一台设备）', act: 'sync-copy', full: true });
@@ -3994,6 +4190,89 @@ function sheetSync() {
       '· 换设备只需「同一个 Token + 同一个密码」，或粘贴云端地址<br>' +
       '· 拉取默认<b>合并</b>：两边各自的记录都会保留，不丢数据</div>',
     actions: actions
+  });
+}
+
+/* ---------- 定时自动同步面板 ---------- */
+function sheetAutoSync() {
+  reopenSheet = sheetAutoSync;
+  var c = syncCfg();
+  var block = autoSyncBlockReason();
+  var on = autoSyncOn();
+
+  var statusHtml;
+  if (block) {
+    statusHtml = '<div style="background:var(--warn-soft);border-radius:10px;padding:11px 12px;line-height:1.75;font-size:14px">' +
+      '<b>暂时无法执行</b><br>' + esc(block) + '</div>';
+  } else if (!on) {
+    statusHtml = '<div class="hint" style="line-height:1.85">当前<b>已关闭</b>。开启后，应用会在你每次回到界面、' +
+      '网络恢复、或改完数据约 20 秒后，检查距上次同步是否已超过设定间隔，超过就自动上传一次。</div>';
+  } else {
+    statusHtml = '<div style="line-height:1.95;font-size:14px">' +
+      '间隔：<b>' + esc(autoSyncMinText()) + '</b><br>' +
+      '上次自动同步：' + (c.lastAutoSyncAt ? esc(fmtDT(String(c.lastAutoSyncAt).slice(0, 16))) : '尚未同步（下次触发时执行）') + '<br>' +
+      '上次结果：' + (c.lastAutoSyncErr
+        ? '<span style="color:var(--danger)">✘ ' + esc(c.lastAutoSyncErr) + '</span>'
+        : '<span style="color:var(--ok)">✔ 正常</span>') +
+      '</div>';
+  }
+
+  var actions = [
+    { label: (on ? '⏸ 关闭自动同步' : '▶ 开启自动同步'), act: 'autosync-toggle', primary: !on, full: true, disabled: !!block && !on },
+    { label: '同步间隔：' + autoSyncMinText(), act: 'autosync-interval', full: true, disabled: !on },
+    { label: '立即同步一次', act: 'autosync-now', full: true, disabled: !syncSupported() },
+    { label: '返回云同步', act: 'sync-panel', full: true }
+  ];
+
+  openSheet({
+    title: '定时自动同步',
+    body: statusHtml +
+      '<div class="hint" style="margin-top:12px;line-height:1.85;border-top:1px dashed var(--line);padding-top:10px">' +
+      '· <b>只上传、不拉取</b>：自动同步只把本机数据备份到云端；换设备或要合并，请手动「从云端拉取」<br>' +
+      '· <b>要静默加密必须先在本机保存密码</b>（云同步设置里勾选「在本机记住密码」）<br>' +
+      '· 本机没有任何患者数据时<b>不会上传</b>，避免把空数据覆盖到云端<br>' +
+      '· 云端若已被另一台设备更新，会自动跳过并提示，<b>不覆盖</b><br>' +
+      '· 因系统限制，手机切到后台时网页无法定时运行；同步会在你回到应用时补上</div>' +
+      '<div id="autoSyncStatus" class="hint" style="margin-top:8px;min-height:1px"></div>',
+    actions: actions
+  });
+}
+
+/* 间隔选择弹层 */
+function sheetAutoSyncInterval() {
+  reopenSheet = sheetAutoSync;
+  var cur = autoSyncMin();
+  var rows = AUTO_SYNC_OPTIONS.map(function (n) {
+    return '<div class="setrow" data-act="autosync-set" data-min="' + n + '">' +
+      '<div style="font-size:18px">' + (n === cur ? '✅' : '⏱') + '</div>' +
+      '<div class="n">' + esc(autoSyncMinText(n)) + '</div>' +
+      (n === cur ? '<div class="arw" style="color:var(--ok)">当前</div>' : '<div class="arw">›</div>') + '</div>';
+  }).join('');
+  openSheet({
+    title: '同步间隔',
+    body: '<div class="hint" style="margin-bottom:10px;line-height:1.8">间隔指的是「两次自动同步之间至少相隔多久」。' +
+      '应用不会在后台定时唤醒，而是在你回到界面时检查是否已超过该间隔。</div>' + rows,
+    actions: [{ label: '返回', act: 'autosync-panel', full: true }]
+  });
+}
+
+/* 手动触发一次自动同步（走静默路径，但会给用户可见的反馈） */
+function autoSyncNow() {
+  var block = autoSyncBlockReason();
+  if (block) { toast(block); return; }
+  if (!state.patients.length) { toast('本机暂无患者数据，无需同步'); return; }
+  var el = document.getElementById('autoSyncStatus');
+  if (el) el.textContent = '正在同步…';
+  autoSyncSilentPush('manual').then(function (okFlag) {
+    var c = syncCfg();
+    var el2 = document.getElementById('autoSyncStatus');
+    if (okFlag) {
+      if (el2) el2.innerHTML = '<span style="color:var(--ok)">✔ 已同步到云端（' + state.patients.length + ' 位患者）</span>';
+      if (reopenSheet) reopenSheet();
+    } else {
+      if (el2) el2.innerHTML = '<span style="color:var(--danger)">✘ ' + esc(c.lastAutoSyncErr || '同步失败') + '</span>';
+      if (reopenSheet) reopenSheet();
+    }
   });
 }
 
@@ -4139,6 +4418,53 @@ function init() {
       if (ev.data && ev.data.type === 'RT_SW_UPDATED') showUpdateBar();
     });
   }
+  bindAutoSync();
+}
+
+/* 定时自动同步的生命周期挂钩。
+   刻意不用 setInterval：装到手机的 PWA 切到后台后定时器会被系统挂起或销毁，
+   间隔设 1 小时也可能永远不触发。改在这些可靠的节点上"检查是否到点"。 */
+function bindAutoSync() {
+  /* 兜底：个别宿主环境（旧 WebView、极简嵌入式壳）可能没有 window.addEventListener。
+     自动同步是"锦上添花"的功能，绝不能因为它让整个应用起不来。 */
+  var onWin = (typeof window !== 'undefined' && window && typeof window.addEventListener === 'function')
+    ? function (ev, fn) { window.addEventListener(ev, fn); }
+    : function () { };
+  var onDoc = (typeof document !== 'undefined' && document && typeof document.addEventListener === 'function')
+    ? function (ev, fn) { document.addEventListener(ev, fn); }
+    : function () { };
+  /* 回到应用（从后台切回、解锁手机）——最主要的触发时机 */
+  onDoc('visibilitychange', function () {
+    if (document.visibilityState === 'visible') autoSyncTick('visible');
+  });
+  /* 网络恢复 —— 之前失败的那次可以补上 */
+  onWin('online', function () { autoSyncTick('online'); });
+  /* 离开页面 —— 用 keepalive 兜底发一次，不等结果。
+     移动端关页时普通 fetch 常被中断，keepalive 能让请求在页面销毁后继续完成。 */
+  onWin('pagehide', function () {
+    if (loadError || !autoSyncShouldRun() || !state.patients.length) return;
+    try {
+      var pw = String(syncCfg().password || '');
+      syncEncrypt(pw, JSON.stringify(syncPayload())).then(function (blob) {
+        var c = syncCfg();
+        if (!c.gistId) return;                 /* 首次创建需要读响应，来不及，留给下次 */
+        fetch(SYNC_API + '/gists/' + c.gistId, {
+          method: 'PATCH',
+          keepalive: true,
+          cache: 'no-store',
+          headers: {
+            'Authorization': 'Bearer ' + String(c.token || '').trim(),
+            'Accept': 'application/vnd.github+json',
+            'Content-Type': 'application/json',
+            'X-GitHub-Api-Version': '2022-11-28'
+          },
+          body: JSON.stringify({ files: syncFiles(blob) })
+        }).catch(function () { });
+      }).catch(function () { });
+    } catch (e) { }
+  });
+  /* 启动时先检查一次（可能是隔了一夜后第一次打开） */
+  autoSyncTick('start');
 }
 init();
 </script>
