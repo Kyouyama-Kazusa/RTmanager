@@ -12,3 +12,6 @@ Desktop.ini
 # 编辑器
 .vscode/
 .idea/
+
+# 调试/探测产物（如 Gist 可行性探测抓下来的样本数据）
+.gist-probe/
