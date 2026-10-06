@@ -63,7 +63,7 @@ Classic token 勾选 `gist`；Fine-grained token 把 `Gists` 设为 Read and wri
 
 ## 维护
 
-**发布用 `dev-tools/release.sh`，它会自动递增 `sw.js` 里的 `CACHE` 版本号（当前 `radiotherapy-v13`）、
+**发布用 `dev-tools/release.sh`，它会自动递增 `sw.js` 里的 `CACHE` 版本号（当前 `radiotherapy-v14`）、
 跑完测试再推送，并轮询确认 Pages 已生效** —— 不递增版本号的话，已安装到桌面的用户会停留在旧版本。
 
 ```bash

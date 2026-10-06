@@ -1,0 +1,108 @@
+{
+  "url": "https://api.github.com/gists/ae3fb1250cc683c445298e8cb5429e5c",
+  "forks_url": "https://api.github.com/gists/ae3fb1250cc683c445298e8cb5429e5c/forks",
+  "commits_url": "https://api.github.com/gists/ae3fb1250cc683c445298e8cb5429e5c/commits",
+  "id": "ae3fb1250cc683c445298e8cb5429e5c",
+  "node_id": "G_kwDOBFTg39oAIGFlM2ZiMTI1MGNjNjgzYzQ0NTI5OGU4Y2I1NDI5ZTVj",
+  "git_pull_url": "https://gist.github.com/ae3fb1250cc683c445298e8cb5429e5c.git",
+  "git_push_url": "https://gist.github.com/ae3fb1250cc683c445298e8cb5429e5c.git",
+  "html_url": "https://gist.github.com/oakeymations/ae3fb1250cc683c445298e8cb5429e5c",
+  "files": {
+    "game.txt": {
+      "filename": "game.txt",
+      "type": "text/plain",
+      "language": "Text",
+      "raw_url": "https://gist.githubusercontent.com/oakeymations/ae3fb1250cc683c445298e8cb5429e5c/raw/fca5e7dfff7fb147f6ac1eea99e0b61f11160802/game.txt",
+      "size": 454,
+      "truncated": false,
+      "content": "{\"START\":[[\"hi\"],[\"\"],[\"\"],[\"\"],[\"\"],[\"r u there\"],[\"\"],[\"Say hi\",\"COMFORT\"],[\"Say nothing\",\"FEAR\"],[\"\"]],\"__STARTSECTION__\":\"START\",\"COMFORT\":[[\"i missed u\"],[\"\"],[\"I mised u 2\",\"COMFORT2\"],[\"forget\",\"START\"],[\"\"]],\"COMFORT2\":[[\"lets do this again sometime\"],[\"\"],[\"forget\",\"START\"],[\"\"]],\"FEAR\":[[\"is anyone there...?\"],[\"\"],[\"say hi\",\"COMFORT2\"],[\"say nothing\",\"FEAR2\"],[\"\"]],\"FEAR2\":[[\"must been da wind.... fuuuq....\"],[\"\"],[\"forget\",\"START\"],[\"\"]]}",
+      "encoding": "utf-8"
+    },
+    "readme.txt": {
+      "filename": "readme.txt",
+      "type": "text/plain",
+      "language": "Text",
+      "raw_url": "https://gist.githubusercontent.com/oakeymations/ae3fb1250cc683c445298e8cb5429e5c/raw/06a9be3600afef8b23b16194f2e55d943ff89e93/readme.txt",
+      "size": 79,
+      "truncated": false,
+      "content": "A game made with tinychoice.org. Just go there and paste it in to try it out :)",
+      "encoding": "utf-8"
+    },
+    "sourceCode.txt": {
+      "filename": "sourceCode.txt",
+      "type": "text/plain",
+      "language": "Text",
+      "raw_url": "https://gist.githubusercontent.com/oakeymations/ae3fb1250cc683c445298e8cb5429e5c/raw/4aa45ce5e6af3708ed1061ad073f60d590b4cb36/sourceCode.txt",
+      "size": 316,
+      "truncated": false,
+      "content": "=START=\n\nhi\n\n\n\n\nr u there\n\nSay hi -> comfort\nSay nothing -> fear\n\n=comfort=\n\ni missed u\n\nI mised u 2 -> comfort2\nforget -> start\n\n=comfort2=\n\nlets do this again sometime\n\nforget -> start\n\n=fear=\n\nis anyone there...?\n\nsay hi -> comfort2\nsay nothing -> fear2\n\n=fear2=\n\nmust been da wind.... fuuuq....\n\nforget -> start\n",
+      "encoding": "utf-8"
+    }
+  },
+  "public": true,
+  "created_at": "2026-10-05T14:18:38Z",
+  "updated_at": "2026-10-05T14:18:39Z",
+  "description": "tinychoice game",
+  "comments": 0,
+  "user": null,
+  "comments_enabled": true,
+  "comments_url": "https://api.github.com/gists/ae3fb1250cc683c445298e8cb5429e5c/comments",
+  "owner": {
+    "login": "oakeymations",
+    "id": 72671455,
+    "node_id": "MDQ6VXNlcjcyNjcxNDU1",
+    "avatar_url": "https://avatars.githubusercontent.com/u/72671455?v=4",
+    "gravatar_id": "",
+    "url": "https://api.github.com/users/oakeymations",
+    "html_url": "https://github.com/oakeymations",
+    "followers_url": "https://api.github.com/users/oakeymations/followers",
+    "following_url": "https://api.github.com/users/oakeymations/following{/other_user}",
+    "gists_url": "https://api.github.com/users/oakeymations/gists{/gist_id}",
+    "starred_url": "https://api.github.com/users/oakeymations/starred{/owner}{/repo}",
+    "subscriptions_url": "https://api.github.com/users/oakeymations/subscriptions",
+    "organizations_url": "https://api.github.com/users/oakeymations/orgs",
+    "repos_url": "https://api.github.com/users/oakeymations/repos",
+    "events_url": "https://api.github.com/users/oakeymations/events{/privacy}",
+    "received_events_url": "https://api.github.com/users/oakeymations/received_events",
+    "type": "User",
+    "user_view_type": "public",
+    "site_admin": false
+  },
+  "forks": [
+
+  ],
+  "history": [
+    {
+      "user": {
+        "login": "oakeymations",
+        "id": 72671455,
+        "node_id": "MDQ6VXNlcjcyNjcxNDU1",
+        "avatar_url": "https://avatars.githubusercontent.com/u/72671455?v=4",
+        "gravatar_id": "",
+        "url": "https://api.github.com/users/oakeymations",
+        "html_url": "https://github.com/oakeymations",
+        "followers_url": "https://api.github.com/users/oakeymations/followers",
+        "following_url": "https://api.github.com/users/oakeymations/following{/other_user}",
+        "gists_url": "https://api.github.com/users/oakeymations/gists{/gist_id}",
+        "starred_url": "https://api.github.com/users/oakeymations/starred{/owner}{/repo}",
+        "subscriptions_url": "https://api.github.com/users/oakeymations/subscriptions",
+        "organizations_url": "https://api.github.com/users/oakeymations/orgs",
+        "repos_url": "https://api.github.com/users/oakeymations/repos",
+        "events_url": "https://api.github.com/users/oakeymations/events{/privacy}",
+        "received_events_url": "https://api.github.com/users/oakeymations/received_events",
+        "type": "User",
+        "user_view_type": "public",
+        "site_admin": false
+      },
+      "version": "7d2fe66952e7b8e434f1f3144c708823414cf888",
+      "committed_at": "2026-10-05T14:18:38Z",
+      "change_status": {
+        "total": 39,
+        "additions": 39,
+        "deletions": 0
+      },
+      "url": "https://api.github.com/gists/ae3fb1250cc683c445298e8cb5429e5c/7d2fe66952e7b8e434f1f3144c708823414cf888"
+    }
+  ],
+  "truncated": false
+}
