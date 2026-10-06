@@ -63,15 +63,25 @@ Classic token 勾选 `gist`；Fine-grained token 把 `Gists` 设为 Read and wri
 
 ## 维护
 
-改动推送前，递增 `sw.js` 里的 `CACHE` 版本号（当前 `radiotherapy-v13`），
-否则已安装到桌面的用户会停留在旧版本。也可以直接用 `dev-tools/push.sh` 自动递增并推送。
-
-回归测试（`dev-tools/`，共 973 项断言，全部只读取 `index.html`，不修改源码）：
+**发布用 `dev-tools/release.sh`，它会自动递增 `sw.js` 里的 `CACHE` 版本号（当前 `radiotherapy-v13`）、
+跑完测试再推送，并轮询确认 Pages 已生效** —— 不递增版本号的话，已安装到桌面的用户会停留在旧版本。
 
 ```bash
+bash dev-tools/release.sh "这次改了什么"
+```
+
+发布前会自动跑两道门禁：
+
+- 回归测试（`dev-tools/`，共 **1,031 项断言**，15 个套件，全部只读取 `index.html`，不修改源码）
+- 兼容性门禁 `test-compat.js`（58 项）—— 拦截会让老用户丢数据或导致 PWA 装不上的改动
+
+```bash
+node test-compat.js                 # 兼容性门禁：键名 / 迁移 / 只补不丢 / PWA 资源完整
 node qa-audit.js                    # 缺陷修复验收（108 项，覆盖 12 项已知缺陷）
 node test-sync.js                   # 云同步全链路（模拟 GitHub API，81 项）
 node test-*.js                      # 排程 / 迁移 / 合并 / 随访 / 模板 / AI / SW ...
 node qa-perf.js                     # 渲染耗时与存储占用探针
+
+bash scan-dates.sh                  # 跨日期扫描（必须用 bash 跑），防「只在今天绿」
 ```
 
