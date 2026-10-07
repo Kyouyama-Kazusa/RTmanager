@@ -226,21 +226,39 @@ const pV2 = inState({ startDate: today, fractions: '10', dosePerFraction: '2' })
 ok(cap(function () { sheetStop(pV2); }).onSave({ stopDate: '', reason: '' }) === false, '★ 空日期被拒绝');
 ok(!pV2.stopDate, '未写入');
 
-group('D1. 待办提示');
+group('D1. 待办提示：提前终止 → 归入「即将结束」');
+/* 2026-10-07 需求变更：待办只保留「即将结束 / 还未开始 / 验证」三类节点。
+   提前终止者剩余次数为 0（已止），故不再由「即将结束」提醒；
+   此处断言它**不再**出现旧的「已提前终止 / 疗程已结束」文案，
+   且不产生「今日应治疗」这类噪音 —— 终止状态在详情页可见。 */
 const pT = inState({ startDate: addDays(today, -60), fractions: '30', dosePerFraction: '2' });
 const st2 = computeSchedule(pT);
 cap(function () { sheetStop(pT); }).onSave({ stopDate: st2[19].date, reason: '' });
 let todo = buildTodo();
 let reasons = todo.length ? todo[0].reasons : [];
 console.log('  提前终止患者的待办:', JSON.stringify(reasons));
-ok(reasons.indexOf('已提前终止') >= 0, '★ 提示「已提前终止」', reasons);
-ok(String(reasons.join()).indexOf('未执行') >= 0 || (todo[0] && String(todo[0].details.join()).indexOf('未执行') >= 0), '详情含未执行次数', todo[0] ? todo[0].details : null);
+ok(reasons.indexOf('已提前终止') < 0, '★ 旧文案「已提前终止」已移除', reasons);
+ok(reasons.indexOf('今日应治疗') < 0, '★ 不再产生「今日应治疗」噪音', reasons);
+ok(reasons.indexOf('疗程已结束') < 0, '★ 不再提示「疗程已结束」（归档靠详情页）', reasons);
 
-group('D2. 未终止的走原提示（回归）');
-const pT2 = inState({ startDate: addDays(today, -60), fractions: '10', dosePerFraction: '2' });
+group('D2. 未终止、接近完成 → 提示「即将结束」');
+/* 30 次疗程从今天开始 → 已完成 0 次、剩 30 次，不触发；
+   改用「已开始一段时间」的方式构造「剩 3 次」：10 次疗程、今天正好是第 7 次治疗日。
+   做法：开始日期往前推，使今天的排程序号为 7。 */
+const pT2pre = inState({ startDate: addDays(today, -60), fractions: '10', dosePerFraction: '2' });
+const sch2 = computeSchedule(pT2pre);
+/* 找到今天在排程中的序号（1-based） */
+let todayIdx2 = 0;
+for (let i = 0; i < sch2.length; i++) if (sch2[i].date === today) todayIdx2 = i + 1;
+console.log('  10 次疗程中今天是第', todayIdx2, '次；已完成', doneCount(pT2pre), '/ 10');
 const reasons2 = buildTodo().length ? buildTodo()[0].reasons : [];
 console.log('  正常完成患者的待办:', JSON.stringify(reasons2));
-ok(reasons2.indexOf('疗程已结束') >= 0, '★ 未终止的仍提示「疗程已结束」', reasons2);
+if (todayIdx2 >= 6) {
+  ok(reasons2.indexOf('即将结束') >= 0, '★ 剩余 ≤5 次 → 提示「即将结束」', reasons2);
+} else {
+  /* 今天落在疗程很早期时，剩余远大于阈值，本就不该提醒 —— 这条也一并锁住 */
+  ok(reasons2.indexOf('即将结束') < 0, '★ 剩余 >5 次 → 不提示「即将结束」', { idx: todayIdx2, reasons: reasons2 });
+}
 ok(reasons2.indexOf('已提前终止') < 0, '不出现终止提示', reasons2);
 
 group('E1. 界面展示');

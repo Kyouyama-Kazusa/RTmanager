@@ -275,9 +275,9 @@ ok(typeof skipHere === 'function', '★ 异常修正 skipHere 可用');
 ok(js.indexOf("'mark-all'") < 0, '动作表中不再有 mark-all');
 ok(js.indexOf('尚无手工标记') > 0 || js.indexOf('无需逐次标记') > 0, '界面已说明按日期推算');
 
-group('B9. 待办联动');
-/* 注意：todayStr() 当天可能本身是法定节假日（如国庆），此时「今天」不排治疗。
-   这里显式把今天设为调休上班日，确保今天有治疗安排，才能验证待办。 */
+group('B9. 待办联动（2026-10-07 收窄后）');
+/* 需求变更：待办只保留「即将结束 / 还未开始 / 验证」+ 副反应 + 随访。
+   「疗程已结束待归档」「今日应治疗」不再进待办 —— 在治页与详情页已可见。 */
 setMakeup(today, '测试·今天上班');
 const p8 = mkPatient({ startDate: addDays(today, -120), fractions: '5', dosePerFraction: '2' });
 state = normalize({ version: 2, updatedAt: '', patients: [p8] });
@@ -285,7 +285,7 @@ state.patients[0].status = '在治';
 let todo = buildTodo();
 const reasons = todo.length ? todo[0].reasons : [];
 console.log('  疗程已结束的患者待办:', JSON.stringify(reasons));
-ok(reasons.indexOf('疗程已结束') >= 0, '★ 计划全部完成且仍在治 → 提示归档', reasons);
+ok(reasons.indexOf('疗程已结束') < 0, '★ 不再提示「疗程已结束」待归档（移出待办）', reasons);
 ok(reasons.indexOf('遗漏') < 0 && reasons.indexOf('尚未标记完成') < 0, '不再出现依赖手工标记的旧提示', reasons);
 
 const p9 = mkPatient({ startDate: today, fractions: '10', dosePerFraction: '2' });
@@ -295,8 +295,26 @@ ok(!!scheduleOn(state.patients[0], today), '（前置）今天确实有治疗安
 todo = buildTodo();
 const r9 = todo.length ? todo[0].reasons : [];
 console.log('  今日有治疗的患者待办:', JSON.stringify(r9));
-ok(r9.indexOf('今日应治疗') >= 0, '★ 今天有治疗 → 进待办', r9);
+ok(r9.indexOf('今日应治疗') < 0, '★ 不再因「今日应治疗」进待办（移出待办）', r9);
 ok(String(r9.join()).indexOf('未标记') < 0, '提示文案不再提「标记」', r9);
+
+/* 未开始：开始日期在将来 → 必须提醒 */
+const pNd = mkPatient({ startDate: addDays(today, 7), fractions: '30', dosePerFraction: '2' });
+state = normalize({ version: 2, updatedAt: '', patients: [pNd] });
+state.patients[0].status = '在治';
+todo = buildTodo();
+const rNd = todo.length ? todo[0].reasons : [];
+console.log('  未开始患者待办:', JSON.stringify(rNd));
+ok(rNd.indexOf('还未开始') >= 0, '★ 开始日期在将来 → 提示「还未开始」', rNd);
+
+/* 待排程（缺开始日期）→ 归入「未开始」 */
+const pNo = mkPatient({ startDate: '', fractions: '' });
+state = normalize({ version: 2, updatedAt: '', patients: [pNo] });
+state.patients[0].status = '在治';
+todo = buildTodo();
+const rNo = todo.length ? todo[0].reasons : [];
+console.log('  待排程患者待办:', JSON.stringify(rNo));
+ok(rNo.indexOf('待排程') >= 0 || rNo.indexOf('流程：') >= 0, '★ 缺排程信息 → 仍进待办（归未开始）', rNo);
 delMakeup(today);      /* 复原 */
 
 group('B10. 边界');

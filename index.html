@@ -79,6 +79,9 @@ button,input,select,textarea{font:inherit;color:inherit}
 .todocard{display:flex;gap:12px;align-items:flex-start;cursor:pointer}
 .todocard:active{background:#fafbfc}
 .todo-reasons{display:flex;gap:6px;flex-wrap:wrap;margin-top:5px}
+.todo-sum{display:flex;gap:6px;flex-wrap:wrap;align-items:center;font-size:12px;color:var(--pri);margin-bottom:9px;padding:0 2px}
+.todo-sum .ts-i{background:var(--pri-soft);border-radius:10px;padding:2px 9px;font-weight:600}
+.todo-acts{display:flex;gap:6px;margin-top:7px;flex-wrap:wrap}
 
 .kv{display:flex;gap:10px;padding:6px 0;border-bottom:1px dashed var(--line);font-size:14px}
 .kv:last-child{border-bottom:0}
@@ -94,6 +97,18 @@ button,input,select,textarea{font:inherit;color:inherit}
 .event .content{font-size:15px;font-weight:600;word-break:break-all}
 .event .t{font-size:12px;color:var(--sub);margin-top:2px}
 .event .blk{margin-top:8px;padding:8px 10px;border-radius:9px;background:#f7f9fb;font-size:14px}
+/* 日期弹层：当日人数概览与分段名单 */
+.day-ov{display:flex;gap:6px;margin-bottom:10px}
+.day-ov .ov-i{flex:1;text-align:center;padding:8px 4px;border-radius:10px;font-size:11px;line-height:1.4}
+.day-ov .ov-i b{display:block;font-size:19px;font-weight:700}
+.day-ov .ov-start{background:#e3f0fd;color:#1d5fa8}
+.day-ov .ov-treat{background:#e5f3f1;color:var(--pri)}
+.day-ov .ov-end{background:#fde8e4;color:#b3261e}
+.day-sec{margin-bottom:10px}
+.day-sec-t{font-size:12px;font-weight:700;margin:10px 0 2px;padding-left:7px;border-left:3px solid var(--line)}
+.day-sec-t.t-start{border-color:#1d5fa8;color:#1d5fa8}
+.day-sec-t.t-end{border-color:#b3261e;color:#b3261e}
+.day-sec-t.t-all{border-color:var(--pri);color:var(--pri)}
 .event .blk .blk-t{font-size:12px;color:var(--sub);margin-bottom:2px}
 .event .fu{display:flex;gap:8px;align-items:flex-start;font-size:14px;margin-top:4px}
 .event .fu .fut{flex:0 0 auto;font-size:12px;color:var(--sub);padding-top:1px}
@@ -139,10 +154,23 @@ button,input,select,textarea{font:inherit;color:inherit}
 .cal-cell .tagline.extra{background:var(--warn-soft);color:var(--warn)}
 .cal-cell .tagline.pause{background:#eef1f5;color:var(--sub)}
 .cal-cell .cnt{font-size:10px;color:var(--pri);font-weight:700;line-height:1.3}
+/* 当日人数标注：始（开始放疗）/ 终（放疗结束） */
+.cal-cell .statrow{display:flex;gap:2px;flex-wrap:wrap;line-height:1.2}
+.cal-cell .statrow span{font-size:9px;font-weight:700;border-radius:3px;padding:1px 3px;white-space:nowrap}
+.cal-cell .statrow .b-start{background:#e3f0fd;color:#1d5fa8}
+.cal-cell .statrow .b-end{background:#fde8e4;color:#b3261e}
+.cal-cell .tagline.s-start{background:#e3f0fd;color:#1d5fa8;text-decoration:none}
+.cal-cell .tagline.s-end{background:#fde8e4;color:#b3261e;text-decoration:none}
 .cal-cell.clickable{cursor:pointer}
 .cal-cell.clickable:active{background:#e9eef4}
 .cal-legend{display:flex;gap:10px;flex-wrap:wrap;font-size:11px;color:var(--sub);margin-top:9px;padding:0 2px}
 .cal-legend i{display:inline-block;width:9px;height:9px;border-radius:3px;margin-right:4px;vertical-align:middle}
+.cal-wrap .month-stat{display:flex;gap:12px;flex-wrap:wrap;font-size:11px;color:var(--sub);margin-top:9px;padding:7px 9px;background:#f7f9fb;border-radius:8px}
+.cal-wrap .month-stat .ms-i{display:inline-flex;align-items:center}
+.cal-wrap .month-stat i{display:inline-block;width:9px;height:9px;border-radius:3px;margin-right:4px}
+.cal-wrap .month-stat i.b-start{background:#e3f0fd}
+.cal-wrap .month-stat i.b-end{background:#fde8e4}
+.cal-wrap .month-stat i.b-treat{background:#e5f3f1}
 .cal-day-list .row{display:flex;align-items:center;gap:8px;padding:9px 0;border-bottom:1px dashed var(--line)}
 .cal-day-list .row:last-child{border-bottom:0}
 .cal-day-list .row .nm{flex:1;font-size:14px}
@@ -228,12 +256,17 @@ button,input,select,textarea{font:inherit;color:inherit}
 var LS_KEY = 'radiotherapy.v1';
 var SNAP_PREFIX = 'radiotherapy.snap.';
 var SNAP_KEEP = 7;
-var APP_VERSION = '0.10.0';
+var APP_VERSION = '0.11.0';
 
 var SEXES = ['男', '女'];
 var PURPOSES = ['根治性', '术后辅助', '术前新辅助', '姑息性'];
 var TECHNIQUES = ['IMRT', 'VMAT', 'SBRT', '3D-CRT', '电子线', 'TOMO', '其他'];
 var PLAN_STATUSES = ['待定位', '待勾画', '待计划', '待验证', '已通过'];
+/* 放疗验证提醒的提前量（次）：第 N 次验证，则从第 N-2 次治疗日起开始提醒。
+   取 2 是为了给排班/机器预留准备时间，同时不至于过早刷屏。 */
+var VERIFY_LEAD_FRACTIONS = 2;
+/* 待办「即将结束」阈值：剩余治疗次数 ≤ 这个值就提醒 */
+var TODO_NEAR_END_LEFT = 5;
 var REACTION_SITES = ['皮肤反应', '口腔黏膜炎', '放射性食管炎', '放射性肺炎', '放射性肠炎', '放射性膀胱炎', '骨髓抑制', '乏力', '其他'];
 var GRADES = ['1级（轻）', '2级（中）', '3级（重）', '4级（危及生命）'];
 var REACTION_STATUSES = ['未处理', '已处理待复查', '已复查未解除', '已解除', '长期随访'];
@@ -460,6 +493,12 @@ function normalize(d) {
       boostFractions: p.boostFractions == null ? '' : String(p.boostFractions),
       boostNote: p.boostNote || '',
       stopDate: p.stopDate || '',
+      /* 疗程中验证：fractions 存原始输入串（保留用户写法），查询走 parseVerifyNums */
+      verifyAt: keepExtra(p.verifyAt || {}, {
+        fractions: (p.verifyAt && p.verifyAt.fractions != null) ? String(p.verifyAt.fractions) : '',
+        note: (p.verifyAt && p.verifyAt.note) || '',
+        done: ((p.verifyAt && p.verifyAt.done) || []).map(function (x) { return String(x); })
+      }),
       doneDates: done,
       reactions: (p.reactions || []).map(function (r) {
         return keepExtra(r, {
@@ -960,6 +999,159 @@ function treatmentEndNote(p) {
   return '放疗结束后还有 ' + (-d) + ' 天';
 }
 
+/* ================= 放疗验证（可选的疗程中验证） =================
+   患者在疗程中途可能需要做验证（位置验证 / 复位 / 中期评估等）。
+   在患者表单里填「放疗第几次时验证」，支持多个（逗号或顿号分隔），留空表示不验证。
+   数据结构：p.verifyAt = { fractions: '10,20', note: '复位+CBCT', done: ['10'] }
+   只把「次数」当主键，备注共用一条 —— 放疗科实际场景里一躺疗程通常就一类验证。 */
+
+/* 解析「第几次验证」输入 → 去重升序的正整数数组。
+   容错：全角逗号/顿号/空格/分号都能分隔；非数字与越界值直接丢弃（不报错、不写坏数据）。 */
+function parseVerifyNums(s) {
+  var out = [], seen = {};
+  String(s == null ? '' : s).split(/[,，、;；\s]+/).forEach(function (t) {
+    var n = parseInt(t, 10);
+    if (isNaN(n) || n <= 0 || n > 999) return;
+    if (seen[n]) return;
+    seen[n] = 1; out.push(n);
+  });
+  return out.sort(function (a, b) { return a - b; });
+}
+/* 归一化验证配置（读的时候一律走这个，保证结构完整、类型正确） */
+function verifyCfgOf(p) {
+  var v = (p && p.verifyAt) || {};
+  return {
+    nums: parseVerifyNums(v.fractions),
+    note: String(v.note || ''),
+    done: (v.done || []).map(function (x) { return String(x); })
+  };
+}
+function hasVerify(p) { return verifyCfgOf(p).nums.length > 0; }
+/* 某次验证是否已标记完成 */
+function verifyDone(p, n) { return verifyCfgOf(p).done.indexOf(String(n)) >= 0; }
+
+/* 该患者当前「最该关注」的验证次数：第一个未完成且已进入提醒窗口的；
+   都没有则返回 null。返回 {n, atIdx, status} ——
+     atIdx  该次验证对应第几次治疗（1-based）
+     status 'due'（已到或已过）| 'soon'（提前量内） */
+function verifyPending(p) {
+  var cfg = verifyCfgOf(p);
+  if (!cfg.nums.length) return null;
+  var sched = computeSchedule(p);
+  if (!sched.length) return null;
+  var dn = 0;
+  for (var i = 0; i < sched.length; i++) if (sched[i].done) dn++;
+  var out = null;
+  for (var j = 0; j < cfg.nums.length; j++) {
+    var n = cfg.nums[j];
+    if (cfg.done.indexOf(String(n)) >= 0) continue;
+    if (n > sched.length) continue;                 /* 超出排程，无法定位 */
+    /* 已完成次数达到 (n - 提前量) 即进入提醒窗口 */
+    var trigger = Math.max(1, n - VERIFY_LEAD_FRACTIONS);
+    if (dn >= trigger) {
+      var status = (dn >= n) ? 'due' : 'soon';
+      out = { n: n, atIdx: n, status: status };
+      break;                                        /* 只提醒最早那个未完成的 */
+    }
+  }
+  return out;
+}
+/* 今日是否有该患者应做的验证（用于待办/日历标注） */
+function verifyDueToday(p, date) {
+  var cfg = verifyCfgOf(p);
+  if (!cfg.nums.length) return false;
+  var sched = computeSchedule(p);
+  var idx = -1;
+  for (var i = 0; i < sched.length; i++) if (sched[i].date === date) { idx = i + 1; break; }
+  if (idx < 0) return false;
+  return cfg.nums.indexOf(idx) >= 0 && cfg.done.indexOf(String(idx)) < 0;
+}
+
+/* ================= 日历：当日人数统计 =================
+   在日历上标注每天的三类人数，点击可看名单：
+     treating 治疗中 —— 当天排了治疗的患者（与总日历原有「N 人」同一口径）
+     starting 开始放疗 —— 排程第一天落在当天
+     ending   今日结束 —— 排程最后一天落在当天
+
+   关键：ending 必须能被看到。患者疗程结束当天往往已归档为「治疗完成」，
+   就不在 inTreat() 里了 —— 若只扫在治患者，「今日结束」永远是 0，功能形同虚设。
+   所以统计范围放宽为「在治 + 近期结束的归档」，并以**排程日期**判定首末日，
+   不用 completedAt（归档时间早于排程结束日是常见情况，不可信）。 */
+
+/* 归档患者纳入统计的窗口（天）：只回看，避免扫全量历史。
+   取 90 天是为了覆盖「结束日已过、但用户还在翻上个月日历」的场景。 */
+var CAL_STAT_LOOKBACK_DAYS = 90;
+
+/* 统计扫描范围：在治全部 + 排程末日在窗口内的归档患者 */
+function calStatScope() {
+  var today = todayStr();
+  var out = [];
+  state.patients.forEach(function (p) {
+    if (isActive(p)) { out.push(p); return; }
+    /* 归档患者：只有排程末日落在「过去 90 天 ~ 未来」才纳入。
+       未来末日也纳入，是为了让「提前归档」也能看到结束标注。 */
+    var end = scheduleEnd(p);
+    if (!end) return;
+    if (daysBetween(today, end) >= -CAL_STAT_LOOKBACK_DAYS) out.push(p);
+  });
+  return out;
+}
+
+/* 某一天的统计结果与名单 */
+function dayStat(date) {
+  var treating = [], starting = [], ending = [];
+  if (!date) return { treating: treating, starting: starting, ending: ending };
+  calStatScope().forEach(function (p) {
+    var sched = computeSchedule(p);
+    if (!sched.length) return;                    /* 无排程不计入任何一类 */
+    var hasTreat = false, i;
+    for (i = 0; i < sched.length; i++) if (sched[i].date === date) { hasTreat = true; break; }
+    if (hasTreat) treating.push({ p: p, it: sched[i] });
+    if (sched[0].date === date) starting.push({ p: p, it: sched[0] });
+    var last = sched[sched.length - 1];
+    if (last.date === date) ending.push({ p: p, it: last });
+  });
+  return { treating: treating, starting: starting, ending: ending };
+}
+
+/* 该日是否有任何统计（用于决定格子要不要渲染标注） */
+function dayStatHas(s) {
+  return !!(s && (s.treating.length || s.starting.length || s.ending.length));
+}
+
+/* 日历格子里的标注（紧凑两行，小屏不撑破） */
+function calStatBadges(s) {
+  if (!dayStatHas(s)) return '';
+  var h = '';
+  if (s.treating.length) h += '<div class="cnt">治疗 ' + s.treating.length + '</div>';
+  var tail = '';
+  if (s.starting.length) tail += '<span class="b-start">始 ' + s.starting.length + '</span>';
+  if (s.ending.length) tail += '<span class="b-end">终 ' + s.ending.length + '</span>';
+  if (tail) h += '<div class="statrow">' + tail + '</div>';
+  return h;
+}
+
+/* 某月的全部日期字符串（用于补齐「只有开始/结束、没有治疗」的格子） */
+function monthDays(y, m) {
+  var out = [], dim = new Date(y, m, 0).getDate();
+  for (var i = 1; i <= dim; i++) out.push(y + '-' + pad2(m) + '-' + pad2(i));
+  return out;
+}
+
+/* 某月的汇总：开始人数（去重，按人算）、结束人数（去重）、治疗人次 */
+function calMonthStat(y, m) {
+  var pre = y + '-' + pad2(m) + '-';
+  var startSet = {}, endSet = {}, treatCnt = 0;
+  monthDays(y, m).forEach(function (ds) {
+    var st = dayStat(ds);
+    treatCnt += st.treating.length;
+    st.starting.forEach(function (a) { startSet[a.p.id] = 1; });
+    st.ending.forEach(function (a) { endSet[a.p.id] = 1; });
+  });
+  return { starting: Object.keys(startSet).length, ending: Object.keys(endSet).length, treating: treatCnt };
+}
+function calMonthStatHas(s) { return !!(s && (s.starting || s.ending || s.treating)); }
+
 /* 在日期上叠加间隔（月/年走自然月，闰年与月末自动处理） */
 function addInterval(base, n, unit) {
   var b = parseD(base);
@@ -1170,29 +1362,45 @@ function buildTodo() {
     if (hasDueFollowup(p, today)) targets.push(p);
   });
   targets.forEach(function (p) {
-    var reasons = [], details = [];
+    var reasons = [], details = [], tags = [];
     if (p.status === '在治') {
-      if (p.planStatus && p.planStatus !== '已通过') {
-        reasons.push('流程：' + p.planStatus); details.push('治疗流程卡在「' + p.planStatus + '」');
-      } else if (!p.startDate || !parseInt(p.fractions, 10)) {
-        reasons.push('待排程'); details.push('请填写放疗开始日期与总次数，自动生成治疗日历');
+      /* 待办只关注三类疗程节点（用户 2026-10-07 明确）：
+           ① 还未开始（含待排程 —— 连开始日期/总次数都没填）
+           ② 即将结束（剩余 ≤ TODO_NEAR_END_LEFT 次）
+           ③ 疗程中验证到点
+         以及始终保留的副反应、随访到期。
+         「今日应治疗」「流程未通过」「疗程已结束待归档」不再进待办 —— 它们
+         在在治页与详情页已经可见，塞进待办只会淹没真正要处理的事。 */
+      var ready = !!(p.startDate && parseInt(p.fractions, 10));
+      if (!ready) {
+        if (p.planStatus && p.planStatus !== '已通过') { reasons.push('流程：' + p.planStatus); details.push('治疗流程卡在「' + p.planStatus + '」'); tags.push('未开始'); }
+        else { reasons.push('待排程'); details.push('请填写放疗开始日期与总次数，自动生成治疗日历'); tags.push('未开始'); }
       } else {
-        var t = todayItems(p);
-        if (t) { reasons.push('今日应治疗'); details.push('今日为第 ' + t.fraction + ' 次治疗日' + (t.extra ? '（加照）' : '')); }
         var dn = doneCount(p);
-        var end = scheduleEnd(p);
         var plannedN = plannedCount(p);
-        var stoppedN = stoppedShortOf(p);
-        /* 疗程已排完（所有计划日期都已过去）但仍是「在治」→ 提示归档 */
-        if (end && end < today && dn >= plannedN) {
-          if (stoppedN > 0) {
-            reasons.push('已提前终止');
-            details.push('止于 ' + dateOnly(p.stopDate) + '，实际 ' + plannedN + '/' + totalFractionsOf(p) + ' 次（未执行 ' + stoppedN + ' 次），可确认「治疗完成」归档');
-          } else {
-            reasons.push('疗程已结束'); details.push('计划 ' + plannedN + ' 次已全部完成，可确认「治疗完成」归档');
-          }
-        } else if (dn >= Math.floor(plannedN * 0.95) && dn < plannedN) {
-          reasons.push('即将完成'); details.push('已完成 ' + dn + '/' + plannedN + ' 次');
+        var end = scheduleEnd(p);
+        var left = Math.max(0, plannedN - dn);
+        var sched = computeSchedule(p);
+        var startD = sched.length ? sched[0].date : (p.startDate || '');
+        /* ① 还未开始：今天早于首个治疗日 */
+        if (startD && startD > today) {
+          reasons.push('还未开始'); details.push('放疗自 ' + dateOnly(startD) + ' 起（' + WEEKDAYS[parseD(startD).getDay()] + '），距今 ' + daysBetween(today, startD) + ' 天');
+          tags.push('未开始');
+        }
+        /* ② 即将结束：剩余 ≤ 阈值 */
+        if (left > 0 && left <= TODO_NEAR_END_LEFT) {
+          reasons.push('即将结束'); details.push('还剩 ' + left + ' 次（已完成 ' + dn + '/' + plannedN + '），预计 ' + (end ? dateOnly(end) : '—') + ' 结束');
+          tags.push('即将结束');
+        }
+        /* ③ 疗程中验证到点（提前 VERIFY_LEAD_FRACTIONS 次进入提醒） */
+        var vp = verifyPending(p);
+        if (vp) {
+          var cfg = verifyCfgOf(p);
+          var when = vp.status === 'due' ? '本次就该验证' : '还有 ' + Math.max(0, vp.n - dn) + ' 次治疗';
+          reasons.push('验证：第 ' + vp.n + ' 次');
+          details.push('计划在第 ' + vp.n + ' 次治疗时验证' + (cfg.note ? '（' + cfg.note + '）' : '') + '，' + when + '；完成后点「标记已验证」');
+          tags.push('验证');
+          items.__hasVerify = true;
         }
       }
     }
@@ -1207,7 +1415,7 @@ function buildTodo() {
     realFollowups(p).forEach(function (f) {
       if (f.dueDate && f.dueDate <= today && !f.done) { if (reasons.indexOf('随访到期') < 0) { reasons.push('随访到期'); details.push('随访计划到期 ' + dateOnly(f.dueDate)); } }
     });
-    if (reasons.length) items.push({ p: p, reasons: reasons, details: details });
+    if (reasons.length) items.push({ p: p, reasons: reasons, details: details, tags: tags });
   });
   return items;
 }
@@ -1293,14 +1501,28 @@ function isWe(d) { var w = d.getDay(); return w === 0 || w === 6; }
 function renderTodo() {
   var items = buildTodo();
   var h = '';
+  /* 顶部给一句分类说明，让「为什么只剩这些」一目了然 */
+  var cntVerify = items.filter(function (it) { return (it.tags || []).indexOf('验证') >= 0; }).length;
+  var cntEnd = items.filter(function (it) { return (it.tags || []).indexOf('即将结束') >= 0; }).length;
+  var cntNew = items.filter(function (it) { return (it.tags || []).indexOf('未开始') >= 0; }).length;
+  if (items.length) {
+    h += '<div class="todo-sum">' +
+      (cntNew ? '<span class="ts-i">未开始 ' + cntNew + '</span>' : '') +
+      (cntVerify ? '<span class="ts-i">验证 ' + cntVerify + '</span>' : '') +
+      (cntEnd ? '<span class="ts-i">即将结束 ' + cntEnd + '</span>' : '') +
+      '<span class="ts-i" style="margin-left:auto;color:var(--sub)">共 ' + items.length + ' 位</span></div>';
+  }
   if (!items.length) h = '<div class="empty"><span class="big">🎉</span>暂无待办</div>';
   items.forEach(function (it) {
+    var vp = (it.tags || []).indexOf('验证') >= 0 ? verifyPending(it.p) : null;
     h += '<div class="card todocard" data-act="open-patient" data-id="' + it.p.id + '">' +
       '<div class="badgebox"><div class="b">' + esc(it.p.name ? it.p.name.slice(0, 2) : '—') + '</div><div class="t">' + esc(it.p.mrn || '') + '</div></div>' +
       '<div class="pbody"><div class="line1"><span class="pname">' + esc(it.p.name) + '</span><span class="chip">' + esc(it.p.status) + '</span></div>' +
       '<div class="pdiag">' + esc(it.p.diagnosis || '') + '</div>' +
       '<div class="todo-reasons">' + it.reasons.map(function (r) { return '<span class="chip warn">' + esc(r) + '</span>'; }).join('') + '</div>' +
       (it.details.length ? '<div class="hint">' + esc(it.details.join('；')) + '</div>' : '') +
+      (vp ? '<div class="todo-acts"><button class="btn sm" data-act="verify-done" data-id="' + it.p.id + '" data-n="' + vp.n + '" onclick="event.stopPropagation()">✓ 标记第 ' + vp.n + ' 次已验证</button>' +
+        '<button class="btn sm" data-act="verify-edit" data-id="' + it.p.id + '" onclick="event.stopPropagation()">修改</button></div>' : '') +
       '</div></div>';
   });
   $('view').innerHTML = h + '<div style="height:60px"></div>';
@@ -1358,8 +1580,16 @@ function renderOverallCal() {
   Object.keys(byDate).forEach(function (ds) {
     var arr = byDate[ds];
     var dn = arr.filter(function (a) { return a.it.done; }).length;
-    cells[ds] = '<div class="cnt">' + arr.length + ' 人</div>' +
+    var st = dayStat(ds);
+    cells[ds] = calStatBadges(st) +
       (dn ? '<div class="tagline done">已完成 ' + dn + '</div>' : '<div class="tagline">待治疗</div>');
+  });
+  /* 有「开始/结束」但没有当天治疗的日期（例如疗程首日恰逢休息日、或已归档患者的末日），
+     也要可点击查看名单 —— 否则标注画得出来却点不开 */
+  monthDays(y, m).forEach(function (ds) {
+    if (cells[ds] != null) return;
+    var st = dayStat(ds);
+    if (dayStatHas(st)) cells[ds] = calStatBadges(st);
   });
   var monthTotal = 0, monthDone = 0;
   Object.keys(byDate).forEach(function (ds) {
@@ -1368,16 +1598,25 @@ function renderOverallCal() {
   var allMiss = {};
   list.forEach(function (pp) { missingHolidayYears(pp.startDate, scheduleEnd(pp)).forEach(function (y) { allMiss[y] = 1; }); });
   var missList = Object.keys(allMiss).sort();
+  var monthStat = calMonthStat(y, m);
   var h = '<div class="section-title">治疗总日历 · 在治 ' + list.length + ' 位</div>';
   if (missList.length) h += '<div class="hint" style="padding:8px 10px;background:var(--warn-soft);border-radius:8px;margin-bottom:8px;line-height:1.7">⚠ 部分患者排程涉及 <b>' + missList.join('、') + ' 年</b>，该年暂无节假日数据，已按「周一~周五 + 周末」估算。可在「设置」补录。</div>';
   h += '<div class="cal-wrap">' +
     calHeader(y, m, '<span class="chip sm">本月 ' + monthDone + '/' + monthTotal + '</span>') +
     calDowRow() + calBody(y, m, cells) +
+    (calMonthStatHas(monthStat)
+      ? '<div class="month-stat"><span class="ms-i"><i class="b-start"></i>本月开始 ' + monthStat.starting + ' 人</span>' +
+        '<span class="ms-i"><i class="b-end"></i>本月结束 ' + monthStat.ending + ' 人</span>' +
+        '<span class="ms-i"><i class="b-treat"></i>本月治疗 ' + monthStat.treating + ' 人次</span></div>'
+      : '') +
     '<div class="cal-legend">' +
     '<span><i style="background:#e5f3f1"></i>有治疗安排</span>' +
     '<span><i style="background:#fdecea"></i>法定节假日</span>' +
     '<span><i style="background:#fdf0e0"></i>调休上班</span>' +
-    '<span><i style="background:#fff;border:1px solid #0f766e"></i>今天</span></div>' +
+    '<span><i style="background:#fff;border:1px solid #0f766e"></i>今天</span>' +
+    '<span><i style="background:#e3f0fd"></i>始＝开始放疗</span>' +
+    '<span><i style="background:#fde8e4"></i>终＝放疗结束</span></div>' +
+    '<div class="hint" style="margin-top:6px">点日期看当天名单与「开始 / 结束」详情</div>' +
     '</div>';
   if (!list.length) h += '<div class="empty"><span class="big">📅</span>暂无在治患者</div>';
 
@@ -1480,6 +1719,7 @@ function renderPatientPage() {
       (p.stopDate ? ' <span class="chip warn sm">按终止日重算</span>' : '') + (missY.length ? ' <span class="chip warn sm">含未录入年份</span>' : '') + '</div></div>' +
       (missY.length ? '<div class="hint" style="margin-top:8px;padding:8px 10px;background:var(--warn-soft);border-radius:8px;line-height:1.7">⚠ 排程涉及 <b>' + missY.join('、') + ' 年</b>，暂无该年节假日数据，已按「周一~周五工作日 + 周末休息」估算。补录假期后结束日期会自动重算。</div>' : '') +
       '<div class="kv"><div class="k">治疗日</div><div class="v">' + (p.treatDays || []).map(function (d) { return WEEKDAYS[d]; }).join('、') + '</div></div>' +
+      '<div class="kv"><div class="k">放疗验证</div><div class="v">' + verifySummaryHtml(p) + '</div></div>' +
       '<div class="kv"><div class="k">已中断</div><div class="v">' + ((p.pauses || []).length ? (p.pauses || []).map(function (x) { return mdLabel(x.from) + '~' + mdLabel(x.to) + (x.reason ? '(' + esc(x.reason) + ')' : ''); }).join('；') : '无') + '</div></div>' +
       '<div class="hint" style="margin-top:6px">按日期自动推算：计划日期已过的即计入已完成，无需逐次标记。异常（当天未做）用「本次未做」修正。</div>' +
       '<div class="btnrow"><button class="btn sm" data-act="add-pause">＋ 中断/调整</button>' +
@@ -1497,10 +1737,14 @@ function renderPatientPage() {
     var byDate = {};
     sched.forEach(function (x) { byDate[x.date] = x; });
     var cells = {};
+    var firstDay = sched.length ? sched[0].date : '';
+    var lastDay = sched.length ? sched[sched.length - 1].date : '';
     Object.keys(byDate).forEach(function (ds) {
       var x = byDate[ds];
       var cls = x.extra ? 'extra' : (x.boost ? 'boost' : (x.done ? 'done' : ''));
-      cells[ds] = '<div class="tagline ' + cls + '">第' + x.fraction + '次' + (x.done ? '✓' : '') + (x.boost ? '＋' : '') + '</div>';
+      var mark = (ds === firstDay ? '<span class="statrow"><span class="b-start">始</span></span>' : '') +
+        (ds === lastDay && lastDay !== firstDay ? '<span class="statrow"><span class="b-end">终</span></span>' : '');
+      cells[ds] = '<div class="tagline ' + cls + '">第' + x.fraction + '次' + (x.done ? '✓' : '') + (x.boost ? '＋' : '') + '</div>' + mark;
     });
     /* 中断区间：按天标记（中断日本就不排治疗，故不能要求 byDate[ds] 存在 —— BUG-12） */
     (p.pauses || []).forEach(function (pa) {
@@ -1518,9 +1762,20 @@ function renderPatientPage() {
         cells[ds] = '<div class="tagline pause">停</div>';
       }
     });
+    var monthPre2 = y + '-' + pad2(m) + '-';
+    var mTreat = 0, mStart = 0, mEnd = 0;
+    Object.keys(cells).forEach(function (ds) {
+      if (ds.slice(0, 7) !== monthPre2.slice(0, 7)) return;
+      if (byDate[ds]) mTreat++;
+      if (ds === firstDay) mStart = 1;
+      if (ds === lastDay && lastDay !== firstDay) mEnd = 1;
+    });
     h += '<div class="cal-wrap">' + calHeader(y, m) + calDowRow() + calBody(y, m, cells) +
+      (mStart ? '<div class="hint s-start" style="margin-top:6px;padding:6px 9px;border-radius:8px;background:#e3f0fd;color:#1d5fa8">▶ 本月 <b>' + mdLabel(firstDay) + '</b> 开始放疗（' + WEEKDAYS[parseD(firstDay).getDay()] + '）</div>' : '') +
+      (mEnd ? '<div class="hint s-end" style="margin-top:6px;padding:6px 9px;border-radius:8px;background:#fde8e4;color:#b3261e">■ 本月 <b>' + mdLabel(lastDay) + '</b> 放疗结束（' + WEEKDAYS[parseD(lastDay).getDay()] + '）</div>' : '') +
       '<div class="cal-legend"><span><i style="background:#e5f3f1"></i>待治疗</span><span><i style="background:#e5f3f1;opacity:.6"></i>已完成</span>' +
-      '<span><i style="background:#fdf0e0"></i>加照</span><span><i style="background:#EEEDFE"></i>加量</span><span><i style="background:#eef1f5"></i>中断</span></div>' +
+      '<span><i style="background:#fdf0e0"></i>加照</span><span><i style="background:#EEEDFE"></i>加量</span><span><i style="background:#eef1f5"></i>中断</span>' +
+      '<span><i style="background:#e3f0fd"></i>始＝开始放疗</span><span><i style="background:#fde8e4"></i>终＝放疗结束</span></div>' +
       '<div class="hint" style="margin-top:6px">点日历上的治疗日可登记「本次未做」或加照</div></div>';
   }
 
@@ -2129,17 +2384,100 @@ function sheetPatient(p) {
       '<div class="field2"><div class="field"><label>定位日期</label>' + textInput('simDate', d.simDate, '', 'date') + '</div>' +
       '<div class="field"><label>放疗开始日期 *</label>' + textInput('startDate', d.startDate, '', 'date') + '</div></div>' +
       '<div class="hint" style="margin:-6px 0 10px">填写开始日期后，系统按「工作日」自动排程并算出结束日期</div>' +
-      field('体位/固定装置', textInput('position', d.position, '如 头颈肩热塑面罩')),
+      field('体位/固定装置', textInput('position', d.position, '如 头颈肩热塑面罩')) +
+      field('放疗验证（第几次治疗时验证）',
+        '<div class="field2"><div class="field">' + textInput('verifyFractions', (d.verifyAt && d.verifyAt.fractions) || '', '如 10 或 10,20，留空=不验证') + '</div>' +
+        '<div class="field">' + textInput('verifyNote', (d.verifyAt && d.verifyAt.note) || '', '验证内容（可选）') + '</div></div>',
+        '填「第几次治疗」时做验证，多个用逗号分隔（如 10,20）；留空表示不做验证。到点前会提前 ' + VERIFY_LEAD_FRACTIONS + ' 次进入待办提醒'),
     onSave: function (v) {
       if (!String(v.name || '').trim()) { toast('请填写姓名'); return false; }
+      var vf = String(v.verifyFractions == null ? '' : v.verifyFractions);
+      /* 非法输入不静默吞掉：有内容却一个有效次数都解析不出来时明确提示 */
+      if (vf.trim() && !parseVerifyNums(vf).length) { toast('验证次数请填正整数，如 10 或 10,20'); return false; }
       if (isNew) {
         state.patients.push(normalize({ patients: [Object.assign({}, v, { treatDays: treatDaysCfg(), pauses: [], extras: [], doneDates: [], reactions: [], followupPlans: [], notes: [], status: '在治' })] }).patients[0]);
         toast(v.startDate && v.fractions ? '已添加，日历已生成' : '已添加');
       } else {
         ['mrn', 'name', 'sex', 'age', 'physician', 'diagnosis', 'purpose', 'technique', 'simDate', 'position', 'planStatus', 'totalDose', 'fractions', 'dosePerFraction', 'startDate'].forEach(function (k) { p[k] = v[k] || ''; });
+        /* 验证配置单独处理：次数变化时，把不再存在的次数的完成标记一并清掉，
+           避免「改成 15 后第 10 次仍显示已完成」这种脏数据 */
+        var oldDone = verifyCfgOf(p).done;
+        var nums = parseVerifyNums(vf);
+        p.verifyAt = {
+          fractions: vf.trim(),
+          note: String(v.verifyNote || ''),
+          done: oldDone.filter(function (x) { return nums.indexOf(parseInt(x, 10)) >= 0; })
+        };
         toast('已保存');
       }
       save(); render();
+    }
+  });
+}
+
+/* 详情页「放疗验证」摘要：无则显示「不验证」，有则逐个列出次数 + 完成状态 */
+function verifySummaryHtml(p) {
+  var cfg = verifyCfgOf(p);
+  if (!cfg.nums.length) return '不验证 <button class="btn sm" data-act="verify-edit">设置</button>';
+  var schedN = computeSchedule(p).length;
+  var dn = doneCount(p);
+  var parts = cfg.nums.map(function (n) {
+    var done = cfg.done.indexOf(String(n)) >= 0;
+    var over = n > schedN;
+    var cls = done ? 'ok' : (over ? 'danger' : (dn >= n ? 'warn' : 'pri'));
+    var txt = '第 ' + n + ' 次' + (done ? ' ✓' : (over ? '（超出排程）' : (dn >= n ? '（该验证了）' : '')));
+    return '<span class="chip ' + cls + ' sm">' + txt + '</span>';
+  }).join(' ');
+  return parts + (cfg.note ? ' <span class="hint">' + esc(cfg.note) + '</span>' : '') +
+    ' <button class="btn sm" data-act="verify-edit">修改</button>';
+}
+
+/* ================= 表单：放疗验证 ================= */
+/* 标记某一次验证已完成（幂等：重复标记不产生重复项） */
+function verifyMarkDone(pid, n) {
+  var p = getPatient(pid);
+  if (!p || !n) return;
+  var cfg = verifyCfgOf(p);
+  if (cfg.done.indexOf(String(n)) < 0) cfg.done.push(String(n));
+  p.verifyAt = { fractions: (p.verifyAt && p.verifyAt.fractions) || '', note: cfg.note, done: cfg.done };
+  save(); render();
+  toast('已标记第 ' + n + ' 次验证完成');
+}
+/* 撤销某次验证的完成标记 */
+function verifyUnmark(pid, n) {
+  var p = getPatient(pid);
+  if (!p) return;
+  var cfg = verifyCfgOf(p);
+  p.verifyAt = { fractions: (p.verifyAt && p.verifyAt.fractions) || '', note: cfg.note, done: cfg.done.filter(function (x) { return x !== String(n); }) };
+  save(); render(); toast('已撤销第 ' + n + ' 次验证标记');
+}
+/* 独立编辑验证：从待办或详情页进入，不必打开完整患者表单 */
+function sheetVerify(p) {
+  if (!p) { closeSheet(); return; }
+  var cfg = verifyCfgOf(p);
+  openSheet({
+    title: '放疗验证设置', okText: '保存',
+    body:
+      '<div class="hint" style="margin-bottom:10px;line-height:1.7">填「第几次治疗」时做验证，多个用逗号分隔（如 <b>10,20</b>）；<b>留空表示不验证</b>。<br>' +
+      '到点前会提前 ' + VERIFY_LEAD_FRACTIONS + ' 次进入待办提醒。</div>' +
+      field('第几次治疗时验证', textInput('verifyFractions', (p.verifyAt && p.verifyAt.fractions) || '', '如 10 或 10,20，留空=不验证')) +
+      field('验证内容（可选）', textInput('verifyNote', cfg.note, '如 复位+CBCT、中期评估')) +
+      (cfg.nums.length ? '<div class="field"><label>已完成标记</label><div class="seg">' +
+        cfg.nums.map(function (n) {
+          var dn = cfg.done.indexOf(String(n)) >= 0;
+          return '<button type="button" class="' + (dn ? 'on' : '') + '" data-act="verify-mark" data-n="' + n + '">' +
+            (dn ? '✓ ' : '') + '第 ' + n + ' 次</button>';
+        }).join('') + '</div><div class="hint" style="margin-top:4px">点按钮切换「已验证」状态</div></div>' : ''),
+    onSave: function (v) {
+      var vf = String(v.verifyFractions == null ? '' : v.verifyFractions);
+      if (vf.trim() && !parseVerifyNums(vf).length) { toast('请填正整数，如 10 或 10,20'); return false; }
+      var nums = parseVerifyNums(vf);
+      p.verifyAt = {
+        fractions: vf.trim(),
+        note: String(v.verifyNote || ''),
+        done: cfg.done.filter(function (x) { return nums.indexOf(parseInt(x, 10)) >= 0; })
+      };
+      save(); render(); toast(nums.length ? '已保存' : '已保存（不验证）');
     }
   });
 }
@@ -2716,6 +3054,8 @@ function sheetDayOverall(date) {
     var it = scheduleOn(p, date);
     if (it) arr.push({ p: p, it: it });
   });
+  /* 当日统计（含已归档患者的「结束」，口径与日历标注完全一致） */
+  var st = dayStat(date);
   var hol = holidays(), mk = makeups();
   var isHol = Object.prototype.hasOwnProperty.call(hol, date);
   var isMk = Object.prototype.hasOwnProperty.call(mk, date);
@@ -2725,11 +3065,35 @@ function sheetDayOverall(date) {
   else if (isMk) tag = '<span class="chip warn">调休上班 ' + esc(mk[date]) + '</span>';
   var isPast = date < todayStr();
   var isToday = date === todayStr();
+
+  /* 概览条：始终显示三类计数，让「0」也可见（用户明确要求标注在日期上） */
+  var ov = '<div class="day-ov">' +
+    '<span class="ov-i ov-start"><b>' + st.starting.length + '</b> 开始放疗</span>' +
+    '<span class="ov-i ov-treat"><b>' + st.treating.length + '</b> 治疗中</span>' +
+    '<span class="ov-i ov-end"><b>' + st.ending.length + '</b> 今日结束</span>' +
+    '</div>';
+
+  /* 「开始放疗」名单 */
+  function sec(title, cls, items, verb) {
+    if (!items.length) return '';
+    return '<div class="day-sec"><div class="day-sec-t ' + cls + '">' + title + '（' + items.length + ' 人）</div>' +
+      items.map(function (a) {
+        return '<div class="cal-day-list"><div class="row"><span class="nm"><b>' + esc(a.p.name) + '</b>' +
+          '<span class="sub2"> ' + esc(verb(a)) + '</span></span>' +
+          (a.p.status === '在治' ? '' : '<span class="chip sm">' + esc(a.p.status) + '</span>') +
+          '<button class="btn sm" data-act="open-patient" data-id="' + a.p.id + '">查看</button></div></div>';
+      }).join('') + '</div>';
+  }
+  var head = ov +
+    sec('开始放疗', 't-start', st.starting, function (a) { return '第 ' + a.it.fraction + ' 次起'; }) +
+    sec('今日结束', 't-end', st.ending, function (a) { return '共 ' + plannedCount(a.p) + ' 次 · 末次' + (a.it.done ? '已完成' : '待治疗'); });
+
   openSheet({
     title: date + ' ' + WEEKDAYS[parseD(date).getDay()],
-    body: '<div style="margin-bottom:8px">' + tag + '<span class="chip sm">共 ' + arr.length + ' 人</span>' +
+    body: '<div style="margin-bottom:8px">' + tag +
       (isToday ? '<span class="chip pri sm">今天</span>' : '') + '</div>' +
-      (arr.length ? arr.map(function (a) {
+      head +
+      (arr.length ? '<div class="day-sec-t t-all">全部治疗安排（' + arr.length + ' 人）</div>' + arr.map(function (a) {
         return '<div class="event"><div class="head"><span class="chip pri">第 ' + a.it.fraction + ' 次</span>' +
           (a.it.extra ? '<span class="chip warn sm">加照</span>' : '') +
           (a.it.done ? '<span class="chip ok sm">已完成</span>' : '<span class="chip sm">待治疗</span>') + '</div>' +
@@ -3476,7 +3840,9 @@ function bind() {
   var acts = {
     'open-patient': function (el) { var p = getPatient(el.dataset.id); closeSheet(); view.page = 'patient'; view.pid = el.dataset.id; if (p && p.startDate) { var d = parseD(p.startDate); if (d) { view.calY = d.getFullYear(); view.calM = d.getMonth() + 1; } } render(); },
     'add-patient': function () { sheetPatient(null); },
-    'ai-import': function () { sheetAiImport(); },
+    'verify-done': function (el) { verifyMarkDone(el.dataset.id, parseInt(el.dataset.n, 10)); },
+    'verify-edit': function (el) { sheetVerify(getPatient(el.dataset.id)); },
+    'verify-mark': function (el) { verifyMarkDone(view.pid, parseInt(el.dataset.n, 10)); },    'ai-import': function () { sheetAiImport(); },
     'ai-config': function () { sheetAiConfig(); },
     'ai-open-config': function () { sheetAiConfig(); },
     'ai-test': function () { testAiConnection(); },
