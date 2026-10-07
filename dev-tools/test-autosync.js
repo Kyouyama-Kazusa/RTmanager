@@ -516,7 +516,14 @@ async function drain(maxMs) {
     state.updatedAt = '2026-03-02T23:00:00.000Z';
     resetNet();
     (listeners['pagehide'] || []).forEach(f => f({}));
-    await drain();
+    /* pagehide 的兜底请求走的是「fire-and-forget」——它不设 autoSyncBusy，
+       所以 drain() 等不到它。必须显式轮询，直到请求出现（或超时）。
+       否则偶发地在加密还没算完时就断言，会变成随机失败。 */
+    let kaWait = 0;
+    while (kaWait < 8000 && netCalls.filter(x => x.keepalive === true).length === 0) {
+      await tick(20); kaWait += 20;
+    }
+    await tick(40);
     const ka = netCalls.filter(x => x.keepalive === true);
     ok(ka.length >= 1, '★ pagehide 兜底请求带 keepalive（页面销毁后仍能送达）', netCalls.length);
     ok(ka.length === 0 || ka[0].cache === 'no-store', '★ pagehide 请求同样禁用缓存');

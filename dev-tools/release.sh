@@ -5,7 +5,7 @@
 #   bash dev-tools/release.sh "这次改了什么"
 #
 # 流程：
-#   1. 回归测试（17 个套件，含兼容性门禁 test-compat.js）
+#   1. 回归测试（18 个套件，含兼容性门禁 test-compat.js）
 #   2. 跨日期扫描（排程相关套件在多个日期下重跑，避免「只在今天绿」）
 #   3. 自动递增 sw.js 缓存版本号（仅在应用资源确有改动时）
 #   4. 提交并推送到 GitHub
@@ -39,7 +39,7 @@ echo "改动文件："
 git status --short
 
 # ---------- 1. 回归测试 ----------
-say "[1/5] 回归测试（17 个套件）"
+say "[1/5] 回归测试（18 个套件）"
 ( cd "$TOOLS"
   # test-compat.js 单独列出，避免与后面的 test-*.js 重复跑
   for f in test-compat.js qa-audit.js $(ls test-*.js | grep -v '^test-compat.js$'); do
@@ -52,8 +52,7 @@ say "[1/5] 回归测试（17 个套件）"
 say "[2/5] 跨日期扫描（排程相关套件）"
 SCAN_DATES="2026-12-31 2027-01-01 2026-02-17 2027-06-15"
 ( cd "$TOOLS" && bad=0
-  for f in qa-audit.js test-rules.js test-buttons.js test-followup.js; do
-    for d in $SCAN_DATES; do
+  for f in qa-audit.js test-rules.js test-buttons.js test-followup.js; do    for d in $SCAN_DATES; do
       r=$(FAKE_TODAY="$d" node --require ./fakedate.js "$f" 2>/dev/null \
           | grep -oE '失败 [0-9]+' | grep -oE '[0-9]+' || echo 0)
       [ "${r:-0}" = "0" ] || { echo "  ✘ $f @ $d 失败 $r 项"; bad=1; }

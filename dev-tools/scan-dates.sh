@@ -19,7 +19,8 @@ if [ $# -gt 0 ]; then
   SUITES="$*"
 else
   SUITES="qa-audit.js test-rules.js test-buttons.js test-followup.js test-followup-base.js \
-test-boost-stop.js test-migration.js test-merge.js test-tpl-manage.js test-caltodo-verify.js"
+test-boost-stop.js test-migration.js test-merge.js test-tpl-manage.js test-caltodo-verify.js \
+test-settings-sync.js test-autosync.js"
 fi
 
 bad=0

@@ -256,7 +256,7 @@ button,input,select,textarea{font:inherit;color:inherit}
 var LS_KEY = 'radiotherapy.v1';
 var SNAP_PREFIX = 'radiotherapy.snap.';
 var SNAP_KEEP = 7;
-var APP_VERSION = '0.11.0';
+var APP_VERSION = '0.12.0';
 
 var SEXES = ['男', '女'];
 var PURPOSES = ['根治性', '术后辅助', '术前新辅助', '姑息性'];
@@ -358,6 +358,7 @@ function mdLabel(s) { return String(s || '').slice(5).replace('-', '/'); }
 var state = emptyState();
 var loadError = false;      /* 数据读取失败（不可解析）→ 禁止写入 */
 var rawSnapshot = null;     /* 读取失败时保留的原始文本，供抢救导出 */
+var settingsDirtyAt = '';   /* 设置层（节假日/调休/模板/治疗日）最近一次改动时间 */
 var migrateNotice = '';     /* 迁移提示文案 */
 
 var BACKUP_PREFIX = 'radiotherapy.backup.';
@@ -547,6 +548,14 @@ function save() {
   return saved;
 }
 
+/* 设置（节假日/调休/模板/默认治疗日）存在独立键里，不走 save()。
+   但它们同样决定排程结果，必须一并纳入自动同步的「有变更」判定，
+   否则改了调休却不上传，另一台设备会算出不同的结束日期。 */
+function saveSettings() {
+  settingsDirtyAt = new Date().toISOString();   /* 供 autoSyncDataChanged 比对 */
+  return true;
+}
+
 /* 抢救导出：把读不出来的原始文本原样存成文件，便于人工恢复 */
 function exportRawData() {
   var raw = rawSnapshot;
@@ -579,7 +588,7 @@ function treatDaysCfg() {
   var v = lsGet('radiotherapy.treatDays', null);
   return (v && v.length) ? v : DEFAULT_TREAT_DAYS.slice();
 }
-function setTreatDaysCfg(days) { lsSet('radiotherapy.treatDays', days); }
+function setTreatDaysCfg(days) { lsSet('radiotherapy.treatDays', days); saveSettings(); }
 
 /* 用户覆盖层：{date:'名称'} = 新增或覆盖；{date:null} = 删除内置项。
    与内置层分离，内置数据升级后用户的增删依然保留。 */
@@ -593,10 +602,10 @@ function holidayOverride() { var v = lsGet('radiotherapy.holidays', null); retur
 function makeupOverride() { var v = lsGet('radiotherapy.makeups', null); return (v && typeof v === 'object') ? v : {}; }
 function holidays() { return mergeLayer(BUILTIN_HOLIDAYS, holidayOverride()); }
 function makeups() { return mergeLayer(BUILTIN_MAKEUPS, makeupOverride()); }
-function setHoliday(date, name) { var o = holidayOverride(); o[date] = name; lsSet('radiotherapy.holidays', o); }
-function delHoliday(date) { var o = holidayOverride(); o[date] = null; lsSet('radiotherapy.holidays', o); }
-function setMakeup(date, name) { var o = makeupOverride(); o[date] = name; lsSet('radiotherapy.makeups', o); }
-function delMakeup(date) { var o = makeupOverride(); o[date] = null; lsSet('radiotherapy.makeups', o); }function isBuiltinHol(date) { return Object.prototype.hasOwnProperty.call(BUILTIN_HOLIDAYS, date); }
+function setHoliday(date, name) { var o = holidayOverride(); o[date] = name; lsSet('radiotherapy.holidays', o); saveSettings(); }
+function delHoliday(date) { var o = holidayOverride(); o[date] = null; lsSet('radiotherapy.holidays', o); saveSettings(); }
+function setMakeup(date, name) { var o = makeupOverride(); o[date] = name; lsSet('radiotherapy.makeups', o); saveSettings(); }
+function delMakeup(date) { var o = makeupOverride(); o[date] = null; lsSet('radiotherapy.makeups', o); saveSettings(); }function isBuiltinHol(date) { return Object.prototype.hasOwnProperty.call(BUILTIN_HOLIDAYS, date); }
 function isBuiltinMk(date) { return Object.prototype.hasOwnProperty.call(BUILTIN_MAKEUPS, date); }
 
 /* 已录入节假日数据的年份（内置年份 + 用户新增年份；删除个别日期不影响年份判断） */
@@ -620,7 +629,7 @@ function missingHolidayYears(from, to) {
 }
 
 function makeupAsWorkday() { var v = lsGet('radiotherapy.makeupWorkday', null); return v === null ? true : !!v; }
-function setMakeupAsWorkday(b) { lsSet('radiotherapy.makeupWorkday', b); }
+function setMakeupAsWorkday(b) { lsSet('radiotherapy.makeupWorkday', b); saveSettings(); }
 
 /* ================= AI 识别引擎 =================
    纯前端直连（无后端）：API Key 只存本机 localStorage，不上传任何服务器。
@@ -972,10 +981,133 @@ function saveTpl(name, items) {
   var o = tplOverride();
   o[name] = { items: clean };
   lsSet('radiotherapy.tpls', o);
+  saveSettings();
   return true;
 }
-function delTpl(name) { var o = tplOverride(); o[name] = null; lsSet('radiotherapy.tpls', o); }
-function resetTpls() { lsSet('radiotherapy.tpls', {}); }
+function delTpl(name) { var o = tplOverride(); o[name] = null; lsSet('radiotherapy.tpls', o); saveSettings(); }
+function resetTpls() { lsSet('radiotherapy.tpls', {}); saveSettings(); }
+
+/* ================= 设置层：跨设备同步用 =================
+   以下设置都存在**独立的 localStorage 键**里（不在 state 内）：
+     radiotherapy.holidays / .makeups / .makeupWorkday / .treatDays / .tpls
+   它们决定排程结果，若两台设备不一致，同一患者会算出不同的结束日期 ——
+   所以必须随云同步一起走。
+
+   合并策略（用户 2026-10-07 确认）：
+     - 取并集，不覆盖本机已有的（与本应用「合并导入不丢数据」的一贯口径一致）
+     - **删除也算变更**：这些覆盖层用 null 表示「删除内置项」，
+       null 必须被同等对待并参与合并，否则本机删掉的节日会在下次拉取时「复活」
+     - 标量（makeupWorkday / treatDays）：本机已设则保留本机，未设则取云端 */
+
+var SETTINGS_KEYS = {
+  holidays: 'radiotherapy.holidays',
+  makeups: 'radiotherapy.makeups',
+  tpls: 'radiotherapy.tpls',
+  makeupWorkday: 'radiotherapy.makeupWorkday',
+  treatDays: 'radiotherapy.treatDays'
+};
+
+/* 导出当前设置（供 syncPayload 使用）。
+   localStorage 里没有的键**不写入**，避免把「本机未设」当成「本机设为空」，
+   否则拉取时会误判成「本机显式置空」而覆盖云端。 */
+function exportSettings() {
+  var out = {};
+  Object.keys(SETTINGS_KEYS).forEach(function (name) {
+    var raw = lsGet(SETTINGS_KEYS[name], undefined);
+    if (raw === undefined) return;
+    out[name] = raw;
+  });
+  return out;
+}
+
+/* 合并两层覆盖（节假日 / 调休 / 模板）。
+
+   这里要同时满足两条**互相拉扯**的规则，不能简单地「谁优先」了事：
+
+   ① 不覆盖本机已有的内容 —— 本机把某天设成 A，云端设成 B，保留 A。
+      否则「从云端拉取」会把本机刚录的节日改掉。
+   ② 删除也要能同步 —— 覆盖层用 null 表示「删除」。云端删掉某天后，
+      本机必须跟着删，否则两台设备会各算各的排程（本功能存在的意义）。
+
+   两条合起来只有一种自洽解法：
+     具体值（非 null）只在云端有具体值时才新增；
+     任一方是 null（明确删除）就取 null —— 删除的优先级高于「不覆盖」。
+   因为你「本机设了 A」表达的只是「那天是假期 A」，而 null 表达的是
+   「那天不该是假期」这种**否定性事实**，两者冲突时否定必须先落地。
+
+   调用方向：installOverride(localOv, remoteOv, name) 由 importSettings 调用。 */
+function installOverride(localOv, remoteOv, isBuiltin) {
+  var out = {};
+  var lo = (localOv && typeof localOv === 'object') ? localOv : {};
+  var ro = (remoteOv && typeof remoteOv === 'object') ? remoteOv : {};
+  var keys = {};
+  Object.keys(ro).forEach(function (k) { keys[k] = 1; });
+  Object.keys(lo).forEach(function (k) { keys[k] = 1; });
+  Object.keys(keys).forEach(function (k) {
+    var hasL = Object.prototype.hasOwnProperty.call(lo, k);
+    var hasR = Object.prototype.hasOwnProperty.call(ro, k);
+    var lv = hasL ? lo[k] : undefined;
+    var rv = hasR ? ro[k] : undefined;
+    if (lv === null || rv === null) { out[k] = null; return; }      /* ② 删除优先 */
+    if (hasL) { out[k] = lv; return; }                              /* ① 本机已有 → 保留 */
+    out[k] = rv;                                                    /* 本机没有 → 取云端 */
+  });
+  return out;
+}
+/* 兼容保留：纯并集（本机优先），仅用于两侧都无删除标记的简单场景 */
+function mergeOverride(localOv, remoteOv) {
+  return installOverride(localOv, remoteOv);
+}
+
+/* 把云端设置并入本机，返回变更摘要 {changed, details:[...]}。
+   只写真正有变化的键，避免无谓的写盘与快照。 */
+function importSettings(remote, apply) {
+  var details = [], changed = 0;
+  if (!remote || typeof remote !== 'object') return { changed: 0, details: [] };
+
+  ['holidays', 'makeups', 'tpls'].forEach(function (name) {
+    if (!(name in remote)) return;
+    var localOv = lsGet(SETTINGS_KEYS[name], null);
+    var merged = mergeOverride(localOv, remote[name]);
+    if (JSON.stringify(merged) !== JSON.stringify(localOv || {})) {
+      changed++;
+      details.push(name);
+      if (apply) { lsSet(SETTINGS_KEYS[name], merged); saveSettings(); }
+    }
+  });
+
+  /* 标量：本机已有明确取值就不动；本机没有才采纳云端 */
+  ['makeupWorkday', 'treatDays'].forEach(function (name) {
+    if (!(name in remote)) return;
+    var cur = lsGet(SETTINGS_KEYS[name], null);
+    var hasLocal = (cur !== null && cur !== undefined);
+    if (!hasLocal) {
+      changed++;
+      details.push(name);
+      if (apply) { lsSet(SETTINGS_KEYS[name], remote[name]); saveSettings(); }
+    }
+  });
+
+  return { changed: changed, details: details };
+}
+
+/* 统计本机自定义设置条数（用于同步界面展示「云端还带了哪些设置」） */
+function settingsSummary(s) {
+  if (!s || typeof s !== 'object') return '';
+  var parts = [];
+  function cnt(name) {
+    var v = s[name];
+    if (!v || typeof v !== 'object') return 0;
+    return Object.keys(v).length;
+  }
+  var nh = cnt('holidays'), nm = cnt('makeups'), nt = cnt('tpls');
+  if (nh) parts.push('节假日覆盖 ' + nh + ' 条');
+  if (nm) parts.push('调休覆盖 ' + nm + ' 条');
+  if (nt) parts.push('随访模板覆盖 ' + nt + ' 条');
+  if ('makeupWorkday' in s) parts.push('调休当工作日=' + (s.makeupWorkday ? '是' : '否'));
+  if ('treatDays' in s) parts.push('默认治疗日 ' + (s.treatDays || []).length + ' 天');
+  return parts.join('、');
+}
 function tplItemsText(items) {
   return (items || []).map(function (x) { return intervalText(x.n, x.u); }).join(' / ');
 }
@@ -3240,8 +3372,15 @@ function exportCsv() {
   toast('已导出 CSV');
 }
 function exportJson() {
-  downloadBlob(new Blob([JSON.stringify(state, null, 2)], { type: 'application/json' }), '放疗患者备份_' + todayStr() + '.json');
-  toast('已导出 JSON 备份');
+  /* 备份文件同时带上设置层（节假日/调休/模板/默认治疗日）——
+     否则「导出→导入」换设备后，同一患者会因假期不同算出不同的结束日期。
+     结构：{ ...患者数据, settings: {...} }，把 settings 作为 state 的兄弟字段；
+     老版本应用读这个文件时会忽略多出来的 settings，不影响兼容。 */
+  var out = {};
+  Object.keys(state).forEach(function (k) { out[k] = state[k]; });
+  out.settings = exportSettings();
+  downloadBlob(new Blob([JSON.stringify(out, null, 2)], { type: 'application/json' }), '放疗患者备份_' + todayStr() + '.json');
+  toast('已导出 JSON 备份（含设置）');
 }
 /* ================= 导入：合并 / 覆盖 ================= */
 var pendingImport = null;
@@ -3252,6 +3391,9 @@ function importJson(file) {
     var d;
     try { d = JSON.parse(reader.result); } catch (e) { alert('导入失败：文件内容不是有效的 JSON'); return; }
     if (!d || !Array.isArray(d.patients)) { alert('导入失败：这不是本应用的备份文件'); return; }
+    /* 设置层：老备份文件没有 settings 字段，此时静默跳过（不报错、不清空） */
+    var sm = importSettings(d.settings, true);
+    if (sm.changed) { save(); settingsDirtyAt = ''; toast('已并入备份里的设置（' + sm.details.length + ' 项）'); }
     askImportMode(normalize(d));
   };
   reader.onerror = function () { alert('读取文件失败，请重试'); };
@@ -3978,6 +4120,7 @@ function bind() {
     'hol-reset': function () {
       if (!confirm('恢复内置假期数据？\n\n将清除你对「法定节假日」的全部自定义增删；调休上班日不受影响。')) return;
       lsSet('radiotherapy.holidays', {});    /* 只清节假日，不动调休（BUG-08） */
+      saveSettings();
       render(); toast('已恢复内置假期数据');
       if (reopenSheet) reopenSheet();
     },
@@ -4022,10 +4165,11 @@ function bind() {
     'mk-reset': function () {
       if (!confirm('恢复内置调休上班日？\n\n将清除你对「调休上班日」的全部自定义增删；法定节假日不受影响。')) return;
       lsSet('radiotherapy.makeups', {});
+      saveSettings();
       render(); toast('已恢复内置调休上班日');
       if (reopenSheet) reopenSheet();
     },
-    'toggle-makeup': function () { setMakeupAsWorkday(!makeupAsWorkday()); render(); toast(makeupAsWorkday() ? '调休上班日已按工作日治疗' : '调休上班日不再治疗'); },
+    'toggle-makeup': function () { setMakeupAsWorkday(!makeupAsWorkday()); saveSettings(); render(); toast(makeupAsWorkday() ? '调休上班日已按工作日治疗' : '调休上班日不再治疗'); },
     'selftest': function () { runSelfTest(); },
     'export-raw': function () { exportRawData(); },
     'sheet-close': function () { closeSheet(); },
@@ -4185,7 +4329,10 @@ function syncPayload() {
     schema: SCHEMA_VERSION,
     savedAt: new Date().toISOString(),
     device: syncDeviceLabel(),
-    state: state
+    state: state,
+    /* 设置层（节假日/调休/模板/默认治疗日）随数据一起走。
+       它们决定排程结果，两台设备不一致会算出不同的结束日期。 */
+    settings: exportSettings()
   };
 }
 function syncSetStatus(html) {
@@ -4266,9 +4413,19 @@ function autoSyncDue() {
   if (isNaN(t)) return true;                       /* 时间戳损坏 → 视为到期 */
   return (Date.now() - t) >= autoSyncMin() * 60000;
 }
-/* 数据自上次自动同步以来是否变过（用 state.updatedAt 比对） */
+/* 设置层指纹：改了节假日/调休/模板/治疗日也算「有变更」。
+   与患者数据不同，设置不在 state.updatedAt 里，必须单独比。 */
+function settingsSig() {
+  try { return JSON.stringify(exportSettings()); } catch (e) { return ''; }
+}
+/* 本次运行期间设置是否被动过（用于「刚打开就自动传」时也能识别本机改动） */
+function settingsDirty() { return !!settingsDirtyAt; }
+/* 数据自上次自动同步以来是否变过（患者数据比 updatedAt，设置比指纹） */
 function autoSyncDataChanged() {
-  return String(state.updatedAt || '') !== String(syncCfg().lastAutoSyncState || '');
+  var s = syncCfg();
+  if (String(state.updatedAt || '') !== String(s.lastAutoSyncState || '')) return true;
+  if (settingsDirty() && settingsSig() !== String(s.lastAutoSyncSettings || '')) return true;
+  return false;
 }
 /* 三条件与门：开关可用 + 已到期 + 数据变过 */
 function autoSyncShouldRun() {
@@ -4316,6 +4473,7 @@ function autoSyncSilentPush(reason) {
     o.lastSyncAt = o.lastAutoSyncAt;
     o.lastRemoteSavedAt = o.lastAutoSyncAt;
     o.lastAutoSyncState = String(state.updatedAt || '');   /* 记下"已同步到哪个版本" */
+    o.lastAutoSyncSettings = settingsSig();                /* 记下设置层指纹 */
     o.lastAutoSyncErr = '';
     o.lastAutoSyncReason = reason || '';
     setSyncCfg(o);
@@ -4378,9 +4536,15 @@ function syncPush() {
       var o = syncCfg();
       o.lastSyncAt = new Date().toISOString();
       o.lastRemoteSavedAt = o.lastSyncAt;
+      /* 手动上传也把「已同步到哪个版本」推进，避免刚传完又被自动同步再传一次 */
+      o.lastAutoSyncState = String(state.updatedAt || '');
+      o.lastAutoSyncSettings = settingsSig();
+      o.lastAutoSyncErr = '';
       setSyncCfg(o);
+      settingsDirtyAt = '';
       render();
-      toast('已上传到云端 · ' + state.patients.length + ' 位患者');
+      toast('已上传到云端 · ' + state.patients.length + ' 位患者' +
+        (settingsSummary(exportSettings()) ? '（含设置：' + settingsSummary(exportSettings()) + '）' : ''));
       if (reopenSheet) reopenSheet();
     }).catch(function (e) {
       if (e && e.cancelled) { syncSetStatus('已取消上传'); return; }
@@ -4470,12 +4634,23 @@ function syncPull() {
       o.lastSyncAt = new Date().toISOString();
       o.lastRemoteSavedAt = payload.savedAt || '';
       o.lastRemoteDevice = payload.device || '';
-      setSyncCfg(o);
-      syncSetStatus('已解密云端数据');
+      setSyncCfg(o);      syncSetStatus('已解密云端数据');
+      /* 设置层（节假日/调休/模板/默认治疗日）先合并落地 ——
+         用户点「导入」之后是 normalize/合并患者，设置此时已可安全并入：
+         取并集、本机优先、删除（null）同样参与合并，不会把本机删掉的节日「复活」。 */
+      var sm = importSettings(payload.settings, true);
+      if (sm.changed) save();
+      /* 设置已并入本机，指纹随之更新，避免下次自动同步又传一遍 */
+      var o2 = syncCfg();
+      o2.lastAutoSyncSettings = settingsSig();
+      setSyncCfg(o2);
+      settingsDirtyAt = '';
       askImportMode(normalize(payload.state), {
         label: '云端数据',
         desc: '由「' + (payload.device || '未知设备') + '」于 ' +
-          fmtDT(String(payload.savedAt || '').slice(0, 16)) + ' 上传（应用 v' + (payload.appVersion || '?') + '）'
+          fmtDT(String(payload.savedAt || '').slice(0, 16)) + ' 上传（应用 v' + (payload.appVersion || '?') + '）' +
+          (settingsSummary(payload.settings) ? '；含设置：' + settingsSummary(payload.settings) : '') +
+          (sm.changed ? '；已并入本机设置（' + sm.details.length + ' 项）' : '；设置无变化')
       });
     }).catch(function (e) {
       var msg = (e && e.message) ? e.message : String(e);
@@ -4554,7 +4729,10 @@ function sheetSync() {
       '<div class="hint" style="margin-top:12px;line-height:1.85;border-top:1px dashed var(--line);padding-top:10px">' +
       '· 云端存的是<b>加密后的乱码</b>，没有密码读不出任何患者信息<br>' +
       '· 换设备只需「同一个 Token + 同一个密码」，或粘贴云端地址<br>' +
-      '· 拉取默认<b>合并</b>：两边各自的记录都会保留，不丢数据</div>',
+      '· 拉取默认<b>合并</b>：两边各自的记录都会保留，不丢数据<br>' +
+      '· 除了患者数据，<b>节假日 / 调休 / 默认治疗日 / 随访模板</b>这些设置也会一并同步' +
+      '（取并集合并：本机已有的不会被云端覆盖；但<b>删掉的节日会跟着删掉</b>，' +
+      '否则两台设备算出的结束日期会不一致）</div>',
     actions: actions
   });
 }
@@ -4595,6 +4773,7 @@ function sheetAutoSync() {
     body: statusHtml +
       '<div class="hint" style="margin-top:12px;line-height:1.85;border-top:1px dashed var(--line);padding-top:10px">' +
       '· <b>只上传、不拉取</b>：自动同步只把本机数据备份到云端；换设备或要合并，请手动「从云端拉取」<br>' +
+      '· 上传内容含患者数据与<b>节假日/调休等设置</b>，换设备后排程结果与这边一致<br>' +
       '· <b>要静默加密必须先在本机保存密码</b>（云同步设置里勾选「在本机记住密码」）<br>' +
       '· 本机没有任何患者数据时<b>不会上传</b>，避免把空数据覆盖到云端<br>' +
       '· 云端若已被另一台设备更新，会自动跳过并提示，<b>不覆盖</b><br>' +
