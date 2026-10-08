@@ -70,6 +70,24 @@ function fire(act, data) {
   const el = makeEl(); el.dataset.act = act; Object.assign(el.dataset, data || {});
   clickHandler({ target: el });
 }
+/* 真·点击模拟：从**已渲染的 HTML**里取出那个按钮，只用它自己带的 data-*
+   派发点击 —— 与浏览器里 findAct 冒泡拿 dataset 的路径完全一致。
+   用它才能验证「按钮是否真的把参数渲染进了 HTML」，
+   而 fire() 是直接构造 dataset，会掩盖掉「按钮漏渲染 data-id」这类错误。 */
+function fireFromHtml(html, act, nth) {
+  const re = new RegExp('<button[^>]*data-act="' + act + '"[^>]*>', 'g');
+  const all = String(html).match(re) || [];
+  const tag = all[nth || 0];
+  if (!tag) { ok(false, 'fireFromHtml: 渲染结果里找不到 data-act="' + act + '"', String(html).slice(0, 160)); return false; }
+  const el = makeEl();
+  const attrs = tag.match(/data-([a-z-]+)="([^"]*)"/g) || [];
+  attrs.forEach(function (a) {
+    const m = a.match(/data-([a-z-]+)="([^"]*)"/);
+    if (m) el.dataset[m[1].replace(/-(\w)/g, function (_, c) { return c.toUpperCase(); })] = m[2];
+  });
+  clickHandler({ target: el });
+  return true;
+}
 const today = todayStr();
 /* 今天（10-07）可能落在法定假期里，那样根本排不出治疗日，日历统计与待办都无法验证。
    显式把今天设为调休上班日，让测试与日期无关（沿用 test-rules 的做法）。 */
@@ -419,6 +437,131 @@ function inTreatCount() { return inTreat().length; }
     view.pid = pn.id; render();
     ok(getEl('view').innerHTML.indexOf('不验证') >= 0, '★ 未配置验证时显示「不验证」', true);
     view.page = 'tab';
+  }
+
+  /* ================================================================
+     L. ★ 验证按钮「点击真的能用」—— 回归测试
+     背景（用户报告的真实缺陷）：
+       详情页的「设置 / 修改」按钮点击后毫无反应；待办里的「第 N 次」切换也不生效。
+     根因：
+       ① verifySummaryHtml 渲染的按钮**没有 data-id**，
+          handler 里 getPatient(el.dataset.id) → getPatient(undefined) → null → closeSheet()，
+          表现为「点一下弹层直接关掉、什么都没发生」。
+       ② verify-mark 用的是 view.pid，从待办/设置页进入时为 null，标记无效。
+     本组只断言「点击 → 界面/数据真的变化」，避免只测渲染不测交互（正是漏掉此缺陷的原因）。
+     ================================================================ */
+  group('L. ★ 验证按钮点击有效（详情页 / 待办两个入口）');
+  {
+    /* --- L1. 详情页「设置」按钮（未配置验证时）--- */
+    const p1 = mk({ name: '按钮甲', startDate: today, fractions: '30' });
+    view.page = 'patient'; view.pid = p1.id;
+    render();
+    ok(getEl('view').innerHTML.indexOf('不验证') >= 0, '前置：详情页显示「不验证」', true);
+    /* 详情页按钮也必须自带 data-id：handler 的 `|| view.pid` 只是兜底，
+       真正的契约是「按钮自带参数」——否则换到待办语境（view.pid 为空）就会失灵。 */
+    const setBtn = getEl('view').innerHTML.match(/data-act="verify-edit"[^>]*/);
+    ok(!!setBtn && setBtn[0].indexOf('data-id="' + p1.id + '"') >= 0,
+      '★ 详情页「设置」按钮必须自带 data-id（不能只靠 view.pid 兜底）', setBtn && setBtn[0]);
+    /* 把 view.pid 清空后再点：模拟「按钮被抓到自己语境之外」的最严苛情况，
+       只有按钮自带的 data-id 能救 —— 这正是用户遇到的失灵场景。 */
+    view.pid = null;
+    fireFromHtml(getEl('view').innerHTML, 'verify-edit');
+    ok(getEl('sheetBody').innerHTML.indexOf('第几次治疗时验证') >= 0,
+      '★ 点「设置」要打开验证表单（曾无反应 → 弹层直接关掉）',
+      String(getEl('sheetBody').innerHTML).slice(0, 120));
+    ok(getEl('sheetTitle').textContent === '放疗验证设置', '弹层标题正确', getEl('sheetTitle').textContent);
+    /* 表单能保存 */
+    let r = sheetCtx.onSave({ verifyFractions: '10,20', verifyNote: '复位+CBCT' });
+    ok(r !== false, '表单保存不报错（未填非法值时返回非 false）', r);
+    ok(String(p1.verifyAt.fractions) === '10,20', '★ 保存后数据真的写入患者', p1.verifyAt.fractions);
+    ok(p1.verifyAt.note === '复位+CBCT', '备注也写入', p1.verifyAt.note);
+
+    /* --- L2. 详情页「修改」按钮（已配置验证时）--- */
+    view.page = 'patient'; view.pid = p1.id;
+    render();
+    ok(getEl('view').innerHTML.indexOf('修改') >= 0, '前置：已配置时显示「修改」按钮', true);
+    const modBtn = getEl('view').innerHTML.match(/data-act="verify-edit"[^>]*/);
+    ok(!!modBtn && modBtn[0].indexOf('data-id="' + p1.id + '"') >= 0,
+      '★ 详情页「修改」按钮必须自带 data-id', modBtn && modBtn[0]);
+    view.pid = null;
+    fireFromHtml(getEl('view').innerHTML, 'verify-edit');
+    ok(getEl('sheetBody').innerHTML.indexOf('第几次治疗时验证') >= 0,
+      '★ 点「修改」要打开验证表单并能带出原值',
+      String(getEl('sheetBody').innerHTML).slice(0, 120));
+    ok(String(sheetCtx.body).indexOf('10,20') >= 0, '★ 表单带回原有次数（value 未丢失）',
+      String(sheetCtx.body).indexOf('10,20'));
+
+    /* --- L3. 表单内「第 N 次」完成标记按钮 --- */
+    /* 先确保有两项验证、且排程足够（今天开始 30 次，第 10/20 次在排程内） */
+    ok(sheetCtx.body.indexOf('data-act="verify-mark"') >= 0, '★ 表单内渲染出「第 N 次」标记按钮', true);
+    const markTag = sheetCtx.body.match(/data-act="verify-mark"[^>]*/);
+    ok(!!markTag && markTag[0].indexOf('data-id="' + p1.id + '"') >= 0 && markTag[0].indexOf('data-n="10"') >= 0,
+      '★ 弹层「第 N 次」按钮必须自带 data-id 与 data-n', markTag && markTag[0]);
+    view.pid = null;
+    fireFromHtml(sheetCtx.body, 'verify-mark');
+    ok(String(p1.verifyAt.done.join()) === '10',
+      '★ 点「第 10 次」要写入完成标记（曾因用 view.pid 而失效）', p1.verifyAt.done);
+    /* 再点一次 = 切换为未完成（幂等/可撤销） */
+    fireFromHtml(sheetCtx.body, 'verify-mark');
+    ok(String(p1.verifyAt.done.join()) === '',
+      '★ 再点一次撤销标记（按钮是切换语义）', p1.verifyAt.done);
+
+    /* --- L4. 待办入口：view.pid 为空时也必须能标记 --- */
+    /* 造一个「该验证了」的患者：把开始日往前推足够多**日历日**，
+       使其已完成**治疗次数**达到触发点（注意周末/假期不排治疗，日历日 ≠ 治疗次数）。 */
+    const trig = Math.max(1, 10 - VERIFY_LEAD_FRACTIONS);
+    state = normalize({ version: 2, updatedAt: '', patients: [] });
+    let offset = trig * 2 + 10;                 /* 宽松留量：治疗日约占日历日的 5/7 */
+    let pT = mk({
+      name: '按钮乙', startDate: addDays(today, -offset), fractions: '30',
+      verifyAt: { fractions: '10' }
+    });
+    while (doneCount(pT) < trig && offset < 200) {   /* 保证确实进入提醒窗口 */
+      offset += 5;
+      pT = mk({ name: '按钮乙', startDate: addDays(today, -offset), fractions: '30', verifyAt: { fractions: '10' } });
+    }
+    ok(doneCount(pT) >= trig, '前置：已完成 ' + doneCount(pT) + ' 次（触发点 ' + trig + '）', doneCount(pT));
+    ok(verifyPending(pT) !== null, '前置：该患者进入验证提醒窗口', verifyPending(pT));
+    /* 关键：模拟从待办/其他页点进来 —— view.pid 为 null */
+    view.page = 'tab'; view.tab = 'todo'; view.pid = null;
+    render();
+    const todoHtml = getEl('view').innerHTML;
+    ok(todoHtml.indexOf('verify-done') >= 0, '★ 待办里渲染出「标记已验证」按钮', true);
+    /* 待办里的两个按钮都必须带 data-id（否则 handler 拿不到患者） */
+    const doneBtn = todoHtml.match(/data-act="verify-done"[^>]*/);
+    ok(!!doneBtn && doneBtn[0].indexOf('data-id="' + pT.id + '"') >= 0,
+      '★ 待办「标记已验证」按钮必须带 data-id', doneBtn && doneBtn[0]);
+    const editBtn = todoHtml.match(/data-act="verify-edit"[^>]*/);
+    ok(!!editBtn && editBtn[0].indexOf('data-id="' + pT.id + '"') >= 0,
+      '★ 待办「修改」按钮必须带 data-id（曾缺失 → 点击无反应）', editBtn && editBtn[0]);
+
+    /* 点击待办里的「标记已验证」：即使 view.pid 为 null 也要成功 */
+    fireFromHtml(todoHtml, 'verify-done');
+    ok(String(pT.verifyAt.done.join()) === '10',
+      '★ view.pid 为 null 时，点待办「标记已验证」仍生效（不依赖 view.pid）', pT.verifyAt.done);
+
+    /* 点击待办里的「修改」：即使 view.pid 为 null 也要打开表单 */
+    view.pid = null;
+    fireFromHtml(todoHtml, 'verify-edit');
+    ok(String(getEl('sheetBody').innerHTML).indexOf('第几次治疗时验证') >= 0,
+      '★ view.pid 为 null 时，点待办「修改」仍能打开表单',
+      String(getEl('sheetBody').innerHTML).slice(0, 120));
+
+    /* --- L5. 没有 data-id 时不得误开表单（防御性：拿不到患者就不打开）---
+       注意：closeSheet 不清空 sheetBody（只延时清 sheetCtx），
+       所以不能靠 body 残留判断，要对比「打开前 → 点击后」是否发生变化、且标题不是验证表单。 */
+    closeSheet();
+    getEl('sheetTitle').textContent = '';
+    const bodyBefore = getEl('sheetBody').innerHTML;
+    fire('verify-edit', {});
+    ok(getEl('sheetTitle').textContent !== '放疗验证设置',
+      '★ 缺 data-id 时不误开验证表单（拿不到患者就不打开）', getEl('sheetTitle').textContent);
+    ok(getEl('sheetBody').innerHTML === bodyBefore,
+      '★ 缺 data-id 时界面保持不变（不会闪一下又关掉）', true);
+
+    /* 复位视图，避免影响后续组 */
+    closeSheet();
+    view.page = 'tab'; view.tab = 'ward'; view.pid = null;
   }
 
   /* ================================================================ */

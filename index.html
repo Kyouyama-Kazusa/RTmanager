@@ -256,7 +256,7 @@ button,input,select,textarea{font:inherit;color:inherit}
 var LS_KEY = 'radiotherapy.v1';
 var SNAP_PREFIX = 'radiotherapy.snap.';
 var SNAP_KEEP = 7;
-var APP_VERSION = '0.12.0';
+var APP_VERSION = '0.12.1';
 
 var SEXES = ['男', '女'];
 var PURPOSES = ['根治性', '术后辅助', '术前新辅助', '姑息性'];
@@ -2547,10 +2547,13 @@ function sheetPatient(p) {
   });
 }
 
-/* 详情页「放疗验证」摘要：无则显示「不验证」，有则逐个列出次数 + 完成状态 */
+/* 详情页「放疗验证」摘要：无则显示「不验证」，有则逐个列出次数 + 完成状态。
+   按钮必须带 data-id —— 这里渲染在详情页，但同一套 handler 也被待办/弹层复用，
+   不带 id 时 getPatient(undefined) 会拿到 null 而静默不动作（曾出现的缺陷）。 */
 function verifySummaryHtml(p) {
   var cfg = verifyCfgOf(p);
-  if (!cfg.nums.length) return '不验证 <button class="btn sm" data-act="verify-edit">设置</button>';
+  var pidAttr = ' data-id="' + esc(p.id) + '"';
+  if (!cfg.nums.length) return '不验证 <button class="btn sm" data-act="verify-edit"' + pidAttr + '>设置</button>';
   var schedN = computeSchedule(p).length;
   var dn = doneCount(p);
   var parts = cfg.nums.map(function (n) {
@@ -2561,7 +2564,7 @@ function verifySummaryHtml(p) {
     return '<span class="chip ' + cls + ' sm">' + txt + '</span>';
   }).join(' ');
   return parts + (cfg.note ? ' <span class="hint">' + esc(cfg.note) + '</span>' : '') +
-    ' <button class="btn sm" data-act="verify-edit">修改</button>';
+    ' <button class="btn sm" data-act="verify-edit"' + pidAttr + '>修改</button>';
 }
 
 /* ================= 表单：放疗验证 ================= */
@@ -2574,6 +2577,13 @@ function verifyMarkDone(pid, n) {
   p.verifyAt = { fractions: (p.verifyAt && p.verifyAt.fractions) || '', note: cfg.note, done: cfg.done };
   save(); render();
   toast('已标记第 ' + n + ' 次验证完成');
+}
+/* 切换某次验证的完成状态（界面说明是"点按钮切换"，因此必须可撤销） */
+function verifyToggleDone(pid, n) {
+  var p = getPatient(pid);
+  if (!p || !n) return;
+  if (verifyCfgOf(p).done.indexOf(String(n)) >= 0) return verifyUnmark(pid, n);
+  return verifyMarkDone(pid, n);
 }
 /* 撤销某次验证的完成标记 */
 function verifyUnmark(pid, n) {
@@ -2597,7 +2607,8 @@ function sheetVerify(p) {
       (cfg.nums.length ? '<div class="field"><label>已完成标记</label><div class="seg">' +
         cfg.nums.map(function (n) {
           var dn = cfg.done.indexOf(String(n)) >= 0;
-          return '<button type="button" class="' + (dn ? 'on' : '') + '" data-act="verify-mark" data-n="' + n + '">' +
+          /* 带 data-id：弹层可能在 view.pid 与患者不一致的语境下打开 */
+          return '<button type="button" class="' + (dn ? 'on' : '') + '" data-act="verify-mark" data-id="' + esc(p.id) + '" data-n="' + n + '">' +
             (dn ? '✓ ' : '') + '第 ' + n + ' 次</button>';
         }).join('') + '</div><div class="hint" style="margin-top:4px">点按钮切换「已验证」状态</div></div>' : ''),
     onSave: function (v) {
@@ -3982,9 +3993,15 @@ function bind() {
   var acts = {
     'open-patient': function (el) { var p = getPatient(el.dataset.id); closeSheet(); view.page = 'patient'; view.pid = el.dataset.id; if (p && p.startDate) { var d = parseD(p.startDate); if (d) { view.calY = d.getFullYear(); view.calM = d.getMonth() + 1; } } render(); },
     'add-patient': function () { sheetPatient(null); },
-    'verify-done': function (el) { verifyMarkDone(el.dataset.id, parseInt(el.dataset.n, 10)); },
-    'verify-edit': function (el) { sheetVerify(getPatient(el.dataset.id)); },
-    'verify-mark': function (el) { verifyMarkDone(view.pid, parseInt(el.dataset.n, 10)); },    'ai-import': function () { sheetAiImport(); },
+    /* 验证相关动作：
+       - 「已完成」用切换语义（verifyToggleDone），与界面文案「点按钮切换」一致；
+       - 患者 id 优先取按钮自带 data-id，缺失时回退 view.pid。
+         按钮必须自带 data-id：弹层里打开时 view.pid 未必指向该患者，
+         用 view.pid 会导致「点了没反应」（曾出现的缺陷）。 */
+    'verify-done': function (el) { verifyToggleDone(el.dataset.id || view.pid, parseInt(el.dataset.n, 10)); },
+    'verify-edit': function (el) { sheetVerify(getPatient(el.dataset.id || view.pid)); },
+    'verify-mark': function (el) { verifyToggleDone(el.dataset.id || view.pid, parseInt(el.dataset.n, 10)); },
+    'ai-import': function () { sheetAiImport(); },
     'ai-config': function () { sheetAiConfig(); },
     'ai-open-config': function () { sheetAiConfig(); },
     'ai-test': function () { testAiConnection(); },
@@ -4177,7 +4194,10 @@ function bind() {
     'clear-all': function () { clearAll(); }
   };
 
-  /* 视图 + 弹层统一委托 */
+  /* 视图 + 弹层统一委托。
+     注意：findAct 会向上冒泡找最近带 data-act 的元素，因此内层按钮必须
+     自己带齐所需参数（如 data-id），不要依赖「当前视图的 pid」——
+     弹层/待办可能在不同语境下打开，view.pid 未必指向正确的患者。 */
   document.addEventListener('click', function (e) {
     var hit = findAct(e.target, acts);
     if (hit) hit.fn(hit.el);
