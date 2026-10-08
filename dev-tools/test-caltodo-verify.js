@@ -44,7 +44,9 @@ global.document = {
   documentElement: makeEl(), visibilityState: 'visible'
 };
 global.window = global;
-global.addEventListener = function () { };
+/* 捕获 pageshow / visibilitychange 等生命周期钩子，便于在测试里手动触发 */
+const winHandlers = {};
+global.addEventListener = function (ev, fn) { (winHandlers[ev] = winHandlers[ev] || []).push(fn); };
 global.location = { search: '', protocol: 'https:' };
 global.requestAnimationFrame = (cb) => { if (cb) cb(); };
 global.alert = () => { };
@@ -73,7 +75,14 @@ function fire(act, data) {
 /* 真·点击模拟：从**已渲染的 HTML**里取出那个按钮，只用它自己带的 data-*
    派发点击 —— 与浏览器里 findAct 冒泡拿 dataset 的路径完全一致。
    用它才能验证「按钮是否真的把参数渲染进了 HTML」，
-   而 fire() 是直接构造 dataset，会掩盖掉「按钮漏渲染 data-id」这类错误。 */
+   而 fire() 是直接构造 dataset，会掩盖掉「按钮漏渲染 data-id」这类错误。
+
+   ⚠ 还要模拟真实的**冒泡语义**：本应用所有按钮走挂在 document 上的委托，
+   若按钮带 onclick="event.stopPropagation()"，事件就到不了 document，
+   委托永远不会被调用 —— 真机上表现为「点了没反应」。
+   以前的实现把事件直接投给 clickHandler、且完全无视内联 onclick，
+   于是这类缺陷**测试全绿、真机必挂**（v0.13.2 的待办验证按钮即此因，第二次踩同一坑）。
+   现在：解析到 stopPropagation 就**不投递**，让它如实变红。 */
 function fireFromHtml(html, act, nth) {
   const re = new RegExp('<button[^>]*data-act="' + act + '"[^>]*>', 'g');
   const all = String(html).match(re) || [];
@@ -85,6 +94,11 @@ function fireFromHtml(html, act, nth) {
     const m = a.match(/data-([a-z-]+)="([^"]*)"/);
     if (m) el.dataset[m[1].replace(/-(\w)/g, function (_, c) { return c.toUpperCase(); })] = m[2];
   });
+  /* 冒泡语义：阻止冒泡 → 委托收不到 → 如实不触发（并报错，便于定位） */
+  if (/onclick\s*=\s*["'][^"']*stopPropagation/.test(tag)) {
+    ok(false, '★ 按钮带 stopPropagation，事件到不了委托，点击必然无效：' + act, tag.slice(0, 120));
+    return false;
+  }
   clickHandler({ target: el });
   return true;
 }
@@ -587,7 +601,49 @@ function inTreatCount() { return inTreat().length; }
     /* 未知字段保全（不丢未来版本数据） */
     state = normalize({ version: 2, updatedAt: '', patients: [{ id: 'x', name: '未来', status: '在治', futureField: 'keep-me', verifyAt: { fractions: '5', extra: 'keep' } }] });
     ok(state.patients[0].futureField === 'keep-me', '★ 未知字段不被丢弃');
-    ok(state.patients[0].verifyAt.extra === 'keep', '★ verifyAt 内的未知字段也保留');
+     ok(state.patients[0].verifyAt.extra === 'keep', '★ verifyAt 内的未知字段也保留');
+  }
+
+  /* ================================================================ */
+  group('G-chrome. 标签栏/顶部按钮显隐 + 页面恢复（v0.13.2）');
+
+  {
+    const tb = getEl('tabbar'), bk = getEl('btnBack'), dt = getEl('btnData');
+
+    /* G1. syncChrome 依据 view.page 决定 chrome —— 三态各验一次 */
+    view.page = 'tab'; syncChrome();
+    ok(tb.hidden === false, '★ tab 页：标签栏可见', tb.hidden);
+    ok(bk.hidden === true && dt.hidden === false, 'tab 页：返回隐藏 / 数据可见', [bk.hidden, dt.hidden]);
+
+    view.page = 'patient'; syncChrome();
+    ok(tb.hidden === true, '★ 患者详情页：标签栏隐藏', tb.hidden);
+    ok(bk.hidden === false && dt.hidden === true, '详情页：返回可见 / 数据隐藏', [bk.hidden, dt.hidden]);
+
+    view.page = 'settings'; syncChrome();
+    ok(tb.hidden === true, '★ 设置页：标签栏隐藏', tb.hidden);
+
+    /* G2. render() 必须调用 syncChrome（否则某分支又会漏恢复） */
+    view.page = 'patient'; view.pid = (state.patients[0] || {}).id || null;
+    render();
+    ok(tb.hidden === true, 'render() 进入详情页后标签栏隐藏', tb.hidden);
+    view.page = 'tab'; render();
+    ok(tb.hidden === false, '★ render() 回到 tab 页后标签栏恢复', tb.hidden);
+
+    /* G3. ★ 关键：模拟「页面从 bfcache / 冻结态恢复」
+       —— DOM 原样还原（标签栏还是隐藏的），JS 不重跑，
+       此时 pageshow 钩子必须把 chrome 修回来。 */
+    view.page = 'tab'; tb.hidden = true; bk.hidden = false; dt.hidden = true;   /* 人为制造「残留的详情页 chrome」 */
+    ok(winHandlers.pageshow && winHandlers.pageshow.length > 0, '★ 注册了 pageshow 钩子（页面恢复时修复 chrome）');
+    (winHandlers.pageshow || []).forEach(function (fn) { fn({ persisted: true }); });
+    ok(tb.hidden === false, '★★ pageshow 恢复后：标签栏被修复为可见', tb.hidden);
+    ok(bk.hidden === true && dt.hidden === false, 'pageshow 恢复后：顶部按钮同步归位', [bk.hidden, dt.hidden]);
+
+    /* G4. 源码层断言：init() 必须显式复位 view（不依赖声明默认值） */
+    ok(/view\.page\s*=\s*'tab';\s*view\.pid\s*=\s*null/.test(js),
+      '★ init() 显式复位 view.page/view.pid（冷启动一律回主标签页）');
+
+    /* 复原，避免影响后续断言 */
+    view.page = 'tab'; view.pid = null; render();
   }
 
   console.log('');

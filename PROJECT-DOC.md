@@ -302,8 +302,38 @@ computeSchedule(p).forEach(x => out.push({ date: x.date, kind: 'radio', ... }))
 - **老患者零迁移**：`courses` 为空时放疗事件自动归为一段并折叠。
 - 折叠状态存在内存态 `view.tlOpen`，**不持久化**（刷新即恢复默认折叠）。
 
-### 3.6 覆盖层模式（节假日 / 调休 / 模板）
+#### 底部 chrome 的显隐：`syncChrome()` 单一维护点（v0.13.2）
 
+顶部「返回 / 数据」按钮与**底部标签栏**的显隐，**只由 `syncChrome()` 一处维护**：
+
+```js
+function syncChrome() {
+  var isTab = (view.page !== 'patient' && view.page !== 'settings');
+  $('btnBack').hidden = isTab;
+  $('btnData').hidden = !isTab;
+  $('tabbar').hidden = !isTab;
+}
+```
+
+`render()` 在分派页面的**早退之前**先调用它；`renderPatientPage()` / `renderSettingsPage()`
+**不再各自写** `tabbar.hidden`。这样只要 `syncChrome()` 跑一次，chrome 就必然与 `view.page` 一致，
+不存在"某个分支漏恢复"的可能。
+
+**`pageshow` 钩子**：移动端 PWA 点刷新后，页面可能**从 bfcache / 冻结态恢复**——
+DOM 原样还原但 **JS 不重跑**。此时若不补一次同步，停在详情页时的「标签栏隐藏」会被原样还原
+且再无代码修复。故在 `bindAutoSync()` 里注册：
+
+```js
+onWin('pageshow', function () { syncChrome(); });   // 幂等，普通加载也会走，无害
+```
+
+`init()` 另外显式复位 `view.page='tab'`（保留 `view.tab`），确保冷启动路径确定。
+
+> ⚠ 相关红线：**本应用所有按钮依赖 document 冒泡委托，任何按钮都不得加
+> `onclick="event.stopPropagation()"`**，否则该按钮点击会静默失效。
+> `test-buttons.js` 有静态断言盯死此点。详见 `DECISIONS.md` §五之五。
+
+### 3.6 覆盖层模式（节假日 / 调休 / 模板）
 内置数据（`BUILTIN_HOLIDAYS` 等）与用户自定义**分离存储**，用户的自定义存在独立覆盖层里：
 
 ```js
@@ -772,7 +802,7 @@ v0.1 的「暂停」在新版语义里由 `pauses` 中断区间表达，所以�
 
 **规则**：任何改动都要跑测试；**涉及兼容性的改动还要做故障注入**。
 
-**19 个套件 / 1,471 项断言**全部只读 `index.html`，用 DOM 打桩 + `eval` 加载源码。
+**19 个套件 / 1,485 项断言**全部只读 `index.html`，用 DOM 打桩 + `eval` 加载源码。
 
 **最关键的一条经验**（踩过两次坑）：
 

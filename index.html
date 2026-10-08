@@ -4,8 +4,6 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>放疗患者管理</title>
-<!-- 发布链路验证：本次改动不含功能变更，用于确认改应用后 SW 缓存号自动递增（v13 → v14）并推送到线上。
-     发布一律走 dev-tools/release.sh：它会跑完 1031 项回归 + 兼容性门禁，再递增此处的缓存号、推送并验证 Pages。 -->
 <meta name="description" content="放疗科患者管理（离线使用，数据只存本机）">
 <meta name="theme-color" content="#0f766e">
 <meta name="apple-mobile-web-app-capable" content="yes">
@@ -287,7 +285,7 @@ button,input,select,textarea{font:inherit;color:inherit}
 var LS_KEY = 'radiotherapy.v1';
 var SNAP_PREFIX = 'radiotherapy.snap.';
 var SNAP_KEEP = 7;
-var APP_VERSION = '0.13.1';
+var APP_VERSION = '0.13.2';
 
 var SEXES = ['男', '女'];
 var PURPOSES = ['根治性', '术后辅助', '术前新辅助', '姑息性'];
@@ -1959,12 +1957,23 @@ function buildTodo() {
 var view = { page: 'tab', tab: 'ward', pid: null, calY: 0, calM: 0, tlDesc: false, tlOpen: {} };
 (function () { var t = new Date(); view.calY = t.getFullYear(); view.calM = t.getMonth() + 1; })();
 
+/* 顶部「返回/数据」按钮与底部标签栏的显隐，**只在这里维护**。
+   历史上这些赋值散落在 render / renderPatientPage / renderSettingsPage 各处，
+   任何一个分支漏写就会留下「标签栏消失」这类缺陷（v0.13.2 修复）。
+   页面从 bfcache 恢复时也会调用它（见 pageshow 钩子），故必须是幂等的、且只依赖 view。 */
+function syncChrome() {
+  var isTab = (view.page !== 'patient' && view.page !== 'settings');
+  $('btnBack').hidden = isTab;
+  $('btnData').hidden = !isTab;
+  $('tabbar').hidden = !isTab;
+}
+
 function render() {
   maybeSnapshot();
   updateDots();
+  syncChrome();                       /* 先统一 chrome，再分派页面（早退分支也已被覆盖） */
   if (view.page === 'settings') { renderSettingsPage(); return; }
   if (view.page === 'patient') { renderPatientPage(); return; }
-  $('btnBack').hidden = true; $('btnData').hidden = false; $('tabbar').hidden = false;
   $('title').textContent = '放疗患者管理';
   if (view.tab === 'todo') renderTodo();
   else if (view.tab === 'cal') renderOverallCal();
@@ -2056,8 +2065,12 @@ function renderTodo() {
       '<div class="pdiag">' + esc(it.p.diagnosis || '') + '</div>' +
       '<div class="todo-reasons">' + it.reasons.map(function (r) { return '<span class="chip warn">' + esc(r) + '</span>'; }).join('') + '</div>' +
       (it.details.length ? '<div class="hint">' + esc(it.details.join('；')) + '</div>' : '') +
-      (vp ? '<div class="todo-acts"><button class="btn sm" data-act="verify-done" data-id="' + it.p.id + '" data-n="' + vp.n + '" onclick="event.stopPropagation()">✓ 标记第 ' + vp.n + ' 次已验证</button>' +
-        '<button class="btn sm" data-act="verify-edit" data-id="' + it.p.id + '" onclick="event.stopPropagation()">修改</button></div>' : '') +
+      /* 注意：这两个按钮**绝不能**加 onclick="event.stopPropagation()"。
+         本应用所有按钮依赖挂在 document 上的冒泡委托；阻止冒泡会让点击永远
+         到不了委托 → 按钮「点了没反应」。findAct 从 target 向上找**最近的**
+         data-act，命中按钮后不会继续升到外层卡片的 open-patient，故无需阻止冒泡。 */
+      (vp ? '<div class="todo-acts"><button class="btn sm" data-act="verify-done" data-id="' + it.p.id + '" data-n="' + vp.n + '">✓ 标记第 ' + vp.n + ' 次已验证</button>' +
+        '<button class="btn sm" data-act="verify-edit" data-id="' + it.p.id + '">修改</button></div>' : '') +
       '</div></div>';
   });
   $('view').innerHTML = h + '<div style="height:60px"></div>';
@@ -2205,7 +2218,7 @@ function renderDone() {
 function renderPatientPage() {
   var p = getPatient(view.pid);
   if (!p) { view.page = 'tab'; render(); return; }
-  $('btnBack').hidden = false; $('btnData').hidden = true; $('tabbar').hidden = true;
+  /* chrome（btnBack/btnData/tabbar）统一由 render() → syncChrome() 维护，此处不再赋值 */
   $('title').textContent = p.name || '患者详情';
 
   var tot = parseInt(p.fractions, 10) || 0;
@@ -2428,7 +2441,7 @@ function markReactionsRead(p) {
 function renderSettingsPage() {
   /* 设置是全局语境，不带患者上下文；清空 pid 以免「套用模板」误改上一位患者（BUG-07） */
   view.pid = null;
-  $('btnBack').hidden = false; $('btnData').hidden = true; $('tabbar').hidden = true;
+  /* chrome（btnBack/btnData/tabbar）统一由 render() → syncChrome() 维护，此处不再赋值 */
   $('title').textContent = '设置';
   var bytes = 0; try { bytes = (localStorage.getItem(LS_KEY) || '').length; } catch (e) { }
   var evCount = 0, openCount = 0;
@@ -5582,6 +5595,10 @@ function showUpdateBar() {
 function init() {
   load();
   bind();
+  /* 每次冷启动都从主标签页开始：不依赖 view 变量声明的默认值，也防止将来有人
+     给 view 加上持久化后，刷新后直接落在「无标签栏」的详情页/设置页（v0.13.2 修复）。
+     刻意保留 view.tab：那是「用户上次看的标签」，而标签页本身是有底部栏的。 */
+  view.page = 'tab'; view.pid = null; view.tlOpen = {}; view.tlDesc = false;
   /* 演示模式仅在数据可正常读取且为空时生效，避免覆盖受影响的数据 */
   if (!loadError && /[?&]demo=\d/.test(location.search) && !state.patients.length) {
     state = buildDemoState(); save();
@@ -5626,6 +5643,11 @@ function bindAutoSync() {
   onDoc('visibilitychange', function () {
     if (document.visibilityState === 'visible') autoSyncTick('visible');
   });
+  /* 页面被「恢复」时（移动端 PWA 点刷新后常见：从 bfcache / 冻结页取回，
+     DOM 原样还原但 JS 不会重跑）。此时不做任何事的话，停在详情页时的
+     「底部标签栏隐藏」状态会被原样还原且再无代码修复 → 标签栏永久消失。
+     这里补一次 chrome 同步（幂等）：只要 view 已回到 tab，标签栏就随之恢复。 */
+  onWin('pageshow', function () { syncChrome(); });
   /* 网络恢复 —— 之前失败的那次可以补上 */
   onWin('online', function () { autoSyncTick('online'); });
   /* 离开页面 —— 用 keepalive 兜底发一次，不等结果。

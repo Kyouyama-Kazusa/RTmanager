@@ -177,7 +177,7 @@ bash dev-tools/release.sh "这次改了什么"
 
 发布前会自动跑两道门禁：
 
-- 回归测试（`dev-tools/`，共 **1,471 项断言**，19 个套件 + `qa-audit`，全部只读取 `index.html`，不修改源码）
+- 回归测试（`dev-tools/`，共 **1,485 项断言**，19 个套件 + `qa-audit`，全部只读取 `index.html`，不修改源码）
 - 兼容性门禁 `test-compat.js`（58 项）—— 拦截会让老用户丢数据或导致 PWA 装不上的改动
 
 ```bash
@@ -186,7 +186,7 @@ node qa-audit.js                    # 缺陷修复验收（108 项，覆盖 12 �
 node test-sync.js                   # 云同步全链路（模拟 GitHub API，81 项）
 node test-autosync.js               # 定时自动同步（130 项，含空数据/冲突/失败等安全边界）
 node test-settings-sync.js          # 设置层云同步：节假日/调休/模板/治疗日（86 项）
-node test-caltodo-verify.js         # 日历人数统计 / 待办收窄 / 放疗验证（113 项，含按钮点击回归）
+node test-caltodo-verify.js         # 日历人数统计 / 待办收窄 / 放疗验证 / 标签栏显隐（124 项，含按钮点击回归）
 node test-course.js                 # 治疗疗程（手术/化疗/放疗）与全程治疗时间轴（101 项）
 node test-*.js                      # 排程 / 迁移 / 合并 / 随访 / 模板 / AI / SW ...
 node qa-perf.js                     # 渲染耗时与存储占用探针

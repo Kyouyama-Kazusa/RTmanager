@@ -554,6 +554,22 @@ ok(state.patients.length === 6, '★「载入示例数据」生成 6 位患者',
 ok(state.patients.every(p => p.startDate), '示例患者都有开始日期');
 ok(state.patients.some(p => p.reactions.length > 0), '示例含副反应数据');
 
+resetUI(); group('15. 静态红线：不得阻止冒泡（否则委托收不到点击）');
+
+{
+  /* 本应用所有按钮依赖挂在 document 上的冒泡委托。
+     任何按钮上加 onclick="event.stopPropagation()" 都会让它的点击
+     永远到不了委托 → 「点了没反应」（v0.13.2 修复的待办验证按钮就是此因）。
+     这里只扫 <button ...> 标签本体，不误伤源码里的说明性注释。 */
+  const btnTags = html.match(/<button[^>]*>/g) || [];
+  const bad = btnTags.filter(t => /onclick\s*=\s*["'][^"']*stopPropagation/.test(t));
+  ok(bad.length === 0, '★ 渲染出的按钮不得带 stopPropagation', bad.slice(0, 3));
+  /* 扫「真正的代码」：先剥掉块注释与行注释，避免误伤警示性说明文字 */
+  const codeOnly = js.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/[^\n]*/g, '$1');
+  ok(!/stopPropagation/.test(codeOnly), '★ 源码代码中不得出现 stopPropagation（注释除外）');
+  ok(/绝不能.*stopPropagation/.test(js), '★ 保留了警示注释，防止后人再加回去');
+}
+
 console.log('');
 console.log('========================================');
 console.log('通过 ' + pass + ' 项，失败 ' + fail + ' 项');

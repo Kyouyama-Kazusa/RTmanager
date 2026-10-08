@@ -613,6 +613,86 @@ D 组原来用 `fireFromHtml(html, 'timeline-fold', 0)`（点第 0 个折叠按�
 
 ---
 
+## 五之五、手机端两个 bug 的根因与教训（v0.13.2）
+
+### bug 1：放疗验证「已完成 / 设置」按钮点不动 —— `stopPropagation` 与事件委托互斥
+
+**现象**：待办列表里「✓ 标记第 N 次已验证」「修改」两个按钮点了没反应。
+用户反馈"v0.12.1 修过了还是不行"。
+
+**根因**：这两个按钮（`index.html` L2059/2060）带内联
+`onclick="event.stopPropagation()"`。本应用**所有**按钮都依赖挂在 `document` 上的
+**冒泡委托**处理点击；`stopPropagation()` 阻止事件冒泡到 document →
+委托**永远收不到**这两次点击 → 「点了没反应」。
+
+**为什么 v0.12.1 没修到**：那次修的是**详情页**的验证按钮（没有 `stopPropagation`，本来是好的），
+**待办页这两个是另一条路径**，当时漏了。验证共 3 个入口（待办页 / 详情页 / 验证弹层），
+只有待办页这两个带 `stopPropagation`。
+
+**为什么"手机端"是误导**：全文件只有 1 个 `@media`，且是 `min-width:700px`，
+**根本没有手机断点**；无 `touch-action` / `pointer-events` / `touchstart` 等。
+根因与平台无关，只是用户在手机上测。
+
+#### ★ 教训 1：`event.stopPropagation()` 与 document 委托不能共存
+
+任何按钮上加了 `stopPropagation`，都会让它的点击**静默失效**（不报错、不提示）。
+→ 已在 `test-buttons.js` 加**静态断言**盯死：渲染出的按钮不得带 `stopPropagation`，
+源码代码中也不得出现（剥掉注释后扫描）。并在待办按钮处留了警示注释。
+
+补充：`findAct()` 从 `e.target` 向上找**最近的** `data-act`，命中按钮后**不会**继续
+升到外层卡片（待办卡片本身是 `data-act="open-patient"`），所以**不需要** `stopPropagation`——
+已实测验证「点按钮 → 命中 verify-done，不误触 open-patient」。
+
+#### ★ 教训 2：测试桩必须模拟事件的「冒泡语义」，否则给假阳性
+
+`fireFromHtml` 原来**只解析 `data-*`、直接把事件投给 `clickHandler`**，
+既跳过冒泡阶段、也完全无视内联 `onclick`。于是带 `stopPropagation` 的按钮
+**测试全绿、真机必挂** —— 这就是"修过了却还在"的原因。
+
+这是本项目**第二次**因"测试绕过真实事件/渲染层"而漏掉真缺陷
+（第一次是 v0.12.1：`fire()` 绕过渲染层，改用 `fireFromHtml`）。
+**凡是模拟用户点击的测试桩，必须复现真实事件流**：现在 `fireFromHtml` 遇到
+`stopPropagation` 就**不投递**并直接报错，让它如实变红。
+
+### bug 2：点「刷新」后底部标签栏消失 —— 缺少「页面被恢复」这条路径的处理
+
+**现象**：打开应用提示「有更新」→ 点「刷新」→ 底部标签栏消失，必须杀进程重启才恢复。
+
+**实测排除**（真实 Chromium + CDP）：
+
+| 试验 | 结果 |
+|---|---|
+| 完整 `location.reload()`（脚本重跑） | `view.page` 复位 `'tab'`、tabbar 正常 ✔ 不复现 |
+| 真实 SW 升级 v24→v25 后再 reload | 同样正常 ✔ 不复现 |
+| `view` 是否持久化 | 否（`sessionStorage` 0 处；`LS_KEY` 只存患者数据） |
+
+→ **单纯 reload 路径是好的**。结合用户描述「停在详情页/设置页时点刷新」+「重启后回主标签页正常」，
+判定：刷新后页面**从 bfcache / 冻结态恢复**——DOM 原样还原（停在详情页、tabbar 已是 `hidden`），
+但 **JS 没有重跑**，`render()` 再没被调用，于是**没有任何代码把 tabbar 修回来**。
+
+**代码确证**：`render()` 是**唯一**显示 tabbar 的地方（L1967），而它在
+`view.page==='patient'/'settings'` 时**提前 return**；隐藏 tabbar 的 2 处赋值
+（`renderPatientPage` / `renderSettingsPage`）都在这些早退分支内。
+全文件**没有 `pageshow` 处理**，`visibilitychange` / `pagehide` 只做自动同步、不碰 view。
+→ 页面被恢复时，chrome 显隐**无人维护**。
+
+**修复（三层防御）**：
+
+1. **集中 chrome 同步**：新增 `syncChrome()`，把 `btnBack` / `btnData` / `tabbar` 的显隐
+   收口到一处，`render()` 在早退**之前**调用；各页面函数不再自己赋值。
+   彻底消除「某个分支漏恢复」这类缺陷。
+2. **加 `pageshow` 钩子**：页面被恢复时补一次 `syncChrome()`（幂等）。
+3. **`init()` 显式复位 view**：冷启动一律 `view.page='tab'`，不依赖变量声明默认值，
+   也让"重跑"路径确定。
+
+#### ★ 教训 3：「页面被恢复」是移动端 PWA 必须考虑的第三种加载路径
+
+除了「冷启动」和「reload 重跑脚本」，移动端还有 **bfcache / 冻结页恢复**：
+**DOM 原样还原、JS 不重跑**。任何"只有 `init()` 或 `render()` 才会维护"的 UI 状态
+（chrome 显隐、tab 高亮、按钮 disabled），**都必须在 `pageshow` 上补一次同步**。
+
+---
+
 ## 六、接手方必读清单（Checklist）
 
 ### 6.1 绝对不能做的事
