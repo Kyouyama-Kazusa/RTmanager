@@ -129,6 +129,21 @@ function fire(act, data) {
 }
 function resetNet() { netCalls = []; }
 function tick(n) { return new Promise(r => setTimeout(r, n || 30)); }
+/* ★ 轮询等待可观测结果成立，而不是赌固定时长。
+   与 test-sync / test-autosync 的问题同源（2026-10-08）：加密 + fetch 的耗时随机器
+   负载波动，`tick(120)` 这类固定等待在负载下会不够，导致请求未发出就断言 → 假红。 */
+async function waitUntil(cond, desc, maxMs) {
+  const limit = maxMs || 8000;
+  const t0 = Date.now();
+  while (Date.now() - t0 < limit) {
+    let v = false;
+    try { v = !!cond(); } catch (e) { v = false; }
+    if (v) return true;
+    await tick(10);
+  }
+  console.log('  ⏱ waitUntil 超时（' + (desc || '') + '），交由后续断言判定');
+  return false;
+}
 /* 清空全部设置键（每个用例开始前调用，避免相互污染） */
 function clearSettings() {
   ['radiotherapy.holidays', 'radiotherapy.makeups', 'radiotherapy.tpls',
@@ -268,7 +283,7 @@ const P1 = { id: 'p1', name: '张三', mrn: 'RT001', diagnosis: '鼻咽癌', sta
   saveTpl('A模板', [{ n: 1, u: 'm' }]);
   setState([P1]);
   syncPush();
-  await tick(120);
+  await waitUntil(() => !!syncCfg().gistId, '上传完成并写回 gist id');
   ok(!!syncCfg().gistId, '★ 上传成功并记下 gist id', syncCfg().gistId);
   /* 解开云端密文，确认设置字段真的在 */
   var gid = syncCfg().gistId;
@@ -291,7 +306,10 @@ const P1 = { id: 'p1', name: '张三', mrn: 'RT001', diagnosis: '鼻咽癌', sta
   setSyncCfg(cfgKeep);
   resetNet(); toastMsgs.length = 0;
   syncPull();
-  await tick(150);
+  await waitUntil(() => {
+    var v = lsRaw('radiotherapy.holidays');
+    return v && typeof v === 'object' && v['2026-10-09'] === '设备A的院庆';
+  }, '云端设置已落到本机');
   /* 用 lsOv 统一取值，避免「云端压根没同步过来」时抛异常而中断后面的断言 */
   function lsOv(key) { var v = lsRaw(key); return (v && typeof v === 'object') ? v : {}; }
   ok(lsOv('radiotherapy.holidays')['2026-10-09'] === '设备A的院庆', '★ 节假日已从云端落到设备 B', lsRaw('radiotherapy.holidays'));

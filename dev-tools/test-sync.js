@@ -136,8 +136,34 @@ function inState(patients) {
   state = normalize({ version: 2, updatedAt: '', patients: patients });
   return state.patients[0];
 }
-/* 等待所有微任务/异步链走完 */
+/* 等待所有微任务/异步链走完（仅用于「不涉及网络请求」的纯微任务场景） */
 function tick(n) { return new Promise(r => setTimeout(r, n || 30)); }
+
+/* ★ 轮询等待：等一个**可观测的异步结果**成立，而不是赌一个固定时长。
+   背景（2026-10-08）：本套件原先用 `await tick(60)` 等加密 + fetch 链路走完。
+   tick 是 setTimeout 固定时长，而加密（PBKDF2 25 万次）与 fetch 的耗时随机器负载波动：
+   空闲时 60ms 够，负载下不够 → 请求还没发出就断言 → 报一堆"未发起请求"的假红，
+   且重跑又变绿 —— 最难查的那类测试缺陷。
+   waitUntil 改为轮询条件，默认最长 8 秒，正常路径通常几十毫秒即返回。 */
+async function waitUntil(cond, desc, maxMs) {
+  const limit = maxMs || 8000;
+  const t0 = Date.now();
+  while (Date.now() - t0 < limit) {
+    let v = false;
+    try { v = !!cond(); } catch (e) { v = false; }
+    if (v) return true;
+    await tick(10);
+  }
+  /* 超时不在这里判失败：交给紧随其后的真实断言报错，能给出更具体的上下文。
+     但仍提示一句，避免"超时"被误读成"断言本身写错"。 */
+  console.log('  ⏱ waitUntil 超时（' + (desc || '') + '），交由后续断言判定');
+  return false;
+}
+/* 常用条件：网络已记录到指定方法 / 指定次数的请求 */
+function netHas(method, n) {
+  const c = netCalls.filter(x => !method || x.method === method).length;
+  return c >= (n || 1);
+}
 
 (async function () {
   console.log('========== 云同步（加密 Gist） ==========');
@@ -186,8 +212,7 @@ function tick(n) { return new Promise(r => setTimeout(r, n || 30)); }
   toastMsgs.length = 0;
   syncPush();
   await tick();
-  ok(netCalls.length === 0, '★ 未配置 Token 时不发任何网络请求');
-  ok(toastMsgs.some(t => /请先完成云同步设置/.test(t)), '并提示先去设置', toastMsgs);
+  ok(netCalls.length === 0, '★ 未配置 Token 时不发任何网络请求');  ok(toastMsgs.some(t => /请先完成云同步设置/.test(t)), '并提示先去设置', toastMsgs);
 
   group('5. 首次上传：自动创建 secret gist');
   resetNet(); confirmQueue.length = 0; toastMsgs.length = 0;
@@ -199,7 +224,7 @@ function tick(n) { return new Promise(r => setTimeout(r, n || 30)); }
   ] });
   view.page = 'settings';
   syncPush();
-  await tick(60);
+  await waitUntil(() => netHas('POST'), '创建 gist 请求已发出');
   const createCall = lastCall('POST');
   ok(!!createCall, '★ 发起了创建 gist 的请求', netCalls.map(c => c.method + ' ' + c.url));
   ok(createCall && createCall.url === 'https://api.github.com/gists', '打的是 /gists 接口', createCall && createCall.url);
@@ -217,7 +242,7 @@ function tick(n) { return new Promise(r => setTimeout(r, n || 30)); }
   state.patients[0].boostFractions = '5';
   state.patients[0].boostNote = '加量追加到 5 次';
   syncPush();
-  await tick(60);
+  await waitUntil(() => netHas('PATCH'), '更新 gist 请求已发出');
   const patchCall = lastCall('PATCH');
   ok(!!patchCall, '★ 第二次上传走 PATCH 更新', netCalls.map(c => c.method));
   ok(patchCall && patchCall.cache === 'no-store', 'PATCH 也禁用缓存');
@@ -235,11 +260,11 @@ function tick(n) { return new Promise(r => setTimeout(r, n || 30)); }
   confirmQueue.length = 0;
   confirmQueue.push(false);                        /* 用户在冲突提示上选「取消」 */
   syncPush();
-  await tick(60);
+  await tick(30);                                  /* 冲突分支会在本地弹确认框，稍等确认队列被消费 */
   ok(lastCall('PATCH') === undefined, '★ 检测到云端被别的设备改过，取消后不覆盖上传');
   confirmQueue.length = 0;
   syncPush();
-  await tick(60);
+  await waitUntil(() => netHas('PATCH'), '用户确认后的覆盖上传已发出');
   ok(!!lastCall('PATCH'), '★ 用户确认后仍可强制覆盖上传');
 
   group('8. 拉取：解密 + 进入合并导入');
@@ -248,7 +273,8 @@ function tick(n) { return new Promise(r => setTimeout(r, n || 30)); }
   state = normalize({ version: 2, patients: [] });
   pendingImport = null;
   syncPull();
-  await tick(60);
+  await waitUntil(() => pendingImport !== null || netHas('GET'), '拉取请求已发出');
+  await waitUntil(() => pendingImport !== null, '拉取结果已解密进入暂存');
   ok(pendingImport !== null, '★ 拉取后进入导入方式选择', pendingImport === null ? 'pendingImport 仍为空' : '已就绪');
   ok(pendingImport && pendingImport.patients.length === 2, '解出 2 位患者', pendingImport && pendingImport.patients.length);
   ok(pendingImport && pendingImport.patients[0].name === '张三', '患者姓名正确解密', pendingImport && pendingImport.patients[0].name);
@@ -284,7 +310,7 @@ function tick(n) { return new Promise(r => setTimeout(r, n || 30)); }
   const before = JSON.stringify(state);
   pendingImport = null;
   syncPull();
-  await tick(60);
+  await waitUntil(() => /密码不对/.test(getEl('syncStatus').innerHTML), '密码错误提示已渲染');
   ok(pendingImport === null, '★ 解密失败时不会产生导入数据');
   ok(JSON.stringify(state) === before, '★ 本机数据完全未被改动');
   ok(getEl('syncStatus').innerHTML.indexOf('密码不对') >= 0, '★ 界面提示「密码不对」', getEl('syncStatus').innerHTML.slice(0, 120));
@@ -294,20 +320,20 @@ function tick(n) { return new Promise(r => setTimeout(r, n || 30)); }
   resetNet();
   setSyncCfg({ token: 'ghp_test', password: 'pw12345678', gistId: 'f'.repeat(32) });
   syncPull();
-  await tick(60);
+  await waitUntil(() => /找不到云端数据/.test(getEl('syncStatus').innerHTML), '404 提示已渲染');
   ok(getEl('syncStatus').innerHTML.indexOf('找不到云端数据') >= 0, '★ 404 给出「找不到云端数据」', getEl('syncStatus').innerHTML.slice(0, 120));
   /* 文件不匹配 */
   resetNet();
   gists[gid].files = { 'other.txt': { content: 'x' } };
   setSyncCfg({ token: 'ghp_test', password: '放疗科-密码-2026', gistId: gid });
   syncPull();
-  await tick(60);
+  await waitUntil(() => /找不到/.test(getEl('syncStatus').innerHTML), '文件不匹配提示已渲染');
   ok(getEl('syncStatus').innerHTML.indexOf('找不到') >= 0, '★ 云端文件不匹配时明确报错', getEl('syncStatus').innerHTML.slice(0, 140));
   /* Token 失效 */
   resetNet();
   nextStatus = { status: 401, body: { message: 'Bad credentials' } };
   syncPush();
-  await tick(60);
+  await waitUntil(() => /401/.test(getEl('syncStatus').innerHTML), '401 提示已渲染');
   ok(getEl('syncStatus').innerHTML.indexOf('401') >= 0, '★ Token 失效时提示 401', getEl('syncStatus').innerHTML.slice(0, 120));
 
   group('12. 清除同步设置');
@@ -367,7 +393,7 @@ function tick(n) { return new Promise(r => setTimeout(r, n || 30)); }
   ok(netCalls.length === 0, '★ 此时还没发起上传（等到输入密码才继续）');
   /* 输入密码后应继续走完上传 */
   sheetCtx.onSave({ password: '临时密码12345' });
-  await tick(60);
+  await waitUntil(() => netHas('POST'), '输入密码后上传请求已发出');
   ok(netCalls.some(c => c.url.indexOf('/gists') >= 0), '★ 输入密码后继续完成上传', netCalls.map(c => c.method));
   ok(String(syncCfg().password || '') === '', '临时输入的密码不落库', syncCfg().password);
 

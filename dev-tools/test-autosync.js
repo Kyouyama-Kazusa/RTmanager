@@ -410,8 +410,21 @@ async function drain(maxMs) {
     seedPatient();
     cfgReady({ lastAutoSyncAt: '', lastAutoSyncState: '' });
     gists = {}; resetNet(); alertMsgs.length = 0;
-    autoSyncTick('c1'); await tick(60);                 /* 先建立云端数据 */
+    /* ⚠ 这里必须用 drain() 而不是固定的 tick(N)。
+       本步要等的是"上传流程真正把云端记录建出来"这一异步副作用，用时不受控；
+       早期写成 `tick(60)`，机器空闲时够用，但在负载下（如并发跑回归）60ms 窗口
+       不足 → gists[gid] 仍为 undefined → 下一行取 .updated_at 直接抛 TypeError，
+       表现为"发布门禁随机变红"。drain() 会轮询 autoSyncBusy 落下、最多 8 秒。 */
+    autoSyncTick('c1'); await drain();                  /* 先建立云端数据 */
     const gid = syncCfg().gistId;
+    /* 前置校验：拿不到云端记录就没必要继续。
+       注意：这里**不能写 return** —— 本组是裸块（group('F. ...'); { ... }），
+       return 会连带跳过套件末的汇总与 process.exit，导致失败被吞、退出码为 0，
+       发布门禁失效（比崩溃更危险）。改为记录失败后用 if 跳过依赖它的后续步骤。 */
+    const cloudReady = !!(gid && gists[gid]);
+    ok(cloudReady, '前置：云端记录已建立（否则本用例无意义）', { gid, has: !!gists[gid] });
+
+    if (cloudReady) {
     const c = syncCfg(); c.lastRemoteUpdatedAt = 'OLD_TIMESTAMP'; setSyncCfg(c);   /* 假装本机记的是旧版本 */
     gists[gid].updated_at = 'REMOTE_CHANGED_BY_OTHER_DEVICE';
     resetNet(); alertMsgs.length = 0;
@@ -421,6 +434,7 @@ async function drain(maxMs) {
     ok(/其他设备/.test(syncCfg().lastAutoSyncErr), '★ 记录"被其他设备更新"的原因', syncCfg().lastAutoSyncErr);
     ok(alertMsgs.length === 0, '★ 不弹窗打扰（与手动同步的覆盖确认区分开）', alertMsgs);
     ok(gists[gid].files[SYNC_FILE].content !== undefined, '云端数据未被改动');
+    }   /* end if(cloudReady) —— F2 的依赖前置步骤 */
 
     /* F3 网络失败 → 记录原因，且不更新 lastAutoSyncAt（下轮会重试） */
     await settle();

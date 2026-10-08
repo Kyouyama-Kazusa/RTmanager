@@ -187,7 +187,7 @@ bash dev-tools/pack-asset.sh        # 校验 → 打包到 /workspace/RTmanager-
 
 发布前会自动跑两道门禁：
 
-- 回归测试（`dev-tools/`，共 **1,485 项断言**，19 个套件 + `qa-audit`，全部只读取 `index.html`，不修改源码）
+- 回归测试（`dev-tools/`，共 **1,486 项断言**，19 个套件 + `qa-audit`，全部只读取 `index.html`，不修改源码）
 - 兼容性门禁 `test-compat.js`（58 项）—— 拦截会让老用户丢数据或导致 PWA 装不上的改动
 
 ```bash
