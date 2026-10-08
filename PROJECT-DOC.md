@@ -499,6 +499,7 @@ dueDate = 基准日 + offsetN × offsetUnit
 | `test-autosync.js` | 定时自动同步（130 项） |
 | `test-caltodo-verify.js` | 日历统计/待办/验证（89 项） |
 | `release.sh` | ★ **一键发布**（测试 → 扫描 → 提版本 → 推送 → 验线上） |
+| `pack-asset.sh` | ★ **打包项目资产**（校验 → 打包 → 快检，供上传网盘） |
 | `scan-dates.sh` | 跨日期扫描（防"只在今天绿"） |
 
 **测试桩模式**（所有套件共用）：用对象打桩 `document` / `window` / `localStorage` / `fetch`，然后 `eval(js)` 加载应用代码，直接调用内部函数断言。
@@ -547,6 +548,13 @@ python3 -m http.server 8080
 
 ### 6.3 ★ 发布流程（**必须走脚本，不可手工推送**）
 
+> **用户于 2026-10-08 明确要求：每次更新除了推送 GitHub，还要同步推送到项目资产（网盘）。
+> 这是一条**长期约定**，不是一次性任务。请勿只做第一步就收工。**
+
+发布分**两步**，缺一不可：
+
+#### 第一步：发布到 GitHub Pages（应用本体）
+
 ```bash
 bash dev-tools/release.sh "这次改了什么"
 ```
@@ -571,6 +579,72 @@ DRY_RUN=1 bash dev-tools/release.sh "消息"
 ```
 
 > ⚠️ 注意：演练**也会**递增 `CACHE`（第 3 步照跑）。所以"演练 + 正式发布"会让版本号跳两格（如 v17→v18→v19）。这是已知行为，不是 bug。
+
+#### 第二步：同步到项目资产（完整交接包）
+
+```bash
+bash dev-tools/pack-asset.sh
+```
+
+脚本执行 4 步：前置检查（版本/提交/仓库干净度）→ 回归校验（**防止把坏版本打进资产包**）
+→ 打包到 `/workspace/RTmanager-YYYY-MM-DD.zip` → 完整性快检。
+
+打包规则（与首次上传保持一致，勿随意更改）：
+
+| 项 | 规则 |
+|---|---|
+| 顶层 | `RTmanager/` 目录（解压不散落） |
+| 内容 | 整个工作区：应用 + 文档 + `dev-tools/` + `.workbuddy/` + **完整 `.git` 历史** |
+| 排除 | 旧资产包 `*.zip`、`*.pyc`、`__pycache__`、`.DS_Store` |
+| 命名 | `RTmanager-YYYY-MM-DD.zip`，当天重名自动加 `-2` `-3` 后缀 |
+
+**⚠️ `pack-asset.sh` 只负责"备好包"，不负责上传。** 原因：网盘上传需要 MCP 工具
+（`tdrive.file_upload`）签发的**临时凭证**（`confirm_key` / `task_id` /
+`x-cos-security-token`），纯 bash 脚本拿不到签名。
+
+上传必须由**智能体**完成，三步：
+
+| 步 | 动作 |
+|---|---|
+| 1 | `tdrive.file_upload`：`dir_id` = 项目网盘根，`file_name` / `file_size` 照脚本输出填，建议 `conflict_strategy=rename`（保留历史包） |
+| 2 | `curl -sSL -X PUT` 上传（凭证与 URL 由第 1 步返回） |
+| 3 | `tdrive.file_upload_complete`：回填 `confirm_key` + `task_id` 落库 |
+
+> ⚠️ **踩过的坑（务必避开）**：上传凭证的 `Authorization` 头里含 `&` 和 `;`。
+> 直接拼在 `curl` 命令行里会被 shell 转义破坏，表现为 **403** 或
+> **`InvalidAccessKeyId`**。必须写进 **curl 配置文件**执行：
+>
+> ```bash
+> cat > /tmp/up.conf <<CONF
+> url = "<第 1 步返回的完整 URL>"
+> request = "PUT"
+> upload-file = "/workspace/RTmanager-YYYY-MM-DD.zip"
+> header = "Authorization: <原样粘贴，勿改写>"
+> header = "Content-Type: application/zip"
+> header = "x-cos-acl: default"
+> header = "x-cos-security-token: <原样粘贴>"
+> ...
+> CONF
+> curl -sSL --config /tmp/up.conf -w "\nHTTP=%{http_code}\n"
+> ```
+>
+> 成功标志：`HTTP=200` 且退出码 0。之后务必做**回程校验**（下载回来 `sha256sum`
+> 比对），确认上传无损。
+
+**项目资产坐标**：
+
+```
+项目网盘根目录 dir_id：awpKWAQQgNgW
+资产库使用指南（根目录内 PDF）：file_id = anLmsQKGqReq
+历史资产包样例：RTmanager.zip（2026-10-05，file_id = aKTWrdbhIGKB）
+```
+
+#### 两步都做完，才算发布完成
+
+| 检查项 | 期望 |
+|---|---|
+| GitHub Pages | 线上版本号 / 缓存号与本地一致，8 个 PWA 资源全 200 |
+| 项目资产 | 网盘目录内出现当日命名的 zip，回程 SHA256 与本地一致 |
 
 ### 6.4 用户侧安装
 

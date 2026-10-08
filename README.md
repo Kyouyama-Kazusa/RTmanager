@@ -168,11 +168,21 @@ Classic token 勾选 `gist`；Fine-grained token 把 `Gists` 设为 Read and wri
 
 ## 维护
 
-**发布用 `dev-tools/release.sh`，它会自动递增 `sw.js` 里的 `CACHE` 版本号（当前 `radiotherapy-v17`）、
+> ### 发布是**两步**：GitHub + 项目资产
+> 1. `bash dev-tools/release.sh "改动说明"` —— 应用本体上 GitHub Pages
+> 2. `bash dev-tools/pack-asset.sh`，再由智能体把包上传到**项目资产（网盘）**
+
+**发布用 `dev-tools/release.sh`，它会自动递增 `sw.js` 里的 `CACHE` 版本号（当前 `radiotherapy-v25`）、
 跑完测试再推送，并轮询确认 Pages 已生效** —— 不递增版本号的话，已安装到桌面的用户会停留在旧版本。
 
 ```bash
 bash dev-tools/release.sh "这次改了什么"
+```
+
+**再把完整交接包同步到项目资产**（`pack-asset.sh` 只备包，上传需智能体经 MCP 工具完成）：
+
+```bash
+bash dev-tools/pack-asset.sh        # 校验 → 打包到 /workspace/RTmanager-<日期>.zip → 快检
 ```
 
 发布前会自动跑两道门禁：
@@ -192,5 +202,9 @@ node test-*.js                      # 排程 / 迁移 / 合并 / 随访 / 模板
 node qa-perf.js                     # 渲染耗时与存储占用探针
 
 bash scan-dates.sh                  # 跨日期扫描（必须用 bash 跑），防「只在今天绿」
+```
+
+```bash
+bash pack-asset.sh                  # 打包项目资产（含回归校验，供上传网盘）
 ```
 
