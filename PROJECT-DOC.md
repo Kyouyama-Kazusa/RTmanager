@@ -587,7 +587,7 @@ bash dev-tools/pack-asset.sh
 ```
 
 脚本执行 4 步：前置检查（版本/提交/仓库干净度）→ 回归校验（**防止把坏版本打进资产包**）
-→ 打包到 `/workspace/RTmanager-YYYY-MM-DD.zip` → 完整性快检。
+→ 打包到 `/workspace/RTmanager-v<版本>-<日期>.zip` → 完整性快检。
 
 打包规则（与首次上传保持一致，勿随意更改）：
 
@@ -596,7 +596,12 @@ bash dev-tools/pack-asset.sh
 | 顶层 | `RTmanager/` 目录（解压不散落） |
 | 内容 | 整个工作区：应用 + 文档 + `dev-tools/` + `.workbuddy/` + **完整 `.git` 历史** |
 | 排除 | 旧资产包 `*.zip`、`*.pyc`、`__pycache__`、`.DS_Store` |
-| 命名 | `RTmanager-YYYY-MM-DD.zip`，当天重名自动加 `-2` `-3` 后缀 |
+| 命名 | `RTmanager-v<版本>-<日期>.zip`，如 `RTmanager-v0.13.2-2026-10-08.zip` |
+
+> **为什么名字里带版本号**（2026-10-08 用户要求）：原先只用日期命名，同一天发两次
+> 必然撞车 —— 要么覆盖旧包（丢历史），要么被网盘自动改成 `...(1).zip`（名字里多出
+> 空格和括号，后续脚本引用还得转义）。带上版本号后同一天多版本天然不同名。
+> 只有「同版本同一天重复打包」才会再加 `-2` 后缀，那种情况本身就该怀疑是误操作。
 
 **⚠️ `pack-asset.sh` 只负责"备好包"，不负责上传。** 原因：网盘上传需要 MCP 工具
 （`tdrive.file_upload`）签发的**临时凭证**（`confirm_key` / `task_id` /
@@ -618,7 +623,7 @@ bash dev-tools/pack-asset.sh
 > cat > /tmp/up.conf <<CONF
 > url = "<第 1 步返回的完整 URL>"
 > request = "PUT"
-> upload-file = "/workspace/RTmanager-YYYY-MM-DD.zip"
+> upload-file = "/workspace/RTmanager-v<版本>-<日期>.zip"
 > header = "Authorization: <原样粘贴，勿改写>"
 > header = "Content-Type: application/zip"
 > header = "x-cos-acl: default"
@@ -636,15 +641,14 @@ bash dev-tools/pack-asset.sh
 ```
 项目网盘根目录 dir_id：awpKWAQQgNgW
 资产库使用指南（根目录内 PDF）：file_id = anLmsQKGqReq
-历史资产包样例：RTmanager.zip（2026-10-05，file_id = aKTWrdbhIGKB）
-```
+历史资产包样例：RTmanager.zip（2026-10-05，file_id = aKTWrdbhIGKB）```
 
 #### 两步都做完，才算发布完成
 
 | 检查项 | 期望 |
 |---|---|
 | GitHub Pages | 线上版本号 / 缓存号与本地一致，8 个 PWA 资源全 200 |
-| 项目资产 | 网盘目录内出现当日命名的 zip，回程 SHA256 与本地一致 |
+| 项目资产 | 网盘目录内出现带版本号的 zip（`RTmanager-v<版本>-<日期>.zip`），回程 SHA256 与本地一致 |
 
 ### 6.4 用户侧安装
 

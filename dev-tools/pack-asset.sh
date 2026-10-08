@@ -18,9 +18,16 @@
 #   - 顶层带 RTmanager/ 目录（解压不散落）
 #   - 含 radiotherapy-ward/.git（保留完整提交历史，接手者可 git log）
 #   - 排除：旧资产包自身、*.pyc、__pycache__、.DS_Store
-#   - 文件名：RTmanager-YYYY-MM-DD.zip（当天重复打包自动加 -2 -3 后缀）
+#   - 文件名：RTmanager-v<版本>-<日期>.zip，如 RTmanager-v0.13.2-2026-10-08.zip
 #
-# 产出：/workspace/RTmanager-<日期>.zip（用户工作区可见）
+#   ★ 为什么文件名带版本号（2026-10-08 用户要求）：
+#     纯日期命名（RTmanager-2026-10-08.zip）在「同一天发两次」时必然撞车 ——
+#     要么覆盖旧包、要么被网盘自动改成 "(1)"，两种都很糟：前者丢历史，
+#     后者名字里出现空格和括号，后续脚本引用还要转义。
+#     带上版本号后，同一天发多个版本天然不同名；版本号相同还撞车说明是重复发布，
+#     这时候再加 -2 后缀提醒一下（正常不该发生）。
+#
+# 产出：/workspace/RTmanager-v<版本>-<日期>.zip（用户工作区可见）
 
 set -e
 
@@ -77,12 +84,13 @@ fi
 say "[3/4] 打包"
 
 DATE=$(date +%F)
-NAME="RTmanager-$DATE.zip"
-# 当天重名时加序号，不覆盖已上传的包
+NAME="RTmanager-v$VER-$DATE.zip"
+# 版本号 + 日期仍重名，说明同一版本在同一天重复打包（正常不该发生）。
+# 加序号而不是覆盖，避免悄悄抹掉已上传的同名包。
 n=1
 while [ -e "$OUT_DIR/$NAME" ]; do
   n=$((n + 1))
-  NAME="RTmanager-$DATE-$n.zip"
+  NAME="RTmanager-v$VER-$DATE-$n.zip"
 done
 
 rm -rf "$STAGE"

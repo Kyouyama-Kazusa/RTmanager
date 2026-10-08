@@ -182,7 +182,7 @@ bash dev-tools/release.sh "这次改了什么"
 **再把完整交接包同步到项目资产**（`pack-asset.sh` 只备包，上传需智能体经 MCP 工具完成）：
 
 ```bash
-bash dev-tools/pack-asset.sh        # 校验 → 打包到 /workspace/RTmanager-<日期>.zip → 快检
+bash dev-tools/pack-asset.sh        # 校验 → 打包到 /workspace/RTmanager-v<版本>-<日期>.zip → 快检
 ```
 
 发布前会自动跑两道门禁：
