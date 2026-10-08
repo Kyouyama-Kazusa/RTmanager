@@ -197,6 +197,23 @@ console.log('--- 8. 多次更新场景：v1 → 当前 → 再加载 ---');
 ok(state.patients[1].status === '在治' && state.patients[1].pauses.length === 1, '李秀兰 二次加载后状态与暂停均正确');
 
 console.log('');
+console.log('--- 9. 治疗疗程 courses：老患者补空数组，时间轴自动合成放疗事件 ---');
+/* v0.13 新增 p.courses（手术/化疗/放疗）。老数据完全没有这个字段，
+   迁移后必须是空数组（不能是 undefined），且时间轴要能从既有放疗排程
+   自动派生事件 —— 老患者零迁移即可看到时间轴。 */
+ok(Array.isArray(w.courses), '★ 老患者 courses 被补为空数组（不是 undefined）', typeof w.courses);
+ok(w.courses.length === 0, '★ 老患者 courses 初始为空', w.courses.length);
+const wTl = treatmentTimeline(w);
+ok(wTl.length > 0, '★ 纯放疗老患者时间轴非空（由 computeSchedule 自动派生）', wTl.length);
+ok(wTl.every(e => e.kind === 'radio'), '★ 派生事件全部为放疗', wTl.map(e => e.kind).join(','));
+ok(JSON.stringify(wTl.map(e => e.date)) === JSON.stringify(computeSchedule(w).map(e => e.date)),
+  '★ 派生事件日期与 computeSchedule 逐项一致（放疗排程唯一真相）');
+/* 幂等：二次加载后 courses 仍为空数组，不被写成别的东西 */
+load();
+ok(Array.isArray(state.patients[0].courses) && state.patients[0].courses.length === 0,
+  '★ 二次加载后 courses 仍为空数组（幂等）', state.patients[0].courses);
+
+console.log('');
 console.log('========== 二、数据损坏时的保护 ==========');
 console.log('');
 console.log('--- 场景：本机数据被破坏（无法解析）---');

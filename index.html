@@ -177,6 +177,31 @@ button,input,select,textarea{font:inherit;color:inherit}
 .cal-day-list .row .nm b{font-weight:600}
 .cal-day-list .row .sub2{font-size:12px;color:var(--sub)}
 
+/* ---------- 全程治疗时间轴 ---------- */
+.tl{margin-top:4px}
+.tl-course{display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin:10px 0 4px;padding:6px 8px;background:#f7f9fb;border-radius:9px}
+.tl-course .tl-cname{font-size:13px;font-weight:600;flex:0 1 auto;word-break:break-all}
+.tl-course .tl-cnt{font-size:11px;color:var(--sub);margin-left:auto}
+.tl-course .tl-cacts{display:flex;gap:5px;flex-wrap:wrap}
+.tl-course .tl-cacts .btn{padding:3px 7px;min-height:28px;font-size:12px}
+.tl-gap{height:6px}
+.tl-year{font-size:12px;font-weight:700;color:var(--sub);margin:8px 0 4px;padding-left:7px;border-left:3px solid var(--pri)}
+.tl-item{position:relative;padding:6px 0 10px 16px;border-left:2px solid var(--line);margin-left:5px}
+.tl-item::before{content:"";position:absolute;left:-6px;top:13px;width:9px;height:9px;border-radius:50%;background:var(--pri);box-shadow:0 0 0 2px #fff}
+.tl-item.surgery::before{background:var(--warn)}
+.tl-item.chemo::before{background:var(--danger)}
+.tl-item.sub{padding-left:30px;border-left-style:dashed;opacity:.95}
+.tl-item.sub::before{width:6px;height:6px;left:-4px;top:14px;background:var(--sub)}
+.tl-item .tl-top{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+.tl-item .tl-date{font-size:12px;color:var(--sub);font-variant-numeric:tabular-nums}
+.tl-item .tl-body{font-size:14px;font-weight:600;word-break:break-all;margin-top:1px}
+.tl-item.sub .tl-body{font-weight:400;font-size:13px;color:#4a5464}
+.tl-item .tl-note{font-size:12px;color:var(--sub);margin-top:2px;word-break:break-all}
+.tl-item .tl-acts{display:flex;gap:6px;flex-wrap:wrap;margin-top:6px}
+.tl-item .tl-acts .btn{padding:4px 8px;min-height:30px;font-size:12px}
+.tl-fold{display:inline-flex;align-items:center;gap:3px;font-size:12px;color:var(--pri);cursor:pointer;background:none;border:0;padding:2px 0;min-height:auto}
+.tl-empty{color:var(--sub);font-size:13px;padding:6px 2px}
+
 .mask{position:fixed;inset:0;background:rgba(16,24,40,.42);z-index:40;opacity:0;transition:opacity .18s}
 .mask[hidden]{display:none}
 .mask.show{opacity:1}
@@ -256,7 +281,7 @@ button,input,select,textarea{font:inherit;color:inherit}
 var LS_KEY = 'radiotherapy.v1';
 var SNAP_PREFIX = 'radiotherapy.snap.';
 var SNAP_KEEP = 7;
-var APP_VERSION = '0.12.1';
+var APP_VERSION = '0.13.0';
 
 var SEXES = ['男', '女'];
 var PURPOSES = ['根治性', '术后辅助', '术前新辅助', '姑息性'];
@@ -272,6 +297,12 @@ var GRADES = ['1级（轻）', '2级（中）', '3级（重）', '4级（危及�
 var REACTION_STATUSES = ['未处理', '已处理待复查', '已复查未解除', '已解除', '长期随访'];
 var OPEN_STATUSES = ['未处理', '已处理待复查', '已复查未解除'];
 var PATIENT_STATUSES = ['在治', '治疗完成', '失访'];
+/* 治疗疗程类别：一个患者可先后/同时接受多种治疗，统一挂在 p.courses 下。
+   放疗疗程不回填排程，只用 radioRef 回指顶层 startDate/fractions 等字段，
+   保证 computeSchedule(p) 始终是放疗排程的唯一真相。 */
+var COURSE_KINDS = ['surgery', 'chemo', 'radio'];
+var COURSE_KIND_LABELS = { surgery: '手术', chemo: '化疗', radio: '放疗' };
+var COURSE_KIND_CHIPS = { surgery: 'warn', chemo: 'danger', radio: 'pri' };
 /* 历史版本状态映射（v0.1 → 当前）：避免更新应用后患者的旧状态被静默改写
    v0.1 的「暂停」在新版由 pauses 中断区间表达（状态回到「在治」+ 续存中断记录）；
    v0.1 的「随访中」在新版由「治疗完成」+ 随访计划表达。 */
@@ -526,6 +557,31 @@ function normalize(d) {
         return o;
       }),
       notes: (p.notes || []).map(function (n) { return keepExtra(n, { id: n.id || uid('n'), at: n.at || '', content: n.content || '' }); }),
+      /* 治疗疗程（手术 / 化疗 / 放疗）——全程治疗时间轴的数据源。
+         三层都走 keepExtra：未来给某层加字段时，旧数据不会静默丢失。
+         注意：这里绝不复制放疗排程，放疗疗程只用 radioRef 回指顶层字段。 */
+      courses: (p.courses || []).map(function (c) {
+        return keepExtra(c, {
+          id: c.id || uid('co'),
+          kind: COURSE_KINDS.indexOf(c.kind) >= 0 ? c.kind : 'chemo',
+          title: c.title || '', site: c.site || '', date: c.date || '',
+          startDate: c.startDate || '', endDate: c.endDate || '',
+          regimen: c.regimen || '', radioRef: !!c.radioRef,
+          note: c.note || '', createdVia: c.createdVia || 'manual',
+          cycles: (c.cycles || []).map(function (cy) {
+            return keepExtra(cy, {
+              id: cy.id || uid('cy'), n: parseInt(cy.n, 10) || 1,
+              startDate: cy.startDate || '', endDate: cy.endDate || '', note: cy.note || '',
+              doses: (cy.doses || []).map(function (d) {
+                return keepExtra(d, {
+                  id: d.id || uid('d'), date: d.date || '', drug: d.drug || '',
+                  dose: (d.dose == null ? '' : String(d.dose)), unit: d.unit || '', note: d.note || ''
+                });
+              })
+            });
+          })
+        });
+      }),
       status: st, completedAt: p.completedAt || ''
     }));
   });
@@ -1460,6 +1516,244 @@ function todayItemOf(p) { return scheduleOn(p, todayStr()); }
 function remainCount(p) { return Math.max(0, plannedCount(p) - doneCount(p)); }
 /* 本次放疗的处方总次数（含加量） */
 function totalFractionsOf(p) { return (parseInt(p.fractions, 10) || 0) + (parseInt(p.boostFractions, 10) || 0); }
+
+/* ================= 治疗疗程（手术 / 化疗 / 放疗）=================
+   一个患者可先后/同时接受多种治疗，统一挂在 p.courses 下。
+   设计要点：放疗疗程**不回填任何排程数据**，只由 radioRef 标记，
+   时间轴里的放疗事件一律由 computeSchedule(p) 现算，保证放疗排程唯一真相。 */
+
+/* 取某条疗程；找不到返回 null */
+function findCourse(pid, cid) {
+  var p = getPatient(pid); if (!p) return null;
+  var list = p.courses || [];
+  for (var i = 0; i < list.length; i++) if (list[i].id === cid) return list[i];
+  return null;
+}
+function findCycle(p, cid, n) {
+  var c = findCourse(p.id, cid); if (!c) return null;
+  var num = parseInt(n, 10);
+  for (var i = 0; i < (c.cycles || []).length; i++) if (parseInt(c.cycles[i].n, 10) === num) return c.cycles[i];
+  return null;
+}
+/* 该疗程下一个可用的周期序号（已有周期的最大 n + 1） */
+function nextCycleNo(c) {
+  var mx = 0; (c.cycles || []).forEach(function (cy) { var n = parseInt(cy.n, 10) || 0; if (n > mx) mx = n; });
+  return mx + 1;
+}
+/* 患者是否已有「放疗」疗程条目（用于时间轴自动补位与界面提示） */
+function hasRadioCourse(p) {
+  return (p.courses || []).some(function (c) { return c.kind === 'radio' && c.radioRef; });
+}
+function courseCount(p) { return (p.courses || []).length; }
+function chemoCycleCount(p) {
+  var n = 0;
+  (p.courses || []).forEach(function (c) { if (c.kind === 'chemo') n += (c.cycles || []).length; });
+  return n;
+}
+
+/* 全程治疗时间轴：把 手术节点 / 化疗周期(含给药) / 放疗逐次 三类事件合并排序。
+   返回 [{date, kind, sort, title, label, detail, status, parentId, courseId, cycleId, doseId}]。
+   - status：date <= 今天 → 'done'，否则 'planned'（与放疗 done 口径一致）。
+   - 排序：date 升序；同日按 kind 权重 surgery(0) < chemo(1) < radio(2)。
+   - 纯放疗老患者 courses 为空时，自动合成一条放疗事件流（零迁移即可看时间轴）。
+   - 年份分组的呈现交给 UI 层，这里只保证有序。 */
+function treatmentTimeline(p) {
+  var out = [];
+  var today = todayStr();
+  function st(d) { return (d && d <= today) ? 'done' : 'planned'; }
+  var KIND_W = { surgery: 0, chemo: 1, radio: 2 };
+
+  (p.courses || []).forEach(function (c) {
+    if (c.kind === 'surgery') {
+      out.push({
+        date: dateOnly(c.date), kind: 'surgery', sort: KIND_W.surgery,
+        title: c.title || '手术', label: '', detail: c.note || '', status: st(dateOnly(c.date)),
+        parentId: '', courseId: c.id, cycleId: '', doseId: ''
+      });
+    } else if (c.kind === 'chemo') {
+      (c.cycles || []).forEach(function (cy) {
+        var cd = dateOnly(cy.startDate);
+        var drugTxt = (cy.doses || []).map(function (d) {
+          return (d.drug || '给药') + (d.dose ? ' ' + d.dose + (d.unit || '') : '');
+        }).join(' ＋ ');
+        out.push({
+          date: cd, kind: 'chemo', sort: KIND_W.chemo,
+          title: (c.title || '化疗') + ' · 第 ' + (parseInt(cy.n, 10) || 1) + ' 周期',
+          label: c.regimen || '',
+          detail: drugTxt || cy.note || '',
+          status: st(cd), parentId: '',
+          courseId: c.id, cycleId: cy.id, doseId: '',
+          cycleNo: parseInt(cy.n, 10) || 1,
+          cycleEnd: dateOnly(cy.endDate), cycleNote: cy.note || ''
+        });
+        (cy.doses || []).forEach(function (d) {
+          out.push({
+            date: dateOnly(d.date), kind: 'chemo', sort: KIND_W.chemo + 0.5,
+            title: d.drug || '给药',
+            label: (d.dose ? d.dose + (d.unit || '') : ''),
+            detail: d.note || '', status: st(dateOnly(d.date)),
+            parentId: cy.id, parentNo: parseInt(cy.n, 10) || 1,
+            courseId: c.id, cycleId: cy.id, doseId: d.id
+          });
+        });
+      });
+    }
+  });
+
+  /* 放疗：无论 courses 里有没有 radio 条目，都从顶层排程派生（唯一真相）。
+     若用户已建 radio 疗程，用其 title 作前缀；否则用默认名。 */
+  var radioCourse = (p.courses || []).filter(function (c) { return c.kind === 'radio'; })[0] || null;
+  var radioTitle = (radioCourse && radioCourse.title) ? radioCourse.title : '放疗';
+  computeSchedule(p).forEach(function (x) {
+    out.push({
+      date: x.date, kind: 'radio', sort: KIND_W.radio,
+      title: radioTitle + ' · 第 ' + x.fraction + ' 次' + (x.boost ? '（加量）' : ''),
+      label: '', detail: x.extra ? ('加照：' + (x.reason || '')) : '',
+      status: x.done ? 'done' : 'planned',
+      parentId: '', courseId: radioCourse ? radioCourse.id : '',
+      cycleId: '', doseId: '', radio: { extra: x.extra, boost: x.boost }
+    });
+  });
+
+  out.sort(function (a, b) {
+    if (a.date !== b.date) return a.date < b.date ? -1 : 1;
+    if (a.sort !== b.sort) return a.sort - b.sort;
+    return String(a.title).localeCompare(String(b.title));
+  });
+  return out;
+}
+/* 时间轴是否真的存在可展示内容（纯放疗但未填 startDate 的患者应为空） */
+function timelineEmpty(p) { return treatmentTimeline(p).length === 0; }
+
+/* 渲染全程治疗时间轴卡片。
+   分层：先按「疗程」分组给出疗程头（承载疗程级操作：加周期 / 编辑 / 删除），
+   再在该疗程下按日期列出事件（手术节点 / 化疗周期+给药 / 放疗逐次）。
+   要点（血的教训）：每个按钮都必须自带 data-id/data-n/data-dose，
+   不得依赖 view.pid —— 时间轴可能在不同语境下打开。 */
+function timelineHtml(p) {
+  var ev = treatmentTimeline(p);
+  var h = '<div class="card"><div class="section-title">全程治疗时间轴' +
+    '<span style="display:flex;gap:6px;align-items:center">' +
+    '<span class="chip sm">共 ' + ev.length + ' 项</span>' +
+    '<button class="btn sm" data-act="timeline-dir" data-dir="' + (view.tlDesc ? 'asc' : 'desc') + '">' +
+    (view.tlDesc ? '↑ 正序' : '↓ 倒序') + '</button>' +
+    '<button class="btn sm addbtn" data-act="course-add">＋ 疗程</button>' +
+    '</span></div>';
+
+  var courses = p.courses || [];
+
+  /* 疗程头：承载疗程级操作。放疗疗程也在这里给「疗程备注」。 */
+  function courseHeader(c, count) {
+    var s = '<div class="tl-course">' +
+      '<span class="chip ' + (COURSE_KIND_CHIPS[c.kind] || '') + ' sm">' + (COURSE_KIND_LABELS[c.kind] || '') + '</span>' +
+      '<span class="tl-cname">' + esc(c.title || COURSE_KIND_LABELS[c.kind]) + '</span>' +
+      (c.regimen ? '<span class="chip sm">' + esc(c.regimen) + '</span>' : '') +
+      '<span class="tl-cnt">' + (count != null ? count + ' 项' : '') + '</span>' +
+      '<span class="tl-cacts">' +
+      (c.kind === 'chemo' ? '<button class="btn sm addbtn" data-act="cycle-add" data-id="' + esc(c.id) + '">＋ 周期</button>' : '') +
+      (c.kind === 'radio' ? '<button class="btn sm" data-act="course-edit" data-id="' + esc(c.id) + '">备注</button>' : '') +
+      '<button class="btn sm" data-act="course-edit" data-id="' + esc(c.id) + '">编辑</button>' +
+      '<button class="btn sm danger" data-act="course-del" data-id="' + esc(c.id) + '">删除</button>' +
+      '</span></div>';
+    return s;
+  }
+
+  if (!ev.length) {
+    h += '<div class="tl-empty">暂无治疗记录。点右上角「＋ 疗程」添加手术、化疗或放疗。</div>';
+    /* 即使无事件（如化疗疗程刚建、还没排周期），也要列出疗程头以便继续录入 */
+    if (courses.length) {
+      courses.forEach(function (c) {
+        h += courseHeader(c, c.kind === 'chemo' ? (c.cycles || []).length : null);
+      });
+    }
+    h += '</div>';
+    return h;
+  }
+
+  /* 按疗程分组：先为每个疗程建组（保证「无事件的疗程」也能渲染出来继续录入），
+     再把事件挂到对应组；无 courseId 的放疗事件（老患者未建 radio 疗程）单独成组。 */
+  var groups = [];
+  var idx = {};
+  courses.forEach(function (c) {
+    idx[c.id] = { c: c, ev: [] };
+    groups.push(idx[c.id]);
+  });
+  var events = view.tlDesc ? ev.slice().reverse() : ev;
+  var implicitRadio = null;
+  events.forEach(function (x) {
+    if (x.courseId && idx[x.courseId]) { idx[x.courseId].ev.push(x); return; }
+    /* 无归属：把放疗事件归入隐式组（老患者 courses 为空） */
+    if (!implicitRadio) { implicitRadio = { c: null, ev: [] }; groups.push(implicitRadio); }
+    implicitRadio.ev.push(x);
+  });
+
+  var printed = 0;
+  groups.forEach(function (g) {
+    var c = g.c;
+    /* 有事件的组一定打印；无事件的组也打印（便于继续录入），
+       但如果时间轴完全为空已在上面的分支处理，这里只跳过 null 组的空情况 */
+    if (!c) {
+      if (!g.ev.length) return;
+      h += (printed ? '<div class="tl-gap"></div>' : '');
+      h += '<div class="tl-course"><span class="chip pri sm">放疗</span>' +
+        '<span class="tl-cname">放疗排程</span><span class="tl-cnt">' + g.ev.length + ' 项</span></div>';
+    } else {
+      h += (printed ? '<div class="tl-gap"></div>' : '');
+      h += courseHeader(c, c.kind === 'chemo' ? (c.cycles || []).length : g.ev.length);
+    }
+    printed++;
+
+    var lastYear = '';
+    g.ev.forEach(function (x) {
+      var year = (x.date || '').slice(0, 4);
+      if (year && year !== lastYear) { h += '<div class="tl-year">' + esc(year) + ' 年</div>'; lastYear = year; }
+
+      var isSub = !!x.parentId;
+      var cls = 'tl-item ' + x.kind + (isSub ? ' sub' : '');
+      h += '<div class="' + cls + '">';
+      h += '<div class="tl-top">';
+      if (!isSub) h += '<span class="chip ' + (COURSE_KIND_CHIPS[x.kind] || '') + ' sm">' + (COURSE_KIND_LABELS[x.kind] || '') + '</span>';
+      h += '<span class="tl-date">' + esc(mdLabel(x.date) || '未定日期') + '</span>';
+      if (x.status === 'planned' && !isSub) h += '<span class="chip sm">计划中</span>';
+      h += '</div>';
+      h += '<div class="tl-body">' + esc(x.title || '') + (x.label ? ' <span class="chip sm">' + esc(x.label) + '</span>' : '') + '</div>';
+      if (x.detail) h += '<div class="tl-note">' + esc(x.detail) + '</div>';
+
+      /* 化疗周期：折叠展开给药明细 */
+      if (x.kind === 'chemo' && x.cycleId && !isSub) {
+        var hasDoses = ev.some(function (y) { return y.parentId === x.cycleId; });
+        if (hasDoses) {
+          var opened = !!view.tlOpen[x.cycleId];
+          h += '<div><button class="tl-fold" data-act="timeline-fold" data-key="' + esc(x.cycleId) + '">' +
+            (opened ? '▾ 收起给药' : '▸ 展开给药') + '</button></div>';
+        }
+      }
+
+      /* 事件级操作 */
+      if (!isSub && x.kind === 'surgery') {
+        h += '<div class="tl-acts">' +
+          '<button class="btn sm" data-act="course-edit" data-id="' + esc(x.courseId) + '">改日期</button>' +
+          '</div>';
+      } else if (!isSub && x.kind === 'chemo') {
+        h += '<div class="tl-acts">' +
+          '<button class="btn sm addbtn" data-act="dose-add" data-id="' + esc(x.courseId) + '" data-n="' + x.cycleNo + '">＋ 给药</button>' +
+          '<button class="btn sm" data-act="cycle-edit" data-id="' + esc(x.courseId) + '" data-n="' + x.cycleNo + '">编辑周期</button>' +
+          '<button class="btn sm danger" data-act="cycle-del" data-id="' + esc(x.courseId) + '" data-n="' + x.cycleNo + '">删除</button>' +
+          '</div>';
+      } else if (isSub) {
+        h += '<div class="tl-acts">' +
+          '<button class="btn sm" data-act="dose-edit" data-id="' + esc(x.courseId) + '" data-n="' + x.parentNo + '" data-dose="' + esc(x.doseId) + '">编辑</button>' +
+          '<button class="btn sm danger" data-act="dose-del" data-id="' + esc(x.courseId) + '" data-n="' + x.parentNo + '" data-dose="' + esc(x.doseId) + '">删除</button>' +
+          '</div>';
+      }
+      h += '</div>';
+    });
+  });
+
+  h += '<div class="hint" style="margin-top:6px">放疗部分由排程自动推算，与上方治疗进度一致；手术与化疗为人工录入。</div>';
+  h += '</div>';
+  return h;
+}
 /* 提前终止了多少次未做（原计划 − 实际排出的次数） */
 function stoppedShortOf(p) {
   if (!p.stopDate) return 0;
@@ -1553,7 +1847,7 @@ function buildTodo() {
 }
 
 /* ================= 渲染：框架 ================= */
-var view = { page: 'tab', tab: 'ward', pid: null, calY: 0, calM: 0 };
+var view = { page: 'tab', tab: 'ward', pid: null, calY: 0, calM: 0, tlDesc: false, tlOpen: {} };
 (function () { var t = new Date(); view.calY = t.getFullYear(); view.calM = t.getMonth() + 1; })();
 
 function render() {
@@ -1823,6 +2117,9 @@ function renderPatientPage() {
     (p.physician ? '<div class="kv"><div class="k">主管医生</div><div class="v">' + esc(p.physician) + '</div></div>' : '') +
     (p.simDate ? '<div class="kv"><div class="k">定位日期</div><div class="v">' + dateOnly(p.simDate) + (p.position ? ' · ' + esc(p.position) : '') + '</div></div>' : '') +
     '</div>';
+
+  /* 全程治疗时间轴（手术 / 化疗 / 放疗） */
+  h += timelineHtml(p);
 
   /* 治疗进度 + 个人日历 */
   if (!p.startDate || !tot) {
@@ -3029,9 +3326,128 @@ function sheetExtra(p) {
   });
 }
 
-/* 加量：原计划结束后追加若干次（常见于局部加量 boost） */
-function sheetBoost(p) {
+/* ================= 弹层：治疗疗程（手术 / 化疗 / 放疗）=================
+   化疗以「疗程 → 周期 → 给药」三层录入；放疗只记备注（排程仍由顶层字段决定） */
+
+/* 疗程：新增 / 编辑。cid 为空表示新增 */
+function sheetCourse(p, course) {
   if (!p) { closeSheet(); return; }
+  var c = course || { kind: 'chemo', title: '', site: '', date: todayStr(), regimen: '', note: '' };
+  var isNew = !course;
+  var kindOpts = COURSE_KINDS;
+  function kindLabel(k) { return COURSE_KIND_LABELS[k] || k; }
+
+  /* 下拉用中文标签，内部值仍是枚举 */
+  var body = field('类型', '<select name="kind">' + kindOpts.map(function (k) {
+    return '<option value="' + k + '"' + (k === c.kind ? ' selected' : '') + '>' + kindLabel(k) + '</option>';
+  }).join('') + '</select>');
+  body += field('名称', textInput('title', c.title, '如 根治性切除 / 第1程化疗 / 原发灶放疗'));
+  body += field('备注', areaInput('note', c.note, '医院、术者、病理、方案说明等'));
+
+  openSheet({
+    title: isNew ? '新增治疗疗程' : '编辑治疗疗程', okText: '保存',
+    body: body +
+      '<div class="hint" style="line-height:1.7">「' + kindLabel(c.kind) + '」疗程的详细日期请在时间轴上继续录入' +
+      (c.kind === 'chemo' ? '（化疗周期与给药）' : (c.kind === 'surgery' ? '（手术日期）' : '（放疗日期取现有排程）')) + '。</div>',
+    onSave: function (v) {
+      var kind = COURSE_KINDS.indexOf(v.kind) >= 0 ? v.kind : 'chemo';
+      var title = String(v.title || '').trim();
+      if (!title) { toast('请填写疗程名称'); return false; }
+      var data = { kind: kind, title: title, note: String(v.note || '').trim() };
+      if (kind === 'surgery' && isNew) data.date = c.date || todayStr();
+      if (kind === 'radio') data.radioRef = true;
+      upsertCourse(p.id, course ? course.id : null, data);
+      /* 切换成 surgery 且没有日期时，立即弹手术日期录入 */
+      if (kind === 'surgery' && isNew) {
+        var created = p.courses[p.courses.length - 1];
+        toast('已新增手术疗程，请填写手术日期');
+        sheetSurgery(p, created);
+        return false;
+      }
+      toast('已保存');
+    }
+  });
+}
+
+/* 手术日期：单独一步（用户选择「仅日期 + 术式」，术式即 title） */
+function sheetSurgery(p, course) {
+  if (!p || !course) { closeSheet(); return; }
+  openSheet({
+    title: '手术日期', okText: '保存',
+    body: field('手术日期', textInput('date', course.date || todayStr(), '', 'date')) +
+      field('术式', textInput('title', course.title, '如 根治性切除'),
+        '医院、术者、病理等请写在备注里'),
+    onSave: function (v) {
+      if (!v.date) { toast('请填写手术日期'); return false; }
+      upsertCourse(p.id, course.id, { date: dateOnly(v.date), title: String(v.title || '').trim() || course.title });
+      toast('已保存');
+    }
+  });
+}
+
+/* 化疗周期：新增 / 编辑 */
+function sheetCycle(p, cid, n) {
+  if (!p) { closeSheet(); return; }
+  var c = findCourse(p.id, cid);
+  if (!c) { closeSheet(); return; }
+  var cy = n ? findCycle(p, cid, n) : null;
+  var isNew = !cy;
+  var autoN = nextCycleNo(c);
+  var d = cy || { n: autoN, startDate: '', endDate: '', note: '' };
+  openSheet({
+    title: (isNew ? '新增化疗周期' : '编辑第 ' + d.n + ' 周期'), okText: '保存',
+    body: '<div class="hint" style="margin-bottom:8px">' + esc(c.title || '化疗') + (c.regimen ? ' · ' + esc(c.regimen) : '') + '</div>' +
+      '<div class="field2">' + field('周期序号', numberInput('n', d.n, '', '1')) +
+      field('开始日期', textInput('startDate', d.startDate, '', 'date')) + '</div>' +
+      field('结束日期', textInput('endDate', d.endDate, '', 'date'), '可留空') +
+      field('备注', areaInput('note', d.note, '如 剂量调整、延迟原因')),
+    onSave: function (v) {
+      var num = parseInt(v.n, 10);
+      if (!num || num <= 0) { toast('请填写有效的周期序号'); return false; }
+      if (!v.startDate) { toast('请填写周期开始日期'); return false; }
+      if (v.endDate && v.endDate < v.startDate) { toast('结束日期不能早于开始日期'); return false; }
+      /* 序号冲突校验（编辑时排除自身） */
+      if (findCycle(p, cid, num) && (!cy || parseInt(cy.n, 10) !== num)) { toast('第 ' + num + ' 周期已存在'); return false; }
+      upsertCycle(p.id, cid, cy ? cy.n : null, {
+        n: num, startDate: dateOnly(v.startDate), endDate: dateOnly(v.endDate), note: String(v.note || '').trim()
+      });
+      toast('已保存');
+    }
+  });
+}
+
+/* 化疗给药：新增 / 编辑 */
+function sheetDose(p, cid, n, did) {
+  if (!p) { closeSheet(); return; }
+  var cy = findCycle(p, cid, n);
+  if (!cy) { closeSheet(); return; }
+  var d = null;
+  (cy.doses || []).forEach(function (x) { if (x.id === did) d = x; });
+  var isNew = !d;
+  d = d || { date: cy.startDate || todayStr(), drug: '', dose: '', unit: 'mg/m2', note: '' };
+  openSheet({
+    title: (isNew ? '新增给药' : '编辑给药'), okText: '保存',
+    body: '<div class="hint" style="margin-bottom:8px">第 ' + cy.n + ' 周期' + (cy.startDate ? ' · ' + esc(cy.startDate) : '') + '</div>' +
+      field('给药日期', textInput('date', d.date, '', 'date')) +
+      field('药物', textInput('drug', d.drug, '如 紫杉醇 / 顺铂')) +
+      '<div class="field2">' + field('剂量', numberInput('dose', d.dose, '如 175')) +
+      field('单位', textInput('unit', d.unit, '如 mg/m2 / mg')) + '</div>' +
+      field('备注', areaInput('note', d.note, '如 预处理、减量')),
+    onSave: function (v) {
+      if (!v.date) { toast('请填写给药日期'); return false; }
+      if (!String(v.drug || '').trim()) { toast('请填写药物名称'); return false; }
+      upsertDose(p.id, cid, n, d.id, {
+        date: dateOnly(v.date), drug: String(v.drug).trim(),
+        dose: String(v.dose == null ? '' : v.dose).trim(), unit: String(v.unit || '').trim(),
+        note: String(v.note || '').trim()
+      });
+      toast('已保存');
+    }
+  });
+}
+
+/* 加量：原计划结束后追加若干次（常见于局部加量 boost） */
+function sheetBoost(p) {  if (!p) { closeSheet(); return; }
   var base = parseInt(p.fractions, 10) || 0;
   var cur = parseInt(p.boostFractions, 10) || 0;
   var endBefore = scheduleEnd(p);
@@ -3692,6 +4108,81 @@ function nextAfter(p, f) {
 function delFollowup(pid, fid) { var p = getPatient(pid); if (!p) return; if (!confirm('确定删除这条随访计划？')) return; p.followupPlans = (p.followupPlans || []).filter(function (f) { return f.id !== fid; }); save(); render(); toast('已删除'); }
 function delPause(pid, id) { var p = getPatient(pid); if (!p) return; if (!confirm('确定删除这条中断记录？日程将重算。')) return; p.pauses = (p.pauses || []).filter(function (x) { return x.id !== id; }); save(); render(); toast('已删除'); }
 function delExtra(pid, id) { var p = getPatient(pid); if (!p) return; if (!confirm('确定删除这条加照记录？')) return; p.extras = (p.extras || []).filter(function (x) { return x.id !== id; }); save(); render(); toast('已删除'); }
+
+/* ================= 治疗疗程的增删（手术 / 化疗 / 放疗）================= */
+function upsertCourse(pid, cid, data) {
+  var p = getPatient(pid); if (!p) return null;
+  p.courses = p.courses || [];
+  var c = cid ? findCourse(pid, cid) : null;
+  if (c) {
+    Object.keys(data).forEach(function (k) { c[k] = data[k]; });
+  } else {
+    data.id = data.id || uid('co');
+    data.cycles = data.cycles || [];
+    p.courses.push(data);
+    c = data;
+  }
+  save(); render();
+  return c;
+}
+function delCourse(pid, cid) {
+  var p = getPatient(pid); if (!p) return;
+  var c = findCourse(pid, cid);
+  if (!c) return;
+  if (!confirm('确定删除这条「' + (COURSE_KIND_LABELS[c.kind] || '疗程') + '」记录？其下所有周期与给药记录都会一并删除。')) return;
+  p.courses = (p.courses || []).filter(function (x) { return x.id !== cid; });
+  save(); render(); toast('已删除');
+}
+function upsertCycle(pid, cid, n, data) {
+  var p = getPatient(pid); if (!p) return null;
+  var c = findCourse(pid, cid); if (!c) return null;
+  c.cycles = c.cycles || [];
+  var cy = n ? findCycle(p, cid, n) : null;
+  if (cy) {
+    Object.keys(data).forEach(function (k) { cy[k] = data[k]; });
+  } else {
+    data.id = data.id || uid('cy');
+    data.n = parseInt(data.n, 10) || nextCycleNo(c);
+    data.doses = data.doses || [];
+    c.cycles.push(data);
+    /* 保持周期按 n 升序，便于展示 */
+    c.cycles.sort(function (a, b) { return (parseInt(a.n, 10) || 0) - (parseInt(b.n, 10) || 0); });
+    cy = data;
+  }
+  save(); render();
+  return cy;
+}
+function delCycle(pid, cid, n) {
+  var p = getPatient(pid); if (!p) return;
+  var c = findCourse(pid, cid); if (!c) return;
+  var num = parseInt(n, 10);
+  if (!confirm('确定删除「第 ' + num + ' 周期」？该周期下的给药记录会一并删除。')) return;
+  c.cycles = (c.cycles || []).filter(function (cy) { return (parseInt(cy.n, 10) || 0) !== num; });
+  save(); render(); toast('已删除');
+}
+function upsertDose(pid, cid, n, did, data) {
+  var p = getPatient(pid); if (!p) return null;
+  var cy = findCycle(p, cid, n); if (!cy) return null;
+  cy.doses = cy.doses || [];
+  var d = null;
+  for (var i = 0; i < cy.doses.length; i++) if (cy.doses[i].id === did) d = cy.doses[i];
+  if (d) {
+    Object.keys(data).forEach(function (k) { d[k] = data[k]; });
+  } else {
+    data.id = data.id || uid('d');
+    cy.doses.push(data); d = data;
+    cy.doses.sort(function (a, b) { return String(a.date).localeCompare(String(b.date)); });
+  }
+  save(); render();
+  return d;
+}
+function delDose(pid, cid, n, did) {
+  var p = getPatient(pid); if (!p) return;
+  var cy = findCycle(p, cid, n); if (!cy) return;
+  if (!confirm('确定删除这条给药记录？')) return;
+  cy.doses = (cy.doses || []).filter(function (d) { return d.id !== did; });
+  save(); render(); toast('已删除');
+}
 function completePatient(p) {
   if (!p) { closeSheet(); return; }
   var end = scheduleEnd(p);
@@ -4058,6 +4549,30 @@ function bind() {
     'add-stop': function () { sheetStop(getPatient(view.pid)); },
     'cancel-stop': function () { cancelStop(getPatient(view.pid)); },
     'extra-del': function (el) { delExtra(view.pid, el.dataset.id); },
+    /* 治疗疗程（手术 / 化疗 / 放疗）——按钮自带参数，view.pid 仅兜底 */
+    'course-add': function () { sheetCourse(getPatient(view.pid), null); },
+    'course-edit': function (el) {
+      var c = findCourse(view.pid, el.dataset.id);
+      if (!c) { toast('未找到该疗程'); return; }
+      if (c.kind === 'surgery') sheetSurgery(getPatient(view.pid), c);
+      else sheetCourse(getPatient(view.pid), c);
+    },
+    'course-del': function (el) { delCourse(view.pid, el.dataset.id); },
+    'cycle-add': function (el) { sheetCycle(getPatient(view.pid), el.dataset.id, null); },
+    'cycle-edit': function (el) { sheetCycle(getPatient(view.pid), el.dataset.id, parseInt(el.dataset.n, 10)); },
+    'cycle-del': function (el) { delCycle(view.pid, el.dataset.id, parseInt(el.dataset.n, 10)); },
+    'dose-add': function (el) { sheetDose(getPatient(view.pid), el.dataset.id, parseInt(el.dataset.n, 10), null); },
+    'dose-edit': function (el) { sheetDose(getPatient(view.pid), el.dataset.id, parseInt(el.dataset.n, 10), el.dataset.dose); },
+    'dose-del': function (el) { delDose(view.pid, el.dataset.id, parseInt(el.dataset.n, 10), el.dataset.dose); },
+    'timeline-dir': function (el) {
+      view.tlDesc = el.dataset.dir === 'desc';
+      render();
+    },
+    'timeline-fold': function (el) {
+      var k = el.dataset.key;
+      if (view.tlOpen[k]) delete view.tlOpen[k]; else view.tlOpen[k] = 1;
+      render();
+    },
     'cal-prev': function () { shiftCal(-1); },
     'cal-next': function () { shiftCal(1); },
     'cal-today': function () { var t = new Date(); view.calY = t.getFullYear(); view.calM = t.getMonth() + 1; render(); },

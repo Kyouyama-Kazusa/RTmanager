@@ -219,6 +219,7 @@
 | `status` | enum | **在治**/**治疗完成**/**失访** |
 | `completedAt` | ISO string | 完成时间 |
 | `notes` | `Note[]` | 备注 / 交班记录 |
+| `courses` | `Course[]` | **治疗疗程（手术 / 化疗 / 放疗）**，全程治疗时间轴的数据源（见 3.5） |
 | ⋯ | 任意 | **其他字段由 `keepExtra` 原样保留**（见原则 2） |
 
 **子结构：**
@@ -231,6 +232,12 @@ Reaction = { id, site, grade, foundAt, content, plan, planAt,
              status, nextCheckAt, followups: [{id, at, content}], closedAt, readAt }
 Followup = { id, baseDate, offsetN, offsetUnit, dueDate, note, done, doneAt, tplBase? }
 Note     = { id, at, content }
+/* 治疗疗程：kind 决定用哪些字段 */
+Course   = { id, kind:'surgery'|'chemo'|'radio', title, site, date,
+             startDate, endDate, regimen, radioRef, note, createdVia,
+             cycles: Cycle[] }                   // 仅 kind==='chemo' 有意义
+Cycle    = { id, n, startDate, endDate, note, doses: Dose[] }
+Dose     = { id, date, drug, dose, unit, note }
 ```
 
 ### 3.4 ⚠ `baseDate === 'TEMPLATE'` 影子行陷阱
@@ -248,7 +255,29 @@ realFollowups(p)              // 已封装，直接用它
 p.followupPlans.forEach(...)  // 会读到影子行
 ```
 
-### 3.5 覆盖层模式（节假日 / 调休 / 模板）
+### 3.5 治疗疗程 `courses[]` 与放疗唯一真相
+
+一个患者可先后/同时接受多种治疗（手术、化疗、放疗），统一挂在 `p.courses[]` 下，用 `kind` 区分。
+
+**最关键的设计约束：放疗疗程绝不回填排程数据。**
+
+放疗已有完整的排程逻辑（`startDate` + `fractions` + `pauses` + `extras` + `boostFractions` + `stopDate`），
+`computeSchedule(p)` 是它的**唯一真相**。因此放疗疗程只用 `radioRef: true` 标记，
+**不复制任何排程字段**；全程时间轴里的放疗事件全部由 `computeSchedule(p)` 现场派生：
+
+```js
+// ✅ 正确：放疗事件从排程派生
+computeSchedule(p).forEach(x => out.push({ date: x.date, kind: 'radio', ... }))
+// ❌ 错误：在 course 里再存一份放疗排程 —— 会与顶层字段打架（第二真相）
+```
+
+`treatmentTimeline(p)` 三路聚合（手术节点 / 化疗周期+给药 / 放疗逐次），
+**纯放疗的老患者 `courses` 为空时也会自动合成放疗事件**，因此老数据零迁移即可看到时间轴。
+
+**化疗首版为手动逐周期录入**；`Course` 里预留了 `intervalDays` / `planCycles` / `createdVia` 等字段占位，
+日后若要做自动排程可无痛升级（届时**必须升 `SCHEMA_VERSION`**）。
+
+### 3.6 覆盖层模式（节假日 / 调休 / 模板）
 
 内置数据（`BUILTIN_HOLIDAYS` 等）与用户自定义**分离存储**，用户的自定义存在独立覆盖层里：
 
@@ -404,7 +433,7 @@ dueDate = 基准日 + offsetN × offsetUnit
 
 ### 5.2 开发期工具（Node.js，仅本地跑测试用）
 
-`dev-tools/` 下有 18 个测试套件 + 3 个脚本。它们**只读取 `index.html`，从不修改源码**。
+`dev-tools/` 下有 19 个测试套件 + 3 个脚本。它们**只读取 `index.html`，从不修改源码**。
 
 | 工具 | 用途 |
 |---|---|
@@ -471,7 +500,7 @@ bash dev-tools/release.sh "这次改了什么"
 
 | 步骤 | 内容 |
 |---|---|
-| 1/5 | 回归测试 18 个套件（含兼容性门禁） |
+| 1/5 | 回归测试 19 个套件（含兼容性门禁） |
 | 2/5 | 跨日期扫描（排程相关套件 × 4 个日期） |
 | 3/5 | **自动递增** `sw.js` 的 `CACHE` 版本号（仅应用资源有改动时） |
 | 4/5 | `git commit` + `git push` |
@@ -566,7 +595,7 @@ out.patients.push(keepExtra(p, {
 
 **约束**：兼容性门禁**契约 4** 会注入一个带未知字段的患者，断言它原样保留。任何绕过 `keepExtra` 的重写都会被拦下。
 
-**同样适用于所有子结构**：`pauses`、`extras`、`reactions`、`followupPlans`、`notes` 条目都走 `keepExtra`。契约 3 逐条守护。
+**同样适用于所有子结构**：`pauses`、`extras`、`reactions`、`followupPlans`、`notes`、`courses`（及周期/给药两层）条目都走 `keepExtra`。契约 3 逐条守护。
 
 ---
 
@@ -718,7 +747,7 @@ v0.1 的「暂停」在新版语义里由 `pauses` 中断区间表达，所以�
 
 **规则**：任何改动都要跑测试；**涉及兼容性的改动还要做故障注入**。
 
-**18 个套件 / 1,335 项断言**全部只读 `index.html`，用 DOM 打桩 + `eval` 加载源码。
+**19 个套件 / 1,433 项断言**全部只读 `index.html`，用 DOM 打桩 + `eval` 加载源码。
 
 **最关键的一条经验**（踩过两次坑）：
 
@@ -795,7 +824,7 @@ function todayItemOf(p) { ... }        // 简单函数：一行说明即可
 - [ ] 动了云同步协议吗？→ 检查老备份/老应用双向兼容，且 **Token 与密码没进 payload**
 - [ ] 有没有遍历 `followupPlans` 时忘了过滤 `TEMPLATE` 影子行？
 - [ ] 有没有重复逻辑可以收口到一个函数？
-- [ ] 18 套件全绿？跨日期扫描全绿？
+- [ ] 19 套件全绿？跨日期扫描全绿？
 - [ ] 改同步逻辑的话，做故障注入了吗？
 - [ ] 走 `release.sh` 发布，缓存号已递增？
 

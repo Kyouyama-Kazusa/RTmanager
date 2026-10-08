@@ -620,7 +620,12 @@ async function drain(maxMs) {
     seedPatient();
     cfgReady({ lastAutoSyncAt: '', lastAutoSyncState: '' });
     gists = {}; resetNet();
-    autoSyncTick('k'); await tick(60);
+    autoSyncTick('k');
+    /* 必须等静默上传真正收尾：PBKDF2 加密（25 万次迭代）耗时不定，
+       只 tick(60) 会在慢机器/并发跑时抢跑，导致下面读 gists 为空而崩。
+       用 drain() 显式等 autoSyncBusy 归零。 */
+    await drain();
+    await tick(60);
     const cfgKeysAfter = Object.keys(store).filter(function (k) { return k.indexOf('radiotherapy.sync') === 0; }).join(',');
     ok(cfgKeysAfter === 'radiotherapy.sync', '★ 自动同步的配置只写在 radiotherapy.sync 这一个键里', cfgKeysAfter);
     ok(cfgKeysBefore === cfgKeysAfter, '同步前后配置键名集合不变（未新增键）');
@@ -645,9 +650,14 @@ async function drain(maxMs) {
 
     /* 静默上传后，加密内容仍不含明文 */
     const gid = syncCfg().gistId;
-    const content = gists[gid].files[SYNC_FILE].content;
-    ok(content.indexOf('张三') < 0, '★ 自动上传的仍是密文（不含明文姓名）');
-    ok(JSON.parse(content).app === 'RTmanager', '密文带应用标识');
+    const gEntry = gists[gid] || (gists[gid] = { files: {} });
+    const gFile = gEntry.files[SYNC_FILE] || (gEntry.files[SYNC_FILE] = { content: '' });
+    const content = gFile.content;
+    if (!content) await drain();                 /* 再给一次机会，避免抢跑 */
+    const content2 = (gists[gid] && gists[gid].files[SYNC_FILE] && gists[gid].files[SYNC_FILE].content) || '';
+    ok(!!content2, '★ 静默上传确实写入了云端 gist');
+    ok(content2.indexOf('张三') < 0, '★ 自动上传的仍是密文（不含明文姓名）');
+    ok(content2 && JSON.parse(content2).app === 'RTmanager', '密文带应用标识');
   }
 
   console.log('');

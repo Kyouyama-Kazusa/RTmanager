@@ -124,6 +124,10 @@ group('契约 3 · normalize 只补齐不丢弃');
     ok(/keepExtra\(r,/.test(body), '副反应条目走 keepExtra');
     const fCount = (body.match(/keepExtra\(f,/g) || []).length;
     ok(fCount >= 1, '随访条目走 keepExtra', fCount);
+    /* 治疗疗程三层（疗程 / 周期 / 给药）都必须走 keepExtra */
+    ok(/keepExtra\(c,/.test(body), '★ 疗程条目走 keepExtra');
+    ok(/keepExtra\(cy,/.test(body), '★ 化疗周期条目走 keepExtra');
+    ok(/keepExtra\(d,/.test(body), '★ 化疗给药条目走 keepExtra');
     ok(!/ patients: d\.patients \}/.test(body), '未直接透传未归一化的 patients');
   }
 }
@@ -141,7 +145,10 @@ group('契约 4 · 未知的未来字段必须原样保留');
       id: 'pf1', name: '未来字段', status: '在治', startDate: '2026-03-02', fractions: '30',
       treatDays: [1, 2, 3, 4, 5],
       someFieldFromV1_0: '下版本才有的新标量',
-      someObjectFromV1_0: { nested: { deep: 42 } }
+      someObjectFromV1_0: { nested: { deep: 42 } },
+      futureCourses: [{ id: 'fc1', kind: 'chemo', title: '未来疗程',
+        cycles: [{ id: 'fcy1', n: 1, startDate: '2026-03-02',
+          doses: [{ id: 'fd1', date: '2026-03-02', drug: '未来药', dose: '100' }] }] }]
     }]
   };
   const out = normalize(JSON.parse(JSON.stringify(fut)));
@@ -149,12 +156,15 @@ group('契约 4 · 未知的未来字段必须原样保留');
   ok(p.someFieldFromV1_0 === '下版本才有的新标量', '★ 未知标量字段保留', p.someFieldFromV1_0);
   ok(p.someObjectFromV1_0 && p.someObjectFromV1_0.nested.deep === 42, '★ 未知对象字段保留');
   ok(p.name === '未来字段' && p.fractions === '30', '已知字段不受影响');
+  /* 未知字段直接放进 courses 时，也必须原样保留（防止未来字段被 normalize 吃掉） */
+  ok(p.futureCourses && p.futureCourses[0].cycles[0].doses[0].drug === '未来药',
+    '★ courses 里的未知字段原样保留');
 
   /* 已知字段的完整性：v0.9 的全部业务字段都要在 */
   const must = ['id', 'mrn', 'name', 'sex', 'age', 'physician', 'diagnosis', 'purpose', 'technique',
     'simDate', 'position', 'planStatus', 'totalDose', 'fractions', 'dosePerFraction', 'startDate',
     'treatDays', 'pauses', 'extras', 'boostFractions', 'boostNote', 'stopDate', 'doneDates',
-    'reactions', 'followupPlans', 'status', 'completedAt', 'notes'];
+    'reactions', 'followupPlans', 'status', 'completedAt', 'notes', 'courses'];
   const missing = must.filter(function (k) { return !(k in p); });
   ok(missing.length === 0, '★ 业务字段无缺失（新增字段后 normalize 必须同步声明）', missing);
 }
