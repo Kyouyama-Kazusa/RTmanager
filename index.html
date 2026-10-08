@@ -192,6 +192,12 @@ button,input,select,textarea{font:inherit;color:inherit}
 .tl-item.chemo::before{background:var(--danger)}
 .tl-item.sub{padding-left:30px;border-left-style:dashed;opacity:.95}
 .tl-item.sub::before{width:6px;height:6px;left:-4px;top:14px;background:var(--sub)}
+/* 放疗折叠段头：圆点略大示意「一组」 */
+.tl-item.tl-seg::before{width:11px;height:11px;left:-7px;top:12px;background:var(--pri);box-shadow:0 0 0 2px #fff,0 0 0 3px rgba(37,99,235,.25)}
+/* 展开后的放疗逐次：浅色小点，体现「子级」 */
+.tl-item.radio:not(.tl-seg)::before{width:7px;height:7px;left:-4.5px;top:14px;background:#93b4f5}
+.tl-item.radio:not(.tl-seg){padding-left:26px}
+.tl-seg .tl-body{font-weight:600}
 .tl-item .tl-top{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
 .tl-item .tl-date{font-size:12px;color:var(--sub);font-variant-numeric:tabular-nums}
 .tl-item .tl-body{font-size:14px;font-weight:600;word-break:break-all;margin-top:1px}
@@ -281,7 +287,7 @@ button,input,select,textarea{font:inherit;color:inherit}
 var LS_KEY = 'radiotherapy.v1';
 var SNAP_PREFIX = 'radiotherapy.snap.';
 var SNAP_KEEP = 7;
-var APP_VERSION = '0.13.0';
+var APP_VERSION = '0.13.1';
 
 var SEXES = ['男', '女'];
 var PURPOSES = ['根治性', '术后辅助', '术前新辅助', '姑息性'];
@@ -1625,6 +1631,40 @@ function treatmentTimeline(p) {
 /* 时间轴是否真的存在可展示内容（纯放疗但未填 startDate 的患者应为空） */
 function timelineEmpty(p) { return treatmentTimeline(p).length === 0; }
 
+/* 把一个疗程组内「已按升序排好」的事件序列切成若干放疗段。
+   规则：连续的 radio 事件累积为一段；遇到任何非 radio 事件（化疗周期/给药/手术）
+   即闭合当前段，其后重新起段。
+   返回 [{from, to, count, events}]：from/to 为该段首个/末个放疗事件的日期，
+   count 为次数，events 为该段的放疗事件数组（供展开时逐条渲染）。
+   注意：只收集放疗事件，非放疗事件不进任何段，由调用方照常逐条渲染，
+   以保证化疗/手术不会被吞掉。 */
+function radioSegments(evs) {
+  var segs = [], cur = null;
+  (evs || []).forEach(function (x) {
+    if (x && x.kind === 'radio') {
+      if (!cur) { cur = { from: x.date, to: x.date, count: 0, events: [] }; segs.push(cur); }
+      cur.to = x.date; cur.count++; cur.events.push(x);
+    } else {
+      cur = null;   /* 非放疗事件：断开，其后重新起段 */
+    }
+  });
+  return segs;
+}
+/* 放疗段头正文：把首末事件的 title 提炼成「放疗 · 第 a~b 次」。
+   事件 title 形如「放疗 · 第 3 次」「放疗 · 第 12 次（加量）」，
+   这里只换掉「第 N 次」中的 N，其余前缀（自定义疗程名）原样保留。 */
+function radioSegTitle(s) {
+  var first = s.events[0], last = s.events[s.events.length - 1];
+  var t1 = String((first && first.title) || '放疗');
+  var m1 = t1.match(/^(.*?) · 第 \d+ 次/);
+  var base = m1 ? m1[1] : t1;
+  function fx(x) { var m = String(x.title || '').match(/第 (\d+) 次/); return m ? m[1] : ''; }
+  var a = fx(first), b = fx(last);
+  if (a && b && a !== b) return base + ' · 第 ' + a + '~' + b + ' 次';
+  if (a) return base + ' · 第 ' + a + ' 次';
+  return base;
+}
+
 /* 渲染全程治疗时间轴卡片。
    分层：先按「疗程」分组给出疗程头（承载疗程级操作：加周期 / 编辑 / 删除），
    再在该疗程下按日期列出事件（手术节点 / 化疗周期+给药 / 放疗逐次）。
@@ -1670,84 +1710,153 @@ function timelineHtml(p) {
     return h;
   }
 
-  /* 按疗程分组：先为每个疗程建组（保证「无事件的疗程」也能渲染出来继续录入），
-     再把事件挂到对应组；无 courseId 的放疗事件（老患者未建 radio 疗程）单独成组。 */
-  var groups = [];
+  /* 疗程 id → 疗程对象（供内联疗程头查找） */
   var idx = {};
-  courses.forEach(function (c) {
-    idx[c.id] = { c: c, ev: [] };
-    groups.push(idx[c.id]);
-  });
-  var events = view.tlDesc ? ev.slice().reverse() : ev;
-  var implicitRadio = null;
-  events.forEach(function (x) {
-    if (x.courseId && idx[x.courseId]) { idx[x.courseId].ev.push(x); return; }
-    /* 无归属：把放疗事件归入隐式组（老患者 courses 为空） */
-    if (!implicitRadio) { implicitRadio = { c: null, ev: [] }; groups.push(implicitRadio); }
-    implicitRadio.ev.push(x);
+  courses.forEach(function (c) { idx[c.id] = { c: c }; });
+
+  /* 时间轴是**一条按日期排好的单一流水**：放疗逐次在全局序列上按「被非放疗事件打断」
+     切成若干段（段头默认折叠）；手术 / 化疗仍各自成行，插入在它们实际日期所在位置。
+     这样「放疗中间夹杂化疗 → 放疗被分开」才成立 —— 若按疗程分组渲染，
+     放疗全落进放疗组、化疗全落进化疗组，两者永不交错，切段也就永远不会触发。
+     疗程头（承载 ＋周期 / 编辑 / 删除）内联在该疗程首个事件之前输出。 */
+  var segs0 = radioSegments(ev);                       /* 基于全局升序序列切段 */
+  var segOfFirst = {};
+  segs0.forEach(function (s) {
+    var f = s.events[0];
+    segOfFirst[f.date + '\u0000' + f.title] = s;
   });
 
-  var printed = 0;
-  groups.forEach(function (g) {
-    var c = g.c;
-    /* 有事件的组一定打印；无事件的组也打印（便于继续录入），
-       但如果时间轴完全为空已在上面的分支处理，这里只跳过 null 组的空情况 */
-    if (!c) {
-      if (!g.ev.length) return;
-      h += (printed ? '<div class="tl-gap"></div>' : '');
-      h += '<div class="tl-course"><span class="chip pri sm">放疗</span>' +
-        '<span class="tl-cname">放疗排程</span><span class="tl-cnt">' + g.ev.length + ' 项</span></div>';
-    } else {
-      h += (printed ? '<div class="tl-gap"></div>' : '');
-      h += courseHeader(c, c.kind === 'chemo' ? (c.cycles || []).length : g.ev.length);
+  var tokens = [];
+  var emittedCourse = {};
+  ev.forEach(function (x) {
+    /* 疗程头：在该疗程首个事件处内联输出一次（无事件的疗程在末尾补出） */
+    if (x.courseId && idx[x.courseId] && !emittedCourse[x.courseId]) {
+      emittedCourse[x.courseId] = 1;
+      tokens.push({ t: 'head', c: idx[x.courseId].c });
     }
-    printed++;
-
-    var lastYear = '';
-    g.ev.forEach(function (x) {
-      var year = (x.date || '').slice(0, 4);
-      if (year && year !== lastYear) { h += '<div class="tl-year">' + esc(year) + ' 年</div>'; lastYear = year; }
-
-      var isSub = !!x.parentId;
-      var cls = 'tl-item ' + x.kind + (isSub ? ' sub' : '');
-      h += '<div class="' + cls + '">';
-      h += '<div class="tl-top">';
-      if (!isSub) h += '<span class="chip ' + (COURSE_KIND_CHIPS[x.kind] || '') + ' sm">' + (COURSE_KIND_LABELS[x.kind] || '') + '</span>';
-      h += '<span class="tl-date">' + esc(mdLabel(x.date) || '未定日期') + '</span>';
-      if (x.status === 'planned' && !isSub) h += '<span class="chip sm">计划中</span>';
-      h += '</div>';
-      h += '<div class="tl-body">' + esc(x.title || '') + (x.label ? ' <span class="chip sm">' + esc(x.label) + '</span>' : '') + '</div>';
-      if (x.detail) h += '<div class="tl-note">' + esc(x.detail) + '</div>';
-
-      /* 化疗周期：折叠展开给药明细 */
-      if (x.kind === 'chemo' && x.cycleId && !isSub) {
-        var hasDoses = ev.some(function (y) { return y.parentId === x.cycleId; });
-        if (hasDoses) {
-          var opened = !!view.tlOpen[x.cycleId];
-          h += '<div><button class="tl-fold" data-act="timeline-fold" data-key="' + esc(x.cycleId) + '">' +
-            (opened ? '▾ 收起给药' : '▸ 展开给药') + '</button></div>';
-        }
+    if (x.kind === 'radio') {
+      if (!x.courseId && !emittedCourse.__implicit) {
+        emittedCourse.__implicit = 1;
+        tokens.push({ t: 'head', c: null });
       }
+      var k = x.date + '\u0000' + x.title;
+      var s = segOfFirst[k];
+      if (s) { tokens.push({ t: 'seg', seg: s }); delete segOfFirst[k]; }
+      return;   /* 放疗逐次行不单独成令牌（并入 seg） */
+    }
+    tokens.push({ t: 'ev', x: x });
+  });
 
-      /* 事件级操作 */
-      if (!isSub && x.kind === 'surgery') {
-        h += '<div class="tl-acts">' +
-          '<button class="btn sm" data-act="course-edit" data-id="' + esc(x.courseId) + '">改日期</button>' +
-          '</div>';
-      } else if (!isSub && x.kind === 'chemo') {
-        h += '<div class="tl-acts">' +
-          '<button class="btn sm addbtn" data-act="dose-add" data-id="' + esc(x.courseId) + '" data-n="' + x.cycleNo + '">＋ 给药</button>' +
-          '<button class="btn sm" data-act="cycle-edit" data-id="' + esc(x.courseId) + '" data-n="' + x.cycleNo + '">编辑周期</button>' +
-          '<button class="btn sm danger" data-act="cycle-del" data-id="' + esc(x.courseId) + '" data-n="' + x.cycleNo + '">删除</button>' +
-          '</div>';
-      } else if (isSub) {
-        h += '<div class="tl-acts">' +
-          '<button class="btn sm" data-act="dose-edit" data-id="' + esc(x.courseId) + '" data-n="' + x.parentNo + '" data-dose="' + esc(x.doseId) + '">编辑</button>' +
-          '<button class="btn sm danger" data-act="dose-del" data-id="' + esc(x.courseId) + '" data-n="' + x.parentNo + '" data-dose="' + esc(x.doseId) + '">删除</button>' +
-          '</div>';
+  /* 无事件的疗程（如刚建、还没排周期）也要给出疗程头，便于继续录入 */
+  courses.forEach(function (c) {
+    if (!emittedCourse[c.id]) { emittedCourse[c.id] = 1; tokens.push({ t: 'head', c: c, empty: 1 }); }
+  });
+
+  /* 倒序：**整体反转令牌序列**（而非先反转事件），段头始终跟着自己的段走，
+     不会出现「段头跑到段尾」的错位。 */
+  if (view.tlDesc) tokens.reverse();
+
+  var lastYear = '';
+  tokens.forEach(function (tk) {
+    /* ---- 疗程头 ---- */
+    if (tk.t === 'head') {
+      var hc = tk.c;
+      if (!hc) {
+        h += '<div class="tl-course"><span class="chip pri sm">放疗</span>' +
+          '<span class="tl-cname">放疗排程</span><span class="tl-cnt">' +
+          ev.filter(function (y) { return y.kind === 'radio'; }).length + ' 次</span></div>';
+      } else {
+        var hcCount = hc.kind === 'chemo' ? (hc.cycles || []).length
+          : (hc.kind === 'radio' ? ev.filter(function (y) { return y.courseId === hc.id; }).length : null);
+        h += courseHeader(hc, hcCount);
       }
+      lastYear = '';   /* 疗程头后重置年份线，避免跨疗程继续沿用 */
+      return;
+    }
+
+    /* ---- 放疗段：一条折叠头，展开时再逐条渲染该段放疗事件 ---- */
+    if (tk.t === 'seg') {
+      var s2 = tk.seg;
+      var skey = 'r' + s2.from + '_' + s2.to + '_' + s2.count;
+      var sOpen = !!view.tlOpen[skey];
+      var sDone = s2.events.filter(function (y) { return y.status === 'done'; }).length;
+      var year2 = (s2.from || '').slice(0, 4);
+      if (year2 && year2 !== lastYear) { h += '<div class="tl-year">' + esc(year2) + ' 年</div>'; lastYear = year2; }
+      h += '<div class="tl-item radio tl-seg">';
+      h += '<div class="tl-top">' +
+        '<span class="chip pri sm">放疗</span>' +
+        '<span class="tl-date">' + esc(mdLabel(s2.from) || '') + ' ~ ' + esc(mdLabel(s2.to) || '') + '</span>' +
+        '<span class="chip sm">' + s2.count + ' 次</span>' +
+        (sDone ? '<span class="chip sm">已完成 ' + sDone + ' 次</span>' : '') +
+        '</div>';
+      h += '<div class="tl-body">' + esc(radioSegTitle(s2)) + '</div>';
+      h += '<div><button class="tl-fold" data-act="timeline-fold" data-key="' + esc(skey) + '">' +
+        (sOpen ? '▾ 收起逐次' : '▸ 展开逐次') + '</button></div>';
       h += '</div>';
-    });
+
+      /* 展开态：把该段放疗逐次按原样式逐条渲染（同为 radio，但不带 tl-seg） */
+      if (sOpen) {
+        s2.events.forEach(function (x) {
+          var year = (x.date || '').slice(0, 4);
+          if (year && year !== lastYear) { h += '<div class="tl-year">' + esc(year) + ' 年</div>'; lastYear = year; }
+          h += '<div class="tl-item radio">';
+          h += '<div class="tl-top"><span class="tl-date">' + esc(mdLabel(x.date) || '未定日期') + '</span>' +
+            (x.status === 'planned' ? '<span class="chip sm">计划中</span>' : '') + '</div>';
+          h += '<div class="tl-body">' + esc(x.title || '') + '</div>';
+          if (x.detail) h += '<div class="tl-note">' + esc(x.detail) + '</div>';
+          h += '</div>';
+        });
+      }
+      return;
+    }
+
+    /* ---- 其余事件：原样逐条渲染 ---- */
+    var x = tk.x;
+    var year = (x.date || '').slice(0, 4);
+    if (year && year !== lastYear) { h += '<div class="tl-year">' + esc(year) + ' 年</div>'; lastYear = year; }
+
+    /* 化疗给药子行：默认收起 —— 未展开所属周期则不渲染（修复「假折叠」） */
+    var isSub = !!x.parentId;
+    if (isSub && !view.tlOpen[x.parentId]) return;
+
+    var cls = 'tl-item ' + x.kind + (isSub ? ' sub' : '');
+    h += '<div class="' + cls + '">';
+    h += '<div class="tl-top">';
+    if (!isSub) h += '<span class="chip ' + (COURSE_KIND_CHIPS[x.kind] || '') + ' sm">' + (COURSE_KIND_LABELS[x.kind] || '') + '</span>';
+    h += '<span class="tl-date">' + esc(mdLabel(x.date) || '未定日期') + '</span>';
+    if (x.status === 'planned' && !isSub) h += '<span class="chip sm">计划中</span>';
+    h += '</div>';
+    h += '<div class="tl-body">' + esc(x.title || '') + (x.label ? ' <span class="chip sm">' + esc(x.label) + '</span>' : '') + '</div>';
+    if (x.detail) h += '<div class="tl-note">' + esc(x.detail) + '</div>';
+
+    /* 化疗周期：折叠展开给药明细（默认收起） */
+    if (x.kind === 'chemo' && x.cycleId && !isSub) {
+      var hasDoses = ev.some(function (y) { return y.parentId === x.cycleId; });
+      if (hasDoses) {
+        var opened = !!view.tlOpen[x.cycleId];
+        h += '<div><button class="tl-fold" data-act="timeline-fold" data-key="' + esc(x.cycleId) + '">' +
+          (opened ? '▾ 收起给药' : '▸ 展开给药') + '</button></div>';
+      }
+    }
+
+    /* 事件级操作 */
+    if (!isSub && x.kind === 'surgery') {
+      h += '<div class="tl-acts">' +
+        '<button class="btn sm" data-act="course-edit" data-id="' + esc(x.courseId) + '">改日期</button>' +
+        '</div>';
+    } else if (!isSub && x.kind === 'chemo') {
+      h += '<div class="tl-acts">' +
+        '<button class="btn sm addbtn" data-act="dose-add" data-id="' + esc(x.courseId) + '" data-n="' + x.cycleNo + '">＋ 给药</button>' +
+        '<button class="btn sm" data-act="cycle-edit" data-id="' + esc(x.courseId) + '" data-n="' + x.cycleNo + '">编辑周期</button>' +
+        '<button class="btn sm danger" data-act="cycle-del" data-id="' + esc(x.courseId) + '" data-n="' + x.cycleNo + '">删除</button>' +
+        '</div>';
+    } else if (isSub) {
+      h += '<div class="tl-acts">' +
+        '<button class="btn sm" data-act="dose-edit" data-id="' + esc(x.courseId) + '" data-n="' + x.parentNo + '" data-dose="' + esc(x.doseId) + '">编辑</button>' +
+        '<button class="btn sm danger" data-act="dose-del" data-id="' + esc(x.courseId) + '" data-n="' + x.parentNo + '" data-dose="' + esc(x.doseId) + '">删除</button>' +
+        '</div>';
+    }
+    h += '</div>';
   });
 
   h += '<div class="hint" style="margin-top:6px">放疗部分由排程自动推算，与上方治疗进度一致；手术与化疗为人工录入。</div>';

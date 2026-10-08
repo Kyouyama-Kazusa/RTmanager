@@ -5,6 +5,8 @@
    C. treatmentTimeline 聚合：三类事件、排序、status 推算、纯放疗自动合成、跨年
    D. 增删改：走**渲染层**（fireFromHtml）点击 —— 不用 fire() 绕过渲染层
    E. 隔离红线：courses 不污染放疗排程 / 完成度 / 剂量统计 / 无网络调用
+   F. radioSegments：放疗按非放疗事件切段（纯函数）
+   G. 折叠行为（渲染层）：放疗段头/化疗给药子行默认收起、点击后真正展开
    只读取 index.html，不修改源码。 */
 const fs = require('fs');
 const path = require('path');
@@ -104,6 +106,23 @@ function fireFromHtml(htmlStr, act, nth) {
 }
 /* 模拟弹层保存：直接给 sheetCtx.onSave 传表单值 */
 function saveSheet(vals) { return sheetCtx && sheetCtx.onSave ? sheetCtx.onSave(vals) : null; }
+
+/* 按 data-key 精确点击折叠按钮 —— 不依赖位置下标。
+   时间轴上「放疗段头」与「化疗周期」都是 timeline-fold，谁在前取决于日期，
+   用下标会随当天日期漂移（跨日期扫描已抓到过这个坑），故按 key 定位。 */
+function fireFold(htmlStr, key) {
+  const re = /<button[^>]*data-act="timeline-fold"[^>]*>/g;
+  const all = String(htmlStr).match(re) || [];
+  const tag = all.filter(function (t) { return t.indexOf('data-key="' + key + '"') >= 0; })[0];
+  if (!tag) { ok(false, 'fireFold: 找不到 data-key="' + key + '" 的折叠按钮', all.join(' | ').slice(0, 300)); return false; }
+  const el = makeEl();
+  (tag.match(/data-([a-z-]+)="([^"]*)"/g) || []).forEach(function (a) {
+    const m = a.match(/data-([a-z-]+)="([^"]*)"/);
+    if (m) el.dataset[m[1].replace(/-(\w)/g, function (_, c) { return c.toUpperCase(); })] = m[2];
+  });
+  clickHandler({ target: el });
+  return true;
+}
 
 /* ================================================================ */
 group('A. normalize 三层字段与未知字段');
@@ -306,7 +325,11 @@ group('D. 增删改（走渲染层点击）');
   saveSheet({ date: '2026-02-01', drug: '紫杉醇', dose: '175', unit: 'mg/m2', note: '' });
   ok(chemo.cycles[0].doses.length === 1 && chemo.cycles[0].doses[0].drug === '紫杉醇', '★ 给药写入', chemo.cycles[0].doses);
 
-  /* D3. 编辑给药：按钮带 data-dose */
+  /* D3. 编辑给药：需先展开所属周期（给药子行默认收起）。
+     按化疗周期的 key（= cycleId）精确展开，不靠下标 —— 下标会随日期漂移。 */
+  view.page = 'patient'; view.pid = p.id; view.tlOpen = {}; render();
+  const cyId = chemo.cycles[0].id;
+  fireFold(getEl('view').innerHTML, cyId);
   view.page = 'patient'; view.pid = p.id; render();
   const doseHtml = getEl('view').innerHTML;
   const doseEditBtn = String(doseHtml).match(/data-act="dose-edit"[^>]*/);
@@ -317,7 +340,7 @@ group('D. 增删改（走渲染层点击）');
   ok(String(chemo.cycles[0].doses[0].dose) === '200', '★ 编辑给药生效（不新增条目）', chemo.cycles[0].doses[0]);
   ok(chemo.cycles[0].doses.length === 1, '编辑不产生重复条目', chemo.cycles[0].doses.length);
 
-  /* D4. 删除给药 */
+  /* D4. 删除给药（周期仍处于展开态） */
   global.__confirmAnswer = true;
   view.page = 'patient'; view.pid = p.id; render();
   const delHtml = getEl('view').innerHTML;
@@ -325,6 +348,7 @@ group('D. 增删改（走渲染层点击）');
   ok(!!doseDelBtn && doseDelBtn[0].indexOf('data-dose="') >= 0, '★ 给药「删除」按钮自带 data-dose', doseDelBtn && doseDelBtn[0]);
   fireFromHtml(delHtml, 'dose-del');
   ok(chemo.cycles[0].doses.length === 0, '★ 删除给药生效', chemo.cycles[0].doses.length);
+  view.tlOpen = {};
 
   /* D5. 删除周期 */
   view.page = 'patient'; view.pid = p.id; render();
@@ -378,6 +402,189 @@ group('E. 隔离红线');
   upsertCourse(p.id, null, { kind: 'chemo', title: 'X' });
   delCourse(p.id, p.courses[p.courses.length - 1].id);
   ok(netCalls.length === netBefore, '★ 疗程操作全程无网络调用');
+}
+
+/* ================================================================ */
+group('F. radioSegments：放疗按非放疗事件切段');
+
+{
+  /* 造事件的小工具：只关心 kind/date，其余字段不参与切段逻辑 */
+  function rEv(date) { return { kind: 'radio', date: date, title: 'R' + date }; }
+  function cEv(date) { return { kind: 'chemo', date: date, title: 'C' + date }; }
+  function sEv(date) { return { kind: 'surgery', date: date, title: 'S' + date }; }
+
+  /* F0. 空输入 */
+  ok(JSON.stringify(radioSegments([])) === '[]', 'F0 空输入 → []');
+  ok(JSON.stringify(radioSegments(null)) === '[]', 'F0 null → []');
+
+  /* F1. 纯放疗、无掺杂 → 1 段，count 与首尾日期正确 */
+  {
+    const evs = [rEv('2026-03-02'), rEv('2026-03-03'), rEv('2026-03-04')];
+    const segs = radioSegments(evs);
+    ok(segs.length === 1, 'F1 无掺杂 → 1 段', segs.length);
+    ok(segs[0].count === 3, 'F1 count = 3', segs[0] && segs[0].count);
+    ok(segs[0].from === '2026-03-02' && segs[0].to === '2026-03-04', 'F1 首尾日期正确',
+      segs[0] && [segs[0].from, segs[0].to]);
+  }
+
+  /* F2. 中间夹 1 次化疗 → 2 段，边界日期为「化疗前一日 / 化疗后一日」 */
+  {
+    const evs = [rEv('2026-03-02'), rEv('2026-03-03'), cEv('2026-03-04'), rEv('2026-03-05'), rEv('2026-03-06')];
+    const segs = radioSegments(evs);
+    ok(segs.length === 2, 'F2 夹 1 次化疗 → 2 段', segs.length);
+    ok(segs[0].to === '2026-03-03', 'F2 第1段止于化疗前一日', segs[0] && segs[0].to);
+    ok(segs[1].from === '2026-03-05', 'F2 第2段起于化疗后一日', segs[1] && segs[1].from);
+    ok(segs[0].count === 2 && segs[1].count === 2, 'F2 两段计数各为 2',
+      segs.map(function (s) { return s.count; }));
+  }
+
+  /* F3. 夹 2 次化疗 → 3 段 */
+  {
+    const evs = [
+      rEv('2026-03-02'), cEv('2026-03-03'), rEv('2026-03-04'), cEv('2026-03-05'), rEv('2026-03-06')
+    ];
+    const segs = radioSegments(evs);
+    ok(segs.length === 3, 'F3 夹 2 次化疗 → 3 段', segs.length);
+  }
+
+  /* F4. 首/尾为非放疗事件 → 段数不受影响，非放疗事件不进任何段 */
+  {
+    const evs = [sEv('2026-01-10'), rEv('2026-03-02'), rEv('2026-03-03'), cEv('2026-04-01')];
+    const segs = radioSegments(evs);
+    ok(segs.length === 1, 'F4 首尾非放疗 → 仍为 1 段', segs.length);
+    ok(segs[0].from === '2026-03-02' && segs[0].to === '2026-03-03', 'F4 段范围仅含放疗事件',
+      segs[0] && [segs[0].from, segs[0].to]);
+  }
+
+  /* F5. 段内事件全为 radio，且各段 count 之和 = 放疗事件总数（无丢失/无重复） */
+  {
+    const evs = [
+      rEv('2026-01-01'), rEv('2026-01-02'), cEv('2026-01-03'),
+      rEv('2026-01-04'), sEv('2026-01-05'), rEv('2026-01-06'), rEv('2026-01-07'), rEv('2026-01-08')
+    ];
+    const segs = radioSegments(evs);
+    const totalRadioIn = evs.filter(function (x) { return x.kind === 'radio'; }).length;
+    const sumCount = segs.reduce(function (a, s) { return a + s.count; }, 0);
+    const allRadio = segs.every(function (s) { return s.events.every(function (e) { return e.kind === 'radio'; }); });
+    ok(segs.length === 3, 'F5 混合序列 → 3 段', segs.length);
+    ok(allRadio, 'F5 各段 events 全为 radio');
+    ok(sumCount === totalRadioIn, 'F5 各段计数之和 = 放疗事件总数', { sumCount: sumCount, in: totalRadioIn });
+    /* events 引用原对象：确保渲染时能拿到 title/status 等字段 */
+    ok(segs[0].events[0] === evs[0], 'F5 events 保留原事件对象引用');
+  }
+
+  /* F6. 通过 treatmentTimeline 的真实数据验证切段（端到端） */
+  {
+    /* 放疗 2026-03-02 起、工作日治疗；化疗周期起始日落在放疗期间 */
+    const p = mk({
+      startDate: '2026-03-02', fractions: '10', dosePerFraction: '2', treatDays: [1, 2, 3, 4, 5],
+      courses: [{ id: 'cc', kind: 'chemo', title: '同步化疗', cycles: [{ id: 'cyc', n: 1, startDate: '2026-03-04' }] }]
+    });
+    const ev = treatmentTimeline(p);
+    const segs = radioSegments(ev);
+    const radioTotal = ev.filter(function (x) { return x.kind === 'radio'; }).length;
+    ok(radioTotal === 10, 'F6 放疗共 10 次', radioTotal);
+    ok(segs.length === 2, 'F6 真实数据：化疗夹在中间 → 2 段', segs.length);
+    ok(segs.reduce(function (a, s) { return a + s.count; }, 0) === 10, 'F6 真实数据：段计数之和为 10');
+  }
+}
+
+/* ================================================================ */
+group('G. 折叠行为（渲染层）');
+
+{
+  /* G0. 纯放疗、无掺杂：默认全部折叠，只出 1 条段头 */
+  {
+    const p = mk({ id: 'g0', name: 'G0', startDate: '2026-03-02', fractions: '20', dosePerFraction: '2', treatDays: [1, 2, 3, 4, 5] });
+    view.pid = p.id; view.tlDesc = false; view.tlOpen = {};
+    let h = timelineHtml(p);
+    const segHeads = (h.match(/class="tl-item radio tl-seg"/g) || []).length;
+    const radioRows = (h.match(/class="tl-item radio"/g) || []).length;
+    ok(segHeads === 1, 'G0 默认渲染：1 条放疗段头', segHeads);
+    ok(radioRows === 0, '★ G0 默认渲染：放疗逐次行完全不出现（默认折叠）', radioRows);
+    ok(/data-act="timeline-fold"/.test(h), 'G0 段头带 timeline-fold');
+    ok(/data-key="r2026-03-02_/.test(h), 'G0 段头带 data-key（r + from…）', (h.match(/data-key="[^"]*"/) || [])[0]);
+    ok(/▸ 展开逐次/.test(h), 'G0 折叠态文案为「▸ 展开逐次」');
+
+    /* 展开该段：逐次行出现，数量 = count */
+    const key = (h.match(/data-key="(r[^"]*)"/) || [])[1];
+    view.tlOpen[key] = 1;
+    h = timelineHtml(p);
+    const rows2 = (h.match(/class="tl-item radio"/g) || []).length;
+    ok(rows2 === 20, '★ G0 展开后：放疗逐次行 = 20', rows2);
+    ok(/▾ 收起逐次/.test(h), 'G0 展开态文案为「▾ 收起逐次」');
+    view.tlOpen = {};
+  }
+
+  /* G1. 走 fireFromHtml：点击段头能真正触发展开（渲染层闭环） */
+  {
+    const p = mk({ id: 'g1', name: 'G1', startDate: '2026-03-02', fractions: '6', dosePerFraction: '2', treatDays: [1, 2, 3, 4, 5] });
+    view.pid = p.id; view.tlDesc = false; view.tlOpen = {};
+    const h0 = timelineHtml(p);
+    ok((h0.match(/class="tl-item radio"/g) || []).length === 0, 'G1 前置：默认无逐次行');
+    fireFromHtml(h0, 'timeline-fold', 0);
+    const h1 = timelineHtml(p);
+    ok((h1.match(/class="tl-item radio"/g) || []).length === 6, '★ G1 点击段头后逐次行出现 6 条',
+      (h1.match(/class="tl-item radio"/g) || []).length);
+    fireFromHtml(h1, 'timeline-fold', 0);
+    ok((timelineHtml(p).match(/class="tl-item radio"/g) || []).length === 0, 'G1 再点一次收起');
+    view.tlOpen = {};
+  }
+
+  /* G2. 掺杂化疗：段数正确，化疗行始终可见（不被折叠吞掉） */
+  {
+    const p = mk({
+      id: 'g2', name: 'G2', startDate: '2026-03-02', fractions: '10', dosePerFraction: '2', treatDays: [1, 2, 3, 4, 5],
+      courses: [{ id: 'cc2', kind: 'chemo', title: '同步化疗', cycles: [{ id: 'cyc2', n: 1, startDate: '2026-03-04' }] }]
+    });
+    view.pid = p.id; view.tlDesc = false; view.tlOpen = {};
+    const h = timelineHtml(p);
+    const segHeads = (h.match(/class="tl-item radio tl-seg"/g) || []).length;
+    ok(segHeads === 2, '★ G2 掺杂化疗 → 2 条放疗段头', segHeads);
+    ok((h.match(/class="tl-item chemo"/g) || []).length === 1, '★ G2 化疗周期行保持可见');
+    ok((h.match(/class="tl-item radio"/g) || []).length === 0, 'G2 两段默认均折叠');
+  }
+
+  /* G3. 修复假折叠：化疗给药子行默认隐藏，展开后才出现 */
+  {
+    const p = mk({
+      id: 'g3', name: 'G3',
+      courses: [{
+        id: 'cc3', kind: 'chemo', title: 'AC 方案', cycles: [{
+          id: 'cyc3', n: 1, startDate: '2026-02-01',
+          doses: [
+            { id: 'd31', date: '2026-02-01', drug: '阿霉素', dose: '60', unit: 'mg/m2' },
+            { id: 'd32', date: '2026-02-01', drug: '环磷酰胺', dose: '600', unit: 'mg/m2' }
+          ]
+        }]
+      }]
+    });
+    view.pid = p.id; view.tlDesc = false; view.tlOpen = {};
+    let h = timelineHtml(p);
+    ok((h.match(/class="tl-item chemo sub"/g) || []).length === 0,
+      '★★ G3 修复假折叠：给药子行默认不渲染',
+      (h.match(/class="tl-item chemo sub"/g) || []).length);
+    ok(/▸ 展开给药/.test(h), 'G3 化疗折叠按钮文案为「▸ 展开给药」');
+    ok((h.match(/data-act="timeline-fold"/g) || []).length === 1, 'G3 化疗周期带折叠按钮');
+
+    fireFold(h, 'cyc3');
+    h = timelineHtml(p);
+    ok((h.match(/class="tl-item chemo sub"/g) || []).length === 2,
+      '★ G3 展开后给药子行 = 2', (h.match(/class="tl-item chemo sub"/g) || []).length);
+    ok(/▾ 收起给药/.test(h), 'G3 展开态文案为「▾ 收起给药」');
+    view.tlOpen = {};
+  }
+
+  /* G4. 倒序模式下段头位置正确（不应跑到段尾） */
+  {
+    const p = mk({ id: 'g4', name: 'G4', startDate: '2026-03-02', fractions: '5', dosePerFraction: '2', treatDays: [1, 2, 3, 4, 5] });
+    view.pid = p.id; view.tlDesc = true; view.tlOpen = {};
+    const h = timelineHtml(p);
+    const segPos = h.indexOf('class="tl-item radio tl-seg"');
+    const foldPos = h.indexOf('data-act="timeline-fold"');
+    ok(segPos >= 0 && foldPos > segPos, 'G4 倒序：段头仍在折叠按钮之前', { segPos: segPos, foldPos: foldPos });
+    view.tlDesc = false; view.tlOpen = {};
+  }
 }
 
 /* ================================================================ */
