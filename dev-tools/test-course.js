@@ -783,6 +783,222 @@ group('H. 顶部治疗概况与末尾疗程管理（渲染层）');
 }
 
 /* ================================================================ */
+group('I. 其他治疗（kind=other）：枚举钳制 / 时间轴 / 概况 / AI 通道');
+
+{
+  /* I1. 枚举与配色表齐备 —— 缺任何一张表，normalize 都会把 other 改写成化疗 */
+  ok(COURSE_KINDS.indexOf('other') >= 0, '★ I1 COURSE_KINDS 含 other', COURSE_KINDS);
+  ok(COURSE_KIND_LABELS.other === '其他治疗', '★ I1 标签为「其他治疗」', COURSE_KIND_LABELS.other);
+  ok(typeof COURSE_KIND_CHIPS.other === 'string' && COURSE_KIND_CHIPS.other, '★ I1 有 chip 配色', COURSE_KIND_CHIPS.other);
+  ok(COURSE_KINDS_CYCLIC.indexOf('other') >= 0 && COURSE_KINDS_CYCLIC.indexOf('chemo') >= 0,
+    '★ I1 other 与 chemo 同为「有周期结构」类别', COURSE_KINDS_CYCLIC);
+
+  /* I2. ★★ 归一化保真：other 不被静默改写成 chemo
+     （normalize 里 `COURSE_KINDS.indexOf(c.kind)>=0 ? c.kind : 'chemo'` 是最大陷阱） */
+  {
+    const p = mk({
+      name: 'I2', startDate: '2026-03-02', fractions: '5',
+      courses: [{ kind: 'other', title: '奥希替尼靶向治疗', cycles: [{ n: 1, startDate: '2026-03-05', doses: [{ date: '2026-03-05', drug: '奥希替尼', dose: '80', unit: 'mg' }] }] }]
+    });
+    ok(p.courses.length === 1, 'I2 一条 other 疗程保留');
+    ok(p.courses[0].kind === 'other', '★★ I2 kind 保真为 other（未被钳制成 chemo）', p.courses[0].kind);
+    ok(p.courses[0].cycles.length === 1 && p.courses[0].cycles[0].doses.length === 1, 'I2 周期与用药层级保留');
+    ok(p.courses[0].id && p.courses[0].cycles[0].id && p.courses[0].cycles[0].doses[0].id, 'I2 三层 id 均已补齐');
+  }
+
+  /* I3. 未知 kind 仍然回落 chemo（不能因为加了 other 就放宽钳制） */
+  {
+    const p = mk({ name: 'I3', startDate: '2026-03-02', fractions: '5', courses: [{ kind: 'nonsense', title: 'X' }] });
+    ok(p.courses[0].kind === 'chemo', '★ I3 未知 kind 仍回落到 chemo', p.courses[0].kind);
+  }
+
+  /* I4. 时间轴：other 事件按周期/用药展开，权重 2 / 2.5 */
+  {
+    const p = mk({
+      name: 'I4', startDate: '2026-03-02', fractions: '5',
+      courses: [
+        { kind: 'chemo', title: 'AP方案', cycles: [{ n: 1, startDate: '2026-03-10' }] },
+        { kind: 'other', title: '靶向治疗', cycles: [{ n: 1, startDate: '2026-03-10', doses: [{ date: '2026-03-10', drug: '奥希替尼', dose: '80', unit: 'mg' }] }] }
+      ]
+    });
+    const ev = treatmentTimeline(p);
+    const oth = ev.filter(x => x.kind === 'other');
+    ok(oth.length === 2, '★ I4 other 展开为「周期 + 用药」两条', oth.length);
+    ok(oth.every(x => x.kind === 'other'), '★ I4 事件 kind 标为 other');
+    ok(oth.some(x => x.title === '靶向治疗 · 第 1 周期'), 'I4 周期行标题含疗程名与周期号',
+      oth.map(x => x.title));
+    ok(oth.some(x => x.parentId), 'I4 用药子行带 parentId（可折叠）');
+    /* 同日排序：surgery0 < chemo1 < other2 < radio3 */
+    const same = ev.filter(x => x.date === '2026-03-10');
+    ok(same[0].kind === 'chemo' && same[1].kind === 'other', '★ I4 同日 other 排在 chemo 之后', same.map(x => x.kind));
+  }
+
+  /* I5. ★ radio 仍是全局最末权重 —— 保证 radioSegments 切段行为不变 */
+  {
+    const p = mk({
+      name: 'I5', startDate: '2026-03-10', fractions: '3',
+      courses: [{ kind: 'other', title: '靶向治疗', cycles: [{ n: 1, startDate: '2026-03-10' }] }]
+    });
+    const same = treatmentTimeline(p).filter(x => x.date === '2026-03-10');
+    ok(same[same.length - 1].kind === 'radio',
+      '★★ I5 同日 radio 仍排最后（否则 G 组切段断言会漂移）', same.map(x => x.kind));
+  }
+
+  /* I6. 只有日期、没有周期的 other（AI 简写常见）也必须在时间轴上可见 */
+  {
+    const p = mk({ name: 'I6', startDate: '2026-03-02', fractions: '5', courses: [{ kind: 'other', title: '中药调理', date: '2026-04-01' }] });
+    const oth = treatmentTimeline(p).filter(x => x.kind === 'other');
+    ok(oth.length === 1, '★★ I6 无周期但有日期的 other，合成一条可见事件', oth.length);
+    ok(oth[0].date === '2026-04-01' && oth[0].title === '中药调理', 'I6 事件日期与名称正确',
+      oth.length ? oth[0].date + '/' + oth[0].title : '(空)');
+  }
+
+  /* I7. 概况区多出 tls-other 行，且仍不污染 tl-item 精确计数 */
+  {
+    const p = mk({
+      name: 'I7', startDate: '2026-03-02', fractions: '5',
+      courses: [
+        { kind: 'surgery', title: '术', date: '2026-03-01' },
+        { kind: 'chemo', title: '化', cycles: [{ n: 1, startDate: '2026-03-04' }] },
+        { kind: 'other', title: '靶', cycles: [{ n: 1, startDate: '2026-03-05' }] }
+      ]
+    });
+    const s = courseSummaryHtml(p);
+    ok(s.indexOf('tls-other') >= 0, '★ I7 概况区出现其他治疗行');
+    ok((s.match(/class="tls-row/g) || []).length === 4, '★★ I7 四类各一行（放疗+化疗+其他+手术）',
+      (s.match(/class="tls-row/g) || []).length);
+    ok(s.indexOf('tl-item') < 0, '★★ I7 概况区仍不含 tl-item 片段（不污染 G 组计数）', s.indexOf('tl-item'));
+    ok(s.indexOf('其他治疗') >= 0, 'I7 行内显示中文标签');
+  }
+
+  /* I8. 管理区：other 也有「＋ 周期」，且按钮自带 data-id */
+  {
+    const p = mk({
+      name: 'I8', startDate: '2026-03-02', fractions: '5',
+      courses: [{ id: 'iO', kind: 'other', title: '靶向', cycles: [{ id: 'iOc', n: 1, startDate: '2026-03-05' }] }]
+    });
+    view.pid = p.id; view.tlDesc = false; view.tlOpen = {};
+    const h = timelineHtml(p);
+    const add = h.match(/<button[^>]*data-act="cycle-add"[^>]*>/g) || [];
+    ok(add.length === 1, '★ I8 other 疗程也有「＋ 周期」按钮', add.length);
+    ok(add.length > 0 && add[0].indexOf('data-id="iO"') >= 0, '★ I8 按钮带正确的 data-id', add[0]);
+    ok(h.indexOf('tls-actrow') >= 0, '★ I8 管理行出现');
+  }
+
+  /* I9. 事件级操作：other 走「＋ 用药 / 编辑周期 / 删除」，交渲染层可点 */
+  {
+    const p = mk({
+      name: 'I9', startDate: '2026-03-02', fractions: '5',
+      courses: [{ id: 'iO2', kind: 'other', title: '靶向', cycles: [{ id: 'iOc2', n: 1, startDate: '2026-03-05', doses: [{ id: 'iOd2', date: '2026-03-05', drug: '奥希替尼', dose: '80', unit: 'mg' }] }] }]
+    });
+    view.pid = p.id; view.tlDesc = false; view.tlOpen = {};
+    let h = timelineHtml(p);
+    ok(h.indexOf('＋ 用药') >= 0, '★ I9 other 周期行的按钮文案为「＋ 用药」（区别于化疗「＋ 给药」）');
+    ok((h.match(/class="tl-item other"/g) || []).length === 1, '★ I9 渲染出 other 周期行');
+    /* 展开用药明细 */
+    view.tlOpen['iOc2'] = 1;
+    h = timelineHtml(p);
+    ok((h.match(/class="tl-item other sub"/g) || []).length === 1, '★ I9 展开后出现 other 用药子行',
+      (h.match(/class="tl-item other sub"/g) || []).length);
+    ok(h.indexOf('▾ 收起用药') >= 0, 'I9 折叠按钮文案为「收起用药」');
+    view.tlOpen = {};
+  }
+
+  /* I10. 化疗文案未被污染：仍是「＋ 给药 / 展开给药」 */
+  {
+    const p = mk({
+      name: 'I10', startDate: '2026-03-02', fractions: '5',
+      courses: [{ id: 'iC', kind: 'chemo', title: '化疗', cycles: [{ id: 'iCc', n: 1, startDate: '2026-03-05', doses: [{ id: 'iCd', date: '2026-03-05', drug: '顺铂' }] }] }]
+    });
+    view.pid = p.id; view.tlDesc = false; view.tlOpen = {};
+    let h = timelineHtml(p);
+    ok(h.indexOf('＋ 给药') >= 0, '★★ I10 化疗仍用「＋ 给药」（未被 other 的文案覆盖）');
+    view.tlOpen['iCc'] = 1;
+    h = timelineHtml(p);
+    ok(h.indexOf('收起给药') >= 0, '★★ I10 化疗折叠文案仍为「给药」');
+    view.tlOpen = {};
+  }
+
+  /* I11. AI 通道：normalizeAiOtherList 结构化 + 容错 */
+  {
+    ok(typeof normalizeAiOtherList === 'function', 'I11 normalizeAiOtherList 存在');
+    const l = normalizeAiOtherList([
+      { title: '奥希替尼靶向治疗', startDate: '2026-03-01', cycles: [{ n: 1, startDate: '2026-03-01', drug: '奥希替尼', dose: '80', unit: 'mg' }] },
+      { name: 'PD-1免疫治疗', courses: [{ date: '2026/05/06', drug: '帕博利珠单抗' }] }
+    ]);
+    ok(l.length === 2, '★ I11 两条其他治疗被识别', l.length);
+    ok(l.every(c => c.kind === 'other'), '★★ I11 kind 一律落成 other（AI 通道不产生别的 kind）');
+    ok(l.every(c => c.createdVia === 'ai'), '★ I11 createdVia 标记为 ai（可追溯来源）');
+    ok(l[1].title === 'PD-1免疫治疗', 'I11 近义字段名 name 被接受', l[1].title);
+    ok(l[1].startDate === '2026-05-06', '★ I11 斜杠日期被规范成 ISO', l[1].startDate);
+    ok(l[1].cycles.length === 1 && l[1].cycles[0].doses.length === 1, '★ I11 近义 cycles/drug 被归一，单次用药合成 doses',
+      JSON.stringify(l[1].cycles));
+    ok(normalizeAiOtherList([]).length === 0 && normalizeAiOtherList(null).length === 0, '★ I11 空值安全');
+    ok(normalizeAiOtherList([{ title: '', note: '' }]).length === 0, '★ I11 全空条目被丢弃');
+    ok(normalizeAiOtherList('靶向治疗\n免疫治疗').length === 2, '★ I11 纯字符串按行拆成多条');
+  }
+
+  /* I12. AI 通道：parseAiOtherText 两种写法 + 非法 JSON 必须报错而非静默清空 */
+  {
+    const simple = parseAiOtherText('奥希替尼靶向治疗 | 2026-03-01 | 2026-06-01 | 80mg qd');
+    ok(simple.ok && simple.list.length === 1, '★ I12 简写「名称|开始|结束|备注」可解析');
+    ok(simple.list[0].title === '奥希替尼靶向治疗' && simple.list[0].startDate === '2026-03-01'
+      && simple.list[0].endDate === '2026-06-01' && simple.list[0].note === '80mg qd',
+      '★ I12 简写四个字段各就各位', JSON.stringify(simple.list[0]));
+    ok(parseAiOtherText('').ok && parseAiOtherText('').list.length === 0, '★ I12 空文本 = 无其他治疗（合法）');
+    ok(parseAiOtherText(JSON.stringify([{ title: 'X' }])).ok, '★ I12 JSON 数组可解析');
+    const bad = parseAiOtherText('[{"title":"x",}]');
+    ok(bad.ok === false && !!bad.err, '★★ I12 非法 JSON 返回 ok=false 与错误信息（不静默清空）', bad.err);
+  }
+
+  /* I13. 端到端：AI 复核文本框 → 落库 → 时间轴可见 */
+  {
+    const parsed = parseAiOtherText('奥希替尼靶向治疗 | 2026-03-01 |  | 80mg qd');
+    const p = normalize({ version: 2, patients: [{
+      name: 'I13', status: '在治', treatDays: [1, 2, 3, 4, 5],
+      startDate: '2026-03-02', fractions: '5',
+      pauses: [], extras: [], doneDates: [], reactions: [], followupPlans: [], notes: [],
+      courses: parsed.list
+    }]}).patients[0];
+    ok(p.courses.length === 1 && p.courses[0].kind === 'other', '★★ I13 导入后 kind 仍为 other', p.courses[0].kind);
+    ok(treatmentTimeline(p).filter(x => x.kind === 'other').length === 1,
+      '★★ I13 导入的患者在时间轴上能看到这条其他治疗');
+    ok(courseSummaryHtml(p).indexOf('tls-other') >= 0, '★★ I13 概览区也显示出来');
+  }
+
+  /* I14. 幂等：other 往返不丢、不被改写成 chemo */
+  {
+    const p = mk({
+      name: 'I14', startDate: '2026-03-02', fractions: '5',
+      courses: [{ kind: 'other', title: '靶向', cycles: [{ n: 1, startDate: '2026-03-05', doses: [{ date: '2026-03-05', drug: '奥希替尼' }] }] }]
+    });
+    const again = normalize({ version: 2, patients: [JSON.parse(JSON.stringify(p))] }).patients[0];
+    ok(again.courses[0].kind === 'other', '★★ I14 二次归一化 kind 仍为 other');
+    ok(again.courses[0].cycles.length === 1 && again.courses[0].cycles[0].doses.length === 1, '★ I14 二次归一化周期/用药不丢');
+  }
+
+  /* I15. AI_FIELDS 不得被污染（其他治疗走独立通道） */
+  {
+    ok(AI_FIELDS.length === 15, '★★ I15 AI_FIELDS 仍为 15 项（其他治疗未塞进扁平字段表）', AI_FIELDS.length);
+    ok(AI_FIELDS.indexOf('otherTreatments') < 0, '★★ I15 AI_FIELDS 不含 otherTreatments（避免破坏单值假设）');
+  }
+
+  /* I16. 手工新增 other 疗程：保存后引导录入第 1 周期（走真实弹层 onSave） */
+  {
+    const p = mk({ name: 'I16', startDate: '2026-03-02', fractions: '5' });
+    view.pid = p.id; view.tlDesc = false; view.tlOpen = {};
+    sheetCourse(p, null);
+    const r = sheetCtx && sheetCtx.onSave ? sheetCtx.onSave({ kind: 'other', title: '免疫治疗', note: '' }) : null;
+    const created = p.courses[p.courses.length - 1];
+    ok(p.courses.length === 1, '★ I16 新增 other 疗程成功', p.courses.length);
+    ok(created.kind === 'other' && created.title === '免疫治疗', '★ I16 kind/名称写入正确', created.kind + '/' + created.title);
+    ok(r === false, '★ I16 onSave 返回 false（让位给周期弹层，不直接关窗）', r);
+    ok(!!sheetCtx && String(sheetCtx.title).indexOf('周期') >= 0,
+      '★ I16 已自动切到「周期」弹层', sheetCtx && sheetCtx.title);
+  }
+}
+
+/* ================================================================ */
 console.log('');
 console.log('========================================');
 console.log('通过 ' + pass + ' 项，失败 ' + fail + ' 项');

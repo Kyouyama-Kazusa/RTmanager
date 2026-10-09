@@ -219,7 +219,7 @@
 | `status` | enum | **在治**/**治疗完成**/**失访** |
 | `completedAt` | ISO string | 完成时间 |
 | `notes` | `Note[]` | 备注 / 交班记录 |
-| `courses` | `Course[]` | **治疗疗程（手术 / 化疗 / 放疗）**，全程治疗时间轴的数据源（见 3.5） |
+| `courses` | `Course[]` | **治疗疗程（手术 / 化疗 / 放疗 / 其他治疗）**，全程治疗时间轴的数据源（见 3.5） |
 | ⋯ | 任意 | **其他字段由 `keepExtra` 原样保留**（见原则 2） |
 
 **子结构：**
@@ -257,7 +257,26 @@ p.followupPlans.forEach(...)  // 会读到影子行
 
 ### 3.5 治疗疗程 `courses[]` 与放疗唯一真相
 
-一个患者可先后/同时接受多种治疗（手术、化疗、放疗），统一挂在 `p.courses[]` 下，用 `kind` 区分。
+一个患者可先后/同时接受多种治疗（手术、化疗、放疗、**其他治疗**），统一挂在 `p.courses[]` 下，用 `kind` 区分。
+
+**`kind` 是四值枚举**：`surgery` / `chemo` / `radio` / `other`。
+`other`（v0.13.4 新增）承载**靶向、免疫、内分泌、介入、中医中药、支持治疗**等
+放疗科病程里常见、但既非手术也非放化疗的治疗，名称由 `title` 自由填写。
+
+> **★ 新增 `kind` 必须同时改三张表**：`COURSE_KINDS`、`COURSE_KIND_LABELS`、`COURSE_KIND_CHIPS`。
+> `normalize` 里有一句
+> ```js
+> kind: COURSE_KINDS.indexOf(c.kind) >= 0 ? c.kind : 'chemo'
+> ```
+> 不在枚举里的 `kind` 会被**静默改写成「化疗」** —— 数据就此污染，且用户看不出问题。
+> 这是本项目最容易踩、后果最隐蔽的坑，I1/I2 两条断言专门盯它。
+
+**`other` 与 `chemo` 数据形状完全同构**（`cycles → doses`），因此共用一套录入与展示逻辑：
+
+- 两者都由 `COURSE_KINDS_CYCLIC = ['chemo', 'other']` 判定，而不是散落的 `=== 'chemo'`；
+  时间轴聚合、`courseSummaryHtml`、`tlsActRow` 的「＋周期」、周期/用药事件级按钮，全部读这张表。
+- 循环行的措辞沿用各类别既有说法：化疗叫「给药」，其他治疗叫「用药」（`wtxt` / `wl` 分支）。
+  刻意**不统一**：化疗的「给药」是既有界面文案，改它会牵动一批渲染层断言，属无收益的连带改动。
 
 **最关键的设计约束：放疗疗程绝不回填排程数据。**
 
@@ -271,8 +290,39 @@ computeSchedule(p).forEach(x => out.push({ date: x.date, kind: 'radio', ... }))
 // ❌ 错误：在 course 里再存一份放疗排程 —— 会与顶层字段打架（第二真相）
 ```
 
-`treatmentTimeline(p)` 三路聚合（手术节点 / 化疗周期+给药 / 放疗逐次），
+`treatmentTimeline(p)` 三路聚合（手术节点 / 化疗与其他治疗的周期+用药 / 放疗逐次），
 **纯放疗的老患者 `courses` 为空时也会自动合成放疗事件**，因此老数据零迁移即可看到时间轴。
+
+#### 其他治疗的 AI 提取通道 `otherTreatments`（v0.13.4）
+
+自动导入（AI）与手动录入都能增添其他治疗。AI 侧走一条**独立于 `AI_FIELDS` 的通道**：
+
+```js
+AI_FIELDS = [ ...15 个扁平单值字段... ]        // 不动
+o.otherTreatments = normalizeAiOtherList(r.otherTreatments)   // 独立搬运
+```
+
+> **★ 为什么不把 `otherTreatments` 塞进 `AI_FIELDS`**：`AI_FIELDS` 是「每项一个字符串」的
+> 扁平表，`aiRowEmpty` / `aiMissingOf` / `sheetValues` 三处都建立在这个单值假设上；
+> 塞一个数组进去会让它们全部失效。且 `test-ai.js` 对 `AI_FIELDS.length === 15` 有硬编码断言。
+> I15 / test-ai 第 13 组把这条边界钉死。
+
+链路：
+
+1. `defaultAiPrompt()` 增加 `otherTreatments` 提取说明（含目标结构、近义字段容忍、
+   无则输出 `[]`、明确排除手术/化疗/放疗以免重复录入）；
+2. `normalizeAiOtherList(raw)` 把模型输出规整成 `courses[kind=other]` 直接可吃的形状：
+   容忍 `title`/`name`/`type` 与 `cycles`/`courses` 等近义字段名、
+   把单次用药从 cycle 级就地合成 `doses`、日期统一成 ISO、数值清洗，
+   完全空的条目丢弃（宁缺勿错）；
+3. 复核界面（`openAiReview`）为每位患者渲染一个「其他治疗」文本框，
+   支持两种写法（`parseAiOtherText`）：
+   - **简写按行**：`名称 | 开始日期 | 结束日期 | 备注`
+   - **JSON 数组**：完整结构，含逐次用药
+   文本框内容经 `aiOtherTextOf` 生成，可往返不丢；
+4. `commitAiDraft()` 落库前再解析一次；格式非法时**明确报错并保留原文**，
+   绝不静默清空用户手填的内容。合法时把结果作为 `courses` 交给 `normalize` 统一兜底，
+   并标 `createdVia: 'ai'` 以便追溯来源。
 
 **化疗首版为手动逐周期录入**；`Course` 里预留了 `intervalDays` / `planCycles` / `createdVia` 等字段占位，
 日后若要做自动排程可无痛升级（届时**必须升 `SCHEMA_VERSION`**）。
@@ -286,10 +336,12 @@ computeSchedule(p).forEach(x => out.push({ date: x.date, kind: 'radio', ... }))
 
 渲染流程（`timelineHtml(p)`）：
 
-1. **顶部概况**：`courseSummaryHtml(p)` 输出三类只读概览（放疗 / 化疗 / 手术），
+1. **顶部概况**：`courseSummaryHtml(p)` 输出四类只读概览（放疗 / 化疗 / 其他治疗 / 手术），
    放疗一行（全局唯一，口径与「治疗进度」一致：`已完成 doneCount/plannedCount 次` + 起止日期），
-   化疗逐疗程一行（方案 + 周期数 + 最近周期日），手术逐疗程一行（术式 + 日期）；
-   无该类治疗则整行隐藏，三类全无输出空态；
+   化疗逐疗程一行（方案 + 周期数 + 最近周期日），**其他治疗逐疗程一行**（同化疗格式，`tls-other`），
+   手术逐疗程一行（术式 + 日期）；无该类治疗则整行隐藏，四类全无输出空态；
+   化疗与其他治疗的「按周期结构」行由同一个 `cycleSummaryRow(c, fallbackName)` 产出，
+   避免两套几乎一样的模板各自演进；
 2. `treatmentTimeline(p)` 给出全局升序事件流；
 3. `radioSegments(ev)` 在这条**全局序列**上把连续放疗事件切成段（遇到任何非放疗事件即断开），
    返回 `[{from, to, count, events}]`；
@@ -305,6 +357,7 @@ computeSchedule(p).forEach(x => out.push({ date: x.date, kind: 'radio', ... }))
   折叠键为 `r<from>_<to>_<count>`。
 - **化疗给药子行默认收起**，折叠键为周期 `cycleId`。子行不渲染时，
   该周期的「＋给药 / 编辑 / 删除」仍在周期主行上，功能不受影响。
+  其他治疗同构（文案为「＋用药 / 展开用药」）。
 - **老患者零迁移**：`courses` 为空时放疗事件自动归为一段并折叠。
 - 折叠状态存在内存态 `view.tlOpen`，**不持久化**（刷新即恢复默认折叠）。
 
@@ -316,6 +369,18 @@ computeSchedule(p).forEach(x => out.push({ date: x.date, kind: 'radio', ... }))
 > **★ 无事件疗程的录入入口不能丢**（v0.13.3）。化疗疗程刚建好、还没排周期时没有任何事件，
 > 此时「＋周期」由末尾 `manage` 区产出；若全部无事件则走空态分支，同样用 `tlsActRow` 承载。
 > 这两条都是真实用户必经路径，改动时间轴时务必保全。
+
+> **★ `kind` 权重顺序不可随意调整**（v0.13.4）。`treatmentTimeline` 的
+> `KIND_W = { surgery:0, chemo:1, other:2, radio:3 }` 中 **radio 必须恒为最大**：
+> `radioSegments` 只对连续 radio 事件切段，一旦有别的类别插到 radio 之后，
+> 「放疗被非放疗事件打断」的语义与 G 组的精确计数断言都会漂移。`other` 放在
+> chemo 与 radio 之间（同日「先化疗、后其他治疗、再放疗」符合临床叙述习惯）。
+> I5 断言把这条约束钉死。
+>
+> **★ 无周期但有日期的疗程必须在时间轴可见**（v0.13.4）。AI 常只识别出「X 月 X 日起
+> 用某药」，或用户用简写只填了起止日期 —— 此时 `cycles` 为空。若不为这类疗程补一条
+> 以 `c.date` 为日期的节点，它在时间轴上**完全不可见**，用户会认为「明明录了却没显示」。
+> `treatmentTimeline` 里对 `COURSE_KINDS_CYCLIC` 类别做了这个补位（I6 覆盖）。
 
 #### 底部 chrome 的显隐：`syncChrome()` 单一维护点（v0.13.2）
 
@@ -895,7 +960,7 @@ v0.1 的「暂停」在新版语义里由 `pauses` 中断区间表达，所以�
 
 **规则**：任何改动都要跑测试；**涉及兼容性的改动还要做故障注入**。
 
-**19 个套件 / 1,528 项断言**全部只读 `index.html`，用 DOM 打桩 + `eval` 加载源码。
+**19 个套件 / 1,595 项断言**全部只读 `index.html`，用 DOM 打桩 + `eval` 加载源码。
 
 **最关键的一条经验**（踩过两次坑）：
 

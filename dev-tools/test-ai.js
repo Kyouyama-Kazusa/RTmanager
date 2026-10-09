@@ -312,6 +312,35 @@ function withFetch(plan, fn) {
   ok(defaultAiPrompt().indexOf(String(new Date().getFullYear())) >= 0, '提示词含当前年份（用于推断无年份日期）');
   ok(AI_FIELDS.length === 15, '覆盖 15 个患者字段', AI_FIELDS.length);
 
+  group('13. 其他治疗（otherTreatments）AI 通道');
+  /* AI_FIELDS 是「扁平单值字段」表，其他治疗是数组，走独立通道。
+     这里守住「不污染」这条线：一旦有人图省事把数组塞进 AI_FIELDS，
+     aiRowEmpty/aiMissingOf/sheetValues 的单值假设会全线崩。 */
+  ok(AI_FIELDS.indexOf('otherTreatments') < 0, '★★ AI_FIELDS 不含 otherTreatments（独立通道）');
+  const prompt = defaultAiPrompt();
+  ok(prompt.indexOf('otherTreatments') >= 0, '★ 提示词包含 otherTreatments 提取说明');
+  ok(prompt.indexOf('靶向') >= 0 && prompt.indexOf('免疫') >= 0, '★ 提示词点名靶向/免疫等常见类型');
+  ok(prompt.indexOf('输出空数组') >= 0, '★ 提示词要求无则输出空数组（不要编造）');
+  ok(prompt.indexOf('把手术、化疗、放疗写进') >= 0, '★★ 提示词明确排除手术/化疗/放疗（避免重复录入）');
+  ok(typeof normalizeAiOtherList === 'function', 'normalizeAiOtherList 存在');
+  ok(typeof parseAiOtherText === 'function', 'parseAiOtherText 存在');
+  ok(typeof aiOtherTextOf === 'function', 'aiOtherTextOf 存在');
+  /* 简述往返：JSON 文本 → 结构 → 文本 → 结构，条数不丢 */
+  {
+    const list = normalizeAiOtherList([
+      { title: 'A治疗', startDate: '2026-01-02', cycles: [{ n: 1, startDate: '2026-01-02', drug: 'D1', dose: '1', unit: 'mg' }] },
+      { title: 'B治疗', startDate: '2026-02-03' }
+    ]);
+    const back = parseAiOtherText(aiOtherTextOf({ otherTreatments: list }));
+    ok(back.ok && back.list.length === 2, '★★ 其他治疗往返（结构→文本→结构）条数不丢', back.ok ? back.list.length : back.err);
+    ok(back.ok && back.list[0].cycles.length === 1 && back.list[0].cycles[0].doses.length === 1, '★ 往返后周期与用药保留');
+  }
+  /* 非法输入不得静默吞掉 */
+  {
+    const bad = parseAiOtherText('{不是合法 JSON');
+    ok(bad.ok === false && !!bad.err, '★★ 非法 JSON 明确报错（不静默清空用户输入）', bad.err);
+  }
+
   console.log('');
   console.log('========================================');
   console.log('通过 ' + pass + ' 项，失败 ' + fail + ' 项');

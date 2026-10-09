@@ -19,6 +19,9 @@
   --bg:#f2f4f7; --card:#ffffff; --line:#e3e7ee; --text:#1b2430; --sub:#6b7686;
   --pri:#0f766e; --pri-soft:#e5f3f1; --warn:#b45309; --warn-soft:#fdf0e0;
   --danger:#c0392b; --danger-soft:#fdecea; --ok:#0f766e; --ok-soft:#e5f3f1;
+  /* 「其他治疗」专属色（紫）：与 pri 青、warn 橙、danger 红都能区分，
+     用于第 4 类疗程的类型标签与时间轴圆点。 */
+  --info:#5b3fbf; --info-soft:#EEEDFE;
   --radius:14px; --shadow:0 1px 2px rgba(16,24,40,.05),0 1px 3px rgba(16,24,40,.07);
 }
 *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
@@ -71,6 +74,7 @@ button,input,select,textarea{font:inherit;color:inherit}
 .chip.warn{background:var(--warn-soft);color:var(--warn)}
 .chip.danger{background:var(--danger-soft);color:var(--danger)}
 .chip.ok{background:var(--ok-soft);color:var(--ok)}
+.chip.info{background:var(--info-soft);color:var(--info)}
 .chip.sm{font-size:11px;line-height:16px;padding:0 6px}
 .count{display:inline-block;min-width:20px;height:20px;padding:0 6px;border-radius:10px;background:var(--danger);color:#fff;font-size:12px;line-height:20px;text-align:center;font-weight:600}
 
@@ -182,6 +186,7 @@ button,input,select,textarea{font:inherit;color:inherit}
 .tl-item::before{content:"";position:absolute;left:-6px;top:13px;width:9px;height:9px;border-radius:50%;background:var(--pri);box-shadow:0 0 0 2px #fff}
 .tl-item.surgery::before{background:var(--warn)}
 .tl-item.chemo::before{background:var(--danger)}
+.tl-item.other::before{background:var(--info)}
 .tl-item.sub{padding-left:30px;border-left-style:dashed;opacity:.95}
 .tl-item.sub::before{width:6px;height:6px;left:-4px;top:14px;background:var(--sub)}
 /* 放疗折叠段头：圆点略大示意「一组」 */
@@ -291,7 +296,7 @@ button,input,select,textarea{font:inherit;color:inherit}
 var LS_KEY = 'radiotherapy.v1';
 var SNAP_PREFIX = 'radiotherapy.snap.';
 var SNAP_KEEP = 7;
-var APP_VERSION = '0.13.3';
+var APP_VERSION = '0.13.4';
 
 var SEXES = ['男', '女'];
 var PURPOSES = ['根治性', '术后辅助', '术前新辅助', '姑息性'];
@@ -309,10 +314,21 @@ var OPEN_STATUSES = ['未处理', '已处理待复查', '已复查未解除'];
 var PATIENT_STATUSES = ['在治', '治疗完成', '失访'];
 /* 治疗疗程类别：一个患者可先后/同时接受多种治疗，统一挂在 p.courses 下。
    放疗疗程不回填排程，只用 radioRef 回指顶层 startDate/fractions 等字段，
-   保证 computeSchedule(p) 始终是放疗排程的唯一真相。 */
-var COURSE_KINDS = ['surgery', 'chemo', 'radio'];
-var COURSE_KIND_LABELS = { surgery: '手术', chemo: '化疗', radio: '放疗' };
-var COURSE_KIND_CHIPS = { surgery: 'warn', chemo: 'danger', radio: 'pri' };
+   保证 computeSchedule(p) 始终是放疗排程的唯一真相。
+
+   ★ other（其他治疗）：靶向 / 免疫 / 内分泌 / 介入 / 中医 / 支持治疗等
+     放疗科病程里常见、但既非手术也非放化疗的治疗。数据形状与 chemo 完全同构
+     （cycles → doses），因此录入界面、时间轴、概况区都能直接复用化疗那套，
+     用户不必再学一遍交互。名称由 title 自由填写（如「奥希替尼靶向治疗」）。
+
+   ★ 新增 kind 必须同时改这里三张表 —— normalize 里有一句
+     kind: COURSE_KINDS.indexOf(c.kind) >= 0 ? c.kind : 'chemo'
+     不在枚举里的 kind 会被**静默改写成化疗**，数据就此污染。 */
+var COURSE_KINDS = ['surgery', 'chemo', 'radio', 'other'];
+var COURSE_KIND_LABELS = { surgery: '手术', chemo: '化疗', radio: '放疗', other: '其他治疗' };
+var COURSE_KIND_CHIPS = { surgery: 'warn', chemo: 'danger', radio: 'pri', other: 'info' };
+/* 有「周期 / 给药」三层明细的类别（other 与 chemo 共享同一套录入与展示逻辑） */
+var COURSE_KINDS_CYCLIC = ['chemo', 'other'];
 /* 历史版本状态映射（v0.1 → 当前）：避免更新应用后患者的旧状态被静默改写
    v0.1 的「暂停」在新版由 pauses 中断区间表达（状态回到「在治」+ 续存中断记录）；
    v0.1 的「随访中」在新版由「治疗完成」+ 随访计划表达。 */
@@ -784,7 +800,20 @@ function defaultAiPrompt() {
     '   planStatus 流程状态（只能从 ' + PLAN_STATUSES.join('/') + ' 中选）\n' +
     '   totalDose 总剂量（只要数字，单位 Gy）；fractions 总次数（只要数字）；dosePerFraction 单次剂量（只要数字）\n' +
     '   simDate 定位日期（YYYY-MM-DD）；startDate 放疗开始日期（YYYY-MM-DD，若写「X月X日开始」请转成日期）\n' +
-    '6. 日期只有月日没有年份时，按当前年份 ' + new Date().getFullYear() + ' 推断';
+    '6. 日期只有月日没有年份时，按当前年份 ' + new Date().getFullYear() + ' 推断\n\n' +
+    '其他治疗（otherTreatments）—— 除手术、化疗、放疗之外的治疗，用于完整还原病程：\n' +
+    '   凡是材料里出现的靶向治疗、免疫治疗、内分泌治疗、介入治疗、中医中药、\n' +
+    '   支持治疗（升白/止吐/营养等）、射频消融、粒籽植入等，都要提取。\n' +
+    '   每位患者一个数组 otherTreatments，元素结构：\n' +
+    '   {"title":"名称（如 奥希替尼靶向治疗 / PD-1免疫治疗）",\n' +
+    '    "startDate":"开始日期 YYYY-MM-DD 或 \\"\\"", "endDate":"结束日期或 \\"\\"",\n' +
+    '    "cycles":[{"n":1,"startDate":"YYYY-MM-DD 或 \\"\\"","drug":"药物/措施名或 \\"\\"",\n' +
+    '               "dose":"剂量数字或 \\"\\"","unit":"单位如 mg / mg/m2 / 次 或 \\"\\"","note":"或 \\"\\""}],\n' +
+    '    "note":"方案说明、周期数、疗效评价等，或 \\"\\""}\n' +
+    '   - 材料里没写其他治疗时，otherTreatments 输出空数组 []，不要编造\n' +
+    '   - 只能确定名称、无法确定日期或用药时，仍要输出该条，日期与用药留空\n' +
+    '   - 一次给药一条 cycles 元素；若材料只说「共X程」而无具体日期，可输出一条 cycles 并把周期数写在 note\n' +
+    '   - **不要**把手术、化疗、放疗写进 otherTreatments';
 }
 
 function aiConfig() {
@@ -961,6 +990,84 @@ function normalizeAiPatients(raw) {
     });
     if (!aiRowEmpty(o)) out.push(o);       /* 只要有任意信息就保留，缺字段交人工补充；
                                               完全空白的条目丢弃（多为模型误输出） */
+    /* 「其他治疗」走独立通道，不进 AI_FIELDS：
+       AI_FIELDS 是「扁平单值字段」表（每项一个字符串），而其他治疗是数组，
+       塞进去会破坏 aiRowEmpty / aiMissingOf / sheetValues 三处的单值假设；
+       且 test-ai.js 对 AI_FIELDS.length 有硬编码断言。
+       故在两处（此处与 syncAiDraftFromSheet/commitAiDraft）单独搬运。 */
+    o.otherTreatments = normalizeAiOtherList(r.otherTreatments);
+  });
+  return out;
+}
+
+/* 把模型给出的「其他治疗」规整成 courses[kind=other] 能直接吃下的形状。
+   容错优先：字段名允许近义（title/name/type、cycles/courses），
+   数值与日期一律清洗成目标格式，无法确定的留空 —— 宁缺勿错，交人工复核。 */
+function normalizeAiOtherList(raw) {
+  var arr = [];
+  if (Array.isArray(raw)) arr = raw;
+  else if (raw && typeof raw === 'object') arr = [raw];
+  else if (typeof raw === 'string') {
+    /* 模型偶尔把整段文本塞进字符串：按行拆成多条，保底不丢信息 */
+    raw.split(/\r?\n/).forEach(function (ln) {
+      var s = String(ln).replace(/^[\s\-\*\d\.、)）]+/, '').trim();
+      if (s) arr.push({ title: s });
+    });
+  }
+  function clean(s) { return String(s == null ? '' : s).trim(); }
+  function cleanDate(v) {
+    var s = clean(v);
+    if (!s) return '';
+    var m = s.match(/(\d{4})\D+(\d{1,2})\D+(\d{1,2})/);
+    if (m) return m[1] + '-' + pad2(m[2]) + '-' + pad2(m[3]);
+    return /^\d{4}-\d{2}-\d{2}$/.test(s) ? s : '';
+  }
+  function cleanNum(v) { return clean(v).replace(/[^\d.]/g, ''); }
+
+  var out = [];
+  arr.forEach(function (t) {
+    if (!t || typeof t !== 'object') return;
+    var title = clean(t.title || t.name || t.type);
+    var cys = Array.isArray(t.cycles) ? t.cycles : (Array.isArray(t.courses) ? t.courses : []);
+    var cycles = [];
+    cys.forEach(function (cy, i) {
+      if (!cy || typeof cy !== 'object') return;
+      var n = parseInt(cleanNum(cy.n), 10) || (i + 1);
+      var doses = [];
+      var dArr = Array.isArray(cy.doses) ? cy.doses : [];
+      /* 模型常把单次用药直接写在 cycle 上（没有 doses 数组）：就地合成一条 */
+      if (!dArr.length && (clean(cy.drug) || clean(cy.medication))) {
+        dArr = [{ date: cy.startDate || cy.date, drug: cy.drug || cy.medication, dose: cy.dose, unit: cy.unit, note: cy.note }];
+      }
+      dArr.forEach(function (d) {
+        if (!d || typeof d !== 'object') return;
+        var drug = clean(d.drug || d.name || d.medication);
+        if (!drug && !clean(d.date)) return;      /* 完全空的给药行丢弃 */
+        doses.push({
+          id: uid('d'), date: cleanDate(d.date || cy.startDate),
+          drug: drug, dose: cleanNum(d.dose), unit: clean(d.unit), note: clean(d.note)
+        });
+      });
+      var cyStart = cleanDate(cy.startDate || cy.date);
+      if (!cyStart && !doses.length && !clean(cy.note)) return;   /* 空周期丢弃 */
+      cycles.push({
+        id: uid('cy'), n: n, startDate: cyStart, endDate: cleanDate(cy.endDate),
+        note: clean(cy.note), doses: doses
+      });
+    });
+    cycles.sort(function (a, b) { return a.n - b.n; });
+    var startD = cleanDate(t.startDate);
+    var endD = cleanDate(t.endDate);
+    if (!startD && cycles.length) startD = cycles[0].startDate || '';
+    if (!endD && cycles.length) endD = cycles[cycles.length - 1].endDate || '';
+    if (!title && !cycles.length && !clean(t.note)) return;      /* 全空条目丢弃 */
+    out.push({
+      id: uid('co'), kind: 'other',
+      title: title || '其他治疗',
+      site: '', date: startD, startDate: startD, endDate: endD,
+      regimen: clean(t.regimen || t.scheme), radioRef: false,
+      note: clean(t.note), createdVia: 'ai', cycles: cycles
+    });
   });
   return out;
 }
@@ -1565,17 +1672,20 @@ function chemoCycleCount(p) {
   return n;
 }
 
-/* 全程治疗时间轴：把 手术节点 / 化疗周期(含给药) / 放疗逐次 三类事件合并排序。
+/* 全程治疗时间轴：把 手术节点 / 化疗周期(含给药) / 放疗逐次 / 其他治疗 四类事件合并排序。
    返回 [{date, kind, sort, title, label, detail, status, parentId, courseId, cycleId, doseId}]。
    - status：date <= 今天 → 'done'，否则 'planned'（与放疗 done 口径一致）。
-   - 排序：date 升序；同日按 kind 权重 surgery(0) < chemo(1) < radio(2)。
+   - 排序：date 升序；同日按 kind 权重 surgery(0) < chemo(1) < other(2) < radio(3)。
+     other 排在 chemo 之后、radio 之前：同日「先化疗、后其他治疗、再放疗」符合临床叙述习惯，
+     且把 radio 固定在最末，保证 radioSegments 的切段行为与既有测试完全不变
+     （radio 是唯一会切段的类别，其相对位置一旦变动，G 组精确计数断言会全线漂移）。
    - 纯放疗老患者 courses 为空时，自动合成一条放疗事件流（零迁移即可看时间轴）。
    - 年份分组的呈现交给 UI 层，这里只保证有序。 */
 function treatmentTimeline(p) {
   var out = [];
   var today = todayStr();
   function st(d) { return (d && d <= today) ? 'done' : 'planned'; }
-  var KIND_W = { surgery: 0, chemo: 1, radio: 2 };
+  var KIND_W = { surgery: 0, chemo: 1, other: 2, radio: 3 };
 
   (p.courses || []).forEach(function (c) {
     if (c.kind === 'surgery') {
@@ -1584,15 +1694,30 @@ function treatmentTimeline(p) {
         title: c.title || '手术', label: '', detail: c.note || '', status: st(dateOnly(c.date)),
         parentId: '', courseId: c.id, cycleId: '', doseId: ''
       });
-    } else if (c.kind === 'chemo') {
-      (c.cycles || []).forEach(function (cy) {
+    } else if (COURSE_KINDS_CYCLIC.indexOf(c.kind) >= 0) {
+      /* 化疗 / 其他治疗：同构，仅 kind 与默认名不同。
+         用 COURSE_KINDS_CYCLIC 判分支，避免两套几乎一样的代码各自演进。 */
+      var kn = COURSE_KIND_LABELS[c.kind] || '化疗';
+      var cys = c.cycles || [];
+      /* 只知日期、没有周期（AI 常只识别出「X月X日起用某药」或用户手填简写）时，
+         补一条以 c.date 为日期的节点，否则这条治疗在时间轴上完全不可见 ——
+         用户会觉得「明明录了却没显示」。 */
+      if (!cys.length && c.date) {
+        out.push({
+          date: dateOnly(c.date), kind: c.kind, sort: KIND_W[c.kind],
+          title: c.title || kn, label: c.regimen || '',
+          detail: c.note || '', status: st(dateOnly(c.date)),
+          parentId: '', courseId: c.id, cycleId: '', doseId: ''
+        });
+      }
+      cys.forEach(function (cy) {
         var cd = dateOnly(cy.startDate);
         var drugTxt = (cy.doses || []).map(function (d) {
           return (d.drug || '给药') + (d.dose ? ' ' + d.dose + (d.unit || '') : '');
         }).join(' ＋ ');
         out.push({
-          date: cd, kind: 'chemo', sort: KIND_W.chemo,
-          title: (c.title || '化疗') + ' · 第 ' + (parseInt(cy.n, 10) || 1) + ' 周期',
+          date: cd, kind: c.kind, sort: KIND_W[c.kind],
+          title: (c.title || kn) + ' · 第 ' + (parseInt(cy.n, 10) || 1) + ' 周期',
           label: c.regimen || '',
           detail: drugTxt || cy.note || '',
           status: st(cd), parentId: '',
@@ -1602,7 +1727,7 @@ function treatmentTimeline(p) {
         });
         (cy.doses || []).forEach(function (d) {
           out.push({
-            date: dateOnly(d.date), kind: 'chemo', sort: KIND_W.chemo + 0.5,
+            date: dateOnly(d.date), kind: c.kind, sort: KIND_W[c.kind] + 0.5,
             title: d.drug || '给药',
             label: (d.dose ? d.dose + (d.unit || '') : ''),
             detail: d.note || '', status: st(dateOnly(d.date)),
@@ -1673,9 +1798,25 @@ function radioSegTitle(s) {
   return base;
 }
 
+/* 概况区「按周期结构」的一行（化疗 / 其他治疗 共用）。
+   cls 与 chip 类名由 kind 决定，保证 tls-chemo / tls-other 各自可被测试精确定位。
+   ★ 输出里绝不出现 tl-item 片段 —— 概况区蹭到就把 test-course.js G 组的
+     /class="tl-item chemo"/g 精确计数顶高（match 是子串匹配）。 */
+function cycleSummaryRow(c, fallbackName) {
+  var cys = c.cycles || [];
+  var last = cys.map(function (x) { return dateOnly(x.startDate); }).filter(Boolean).sort().pop();
+  return '<div class="tls-row tls-' + esc(c.kind) + '">' +
+    '<span class="chip ' + (COURSE_KIND_CHIPS[c.kind] || '') + ' sm">' + esc(COURSE_KIND_LABELS[c.kind] || fallbackName) + '</span>' +
+    '<span class="tls-name">' + esc(c.title || fallbackName) + '</span>' +
+    (c.regimen ? '<span class="chip sm">' + esc(c.regimen) + '</span>' : '') +
+    '<span class="tls-meta">' + cys.length + ' 周期' + (last ? ' · 最近 ' + esc(mdLabel(last)) : '') + '</span>' +
+    '</div>';
+}
+
 /* 全程治疗概况：**纯只读**，不含任何操作按钮。
-   放疗一行（全局唯一，口径与「治疗进度」一致）、化疗逐疗程一行、手术逐疗程一行。
-   无该类治疗则整行隐藏；三类全无则输出空态。
+   放疗一行（全局唯一，口径与「治疗进度」一致）、化疗逐疗程一行、
+   其他治疗逐疗程一行、手术逐疗程一行。
+   无该类治疗则整行隐藏；四类全无则输出空态。
 
    ★ class 前缀必须是 tls-（timeline summary），绝不可出现 tl-item / timeline-fold /
      data-key="r 这些片段 —— test-course.js 的 G 组对 tl-item 系列正则做**精确计数**断言
@@ -1702,14 +1843,12 @@ function courseSummaryHtml(p) {
 
   /* 化疗：逐疗程一行 */
   (p.courses || []).filter(function (c) { return c.kind === 'chemo'; }).forEach(function (c) {
-    var cys = c.cycles || [];
-    var last = cys.map(function (x) { return dateOnly(x.startDate); }).filter(Boolean).sort().pop();
-    rows.push('<div class="tls-row tls-chemo">' +
-      '<span class="chip danger sm">化疗</span>' +
-      '<span class="tls-name">' + esc(c.title || '化疗') + '</span>' +
-      (c.regimen ? '<span class="chip sm">' + esc(c.regimen) + '</span>' : '') +
-      '<span class="tls-meta">' + cys.length + ' 周期' + (last ? ' · 最近 ' + esc(mdLabel(last)) : '') + '</span>' +
-      '</div>');
+    rows.push(cycleSummaryRow(c, '化疗'));
+  });
+
+  /* 其他治疗（靶向 / 免疫 / 内分泌 / 介入 / 中医 / 支持治疗…）：逐疗程一行 */
+  (p.courses || []).filter(function (c) { return c.kind === 'other'; }).forEach(function (c) {
+    rows.push(cycleSummaryRow(c, '其他治疗'));
   });
 
   /* 手术：逐疗程一行 */
@@ -1721,7 +1860,7 @@ function courseSummaryHtml(p) {
       '</div>');
   });
 
-  if (!rows.length) return '<div class="tls tls-empty">暂无治疗概况。点右上角「＋ 疗程」添加手术、化疗或放疗。</div>';
+  if (!rows.length) return '<div class="tls tls-empty">暂无治疗概况。点右上角「＋ 疗程」添加手术、化疗、放疗或其他治疗。</div>';
   return '<div class="tls">' + rows.join('') + '</div>';
 }
 
@@ -1752,12 +1891,15 @@ function timelineHtml(p) {
      ★ 只用 tls- 前缀，且所有按钮必须自带 data-id
        （test-course.js D6 会抓第一个 course-del 并断言它带 data-id）。 */
   function tlsActRow(c) {
+    /* 有周期结构的类别（化疗 / 其他治疗）才给「＋ 周期」；
+       用 COURSE_KINDS_CYCLIC 判定，新增同类类别时不必再改这里。 */
+    var cyclic = COURSE_KINDS_CYCLIC.indexOf(c.kind) >= 0;
     return '<div class="tls-actrow">' +
       '<span class="chip ' + (COURSE_KIND_CHIPS[c.kind] || '') + ' sm">' + (COURSE_KIND_LABELS[c.kind] || '') + '</span>' +
       '<span class="tls-name">' + esc(c.title || COURSE_KIND_LABELS[c.kind]) + '</span>' +
       (c.regimen ? '<span class="chip sm">' + esc(c.regimen) + '</span>' : '') +
       '<span class="tls-acts">' +
-      (c.kind === 'chemo' ? '<button class="btn sm addbtn" data-act="cycle-add" data-id="' + esc(c.id) + '">＋ 周期</button>' : '') +
+      (cyclic ? '<button class="btn sm addbtn" data-act="cycle-add" data-id="' + esc(c.id) + '">＋ 周期</button>' : '') +
       (c.kind === 'radio' ? '<button class="btn sm" data-act="course-edit" data-id="' + esc(c.id) + '">备注</button>' : '') +
       '<button class="btn sm" data-act="course-edit" data-id="' + esc(c.id) + '">编辑</button>' +
       '<button class="btn sm danger" data-act="course-del" data-id="' + esc(c.id) + '">删除</button>' +
@@ -1771,7 +1913,7 @@ function timelineHtml(p) {
       h += '<div class="tl-empty">以下疗程尚无事件，可在此继续录入：</div>';
       courses.forEach(function (c) { h += tlsActRow(c); });
     } else {
-      h += '<div class="tl-empty">暂无治疗记录。点右上角「＋ 疗程」添加手术、化疗或放疗。</div>';
+      h += '<div class="tl-empty">暂无治疗记录。点右上角「＋ 疗程」添加手术、化疗、放疗或其他治疗。</div>';
     }
     h += '</div>';
     return h;
@@ -1872,6 +2014,7 @@ function timelineHtml(p) {
 
     /* 化疗给药子行：默认收起 —— 未展开所属周期则不渲染（修复「假折叠」） */
     var isSub = !!x.parentId;
+    var cyclic = COURSE_KINDS_CYCLIC.indexOf(x.kind) >= 0;   /* 有周期/给药结构（化疗 · 其他治疗） */
     if (isSub && !view.tlOpen[x.parentId]) return;
 
     var cls = 'tl-item ' + x.kind + (isSub ? ' sub' : '');
@@ -1884,13 +2027,17 @@ function timelineHtml(p) {
     h += '<div class="tl-body">' + esc(x.title || '') + (x.label ? ' <span class="chip sm">' + esc(x.label) + '</span>' : '') + '</div>';
     if (x.detail) h += '<div class="tl-note">' + esc(x.detail) + '</div>';
 
-    /* 化疗周期：折叠展开给药明细（默认收起） */
-    if (x.kind === 'chemo' && x.cycleId && !isSub) {
+    /* 周期行：折叠展开用药/给药明细（默认收起）。
+       文案沿用各类别的既有措辞：化疗叫「给药」，其他治疗叫「用药」。
+       之所以不统一：化疗「给药」是既有界面文案，改它会牵动一批渲染层断言，
+       属于无收益的连带改动。 */
+    if (cyclic && x.cycleId && !isSub) {
       var hasDoses = ev.some(function (y) { return y.parentId === x.cycleId; });
       if (hasDoses) {
         var opened = !!view.tlOpen[x.cycleId];
+        var wtxt = x.kind === 'chemo' ? '给药' : '用药';
         h += '<div><button class="tl-fold" data-act="timeline-fold" data-key="' + esc(x.cycleId) + '">' +
-          (opened ? '▾ 收起给药' : '▸ 展开给药') + '</button></div>';
+          (opened ? '▾ 收起' + wtxt : '▸ 展开' + wtxt) + '</button></div>';
       }
     }
 
@@ -1899,9 +2046,10 @@ function timelineHtml(p) {
       h += '<div class="tl-acts">' +
         '<button class="btn sm" data-act="course-edit" data-id="' + esc(x.courseId) + '">改日期</button>' +
         '</div>';
-    } else if (!isSub && x.kind === 'chemo') {
+    } else if (!isSub && cyclic) {
+      var wl = x.kind === 'chemo' ? '给药' : '用药';
       h += '<div class="tl-acts">' +
-        '<button class="btn sm addbtn" data-act="dose-add" data-id="' + esc(x.courseId) + '" data-n="' + x.cycleNo + '">＋ 给药</button>' +
+        '<button class="btn sm addbtn" data-act="dose-add" data-id="' + esc(x.courseId) + '" data-n="' + x.cycleNo + '">＋ ' + wl + '</button>' +
         '<button class="btn sm" data-act="cycle-edit" data-id="' + esc(x.courseId) + '" data-n="' + x.cycleNo + '">编辑周期</button>' +
         '<button class="btn sm danger" data-act="cycle-del" data-id="' + esc(x.courseId) + '" data-n="' + x.cycleNo + '">删除</button>' +
         '</div>';
@@ -1914,7 +2062,7 @@ function timelineHtml(p) {
     h += '</div>';
   });
 
-  h += '<div class="hint" style="margin-top:6px">放疗部分由排程自动推算，与上方治疗进度一致；手术与化疗为人工录入。</div>';
+  h += '<div class="hint" style="margin-top:6px">放疗部分由排程自动推算，与上方治疗进度一致；手术、化疗与其他治疗为人工录入（或 AI 识别后复核导入）。</div>';
   h += '</div>';
   return h;
 }
@@ -2802,6 +2950,9 @@ function runAiParse(text, images) {
 
 /* ---------- 复核 ---------- */
 function aiDraftKey(i, k) { return 'ai_' + i + '_' + k; }
+/* 「其他治疗」在复核界面用一个 JSON 文本框承载（嵌套数组，用表单逐项平铺不现实）。
+   输入不合法时**保留原文**并返回 false，绝不静默清空 —— 用户手填的内容不能丢。 */
+function aiOtherKey(i) { return 'ai_' + i + '_other'; }
 
 /* 把用户在复核界面上改动过的值收回草稿。
    重建界面前必须调用，否则会丢掉已填内容。 */
@@ -2812,13 +2963,66 @@ function syncAiDraftFromSheet() {
       var v = vals[aiDraftKey(i, k)];
       if (v !== undefined) p[k] = String(v == null ? '' : v).trim();
     });
+    var ov = vals[aiOtherKey(i)];
+    if (ov !== undefined) {
+      var r = parseAiOtherText(ov);
+      if (r.ok) { p.otherTreatments = r.list; p.otherErr = ''; }
+      else { p.otherErr = r.err; }        /* 保留原文与错误信息，导入时再拦一次 */
+      p.otherText = String(ov == null ? '' : ov);
+    }
   });
+}
+/* 解析复核界面里「其他治疗」文本框的内容。
+   兼容两种写法，降低用户负担：
+   1) JSON 数组：[{"title":"靶向治疗","startDate":"2026-03-01",...}]
+   2) 简写按行：每行「名称 | 开始日期 | 结束日期 | 备注」
+   空文本视为「无其他治疗」（合法）。 */
+function parseAiOtherText(txt) {
+  var s = String(txt == null ? '' : txt).trim();
+  if (!s) return { ok: true, list: [] };
+  if (s.charAt(0) === '[' || s.charAt(0) === '{') {
+    var j;
+    try { j = JSON.parse(s); } catch (e) { return { ok: false, err: 'JSON 格式有误：' + e.message }; }
+    return { ok: true, list: normalizeAiOtherList(j) };
+  }
+  /* 简写：每行一条，字段用 | 或 ｜ 分隔 */
+  var rows = [];
+  s.split(/\r?\n/).forEach(function (ln) {
+    var line = String(ln).trim();
+    if (!line) return;
+    var parts = line.split(/[|｜]/).map(function (x) { return x.trim(); });
+    rows.push({ title: parts[0] || '', startDate: parts[1] || '', endDate: parts[2] || '', note: parts[3] || '' });
+  });
+  return { ok: true, list: normalizeAiOtherList(rows) };
+}
+/* 草稿里「其他治疗」的文本形态（供复核界面回填） */
+function aiOtherTextOf(p) {
+  if (p.otherErr) return p.otherText || '';       /* 上次输入不合法：原样回填，别让用户重敲 */
+  var list = p.otherTreatments || [];
+  if (!list.length) return '';
+  return JSON.stringify(list.map(function (c) {
+    return {
+      title: c.title || '', startDate: c.startDate || '', endDate: c.endDate || '',
+      note: c.note || '',
+      cycles: (c.cycles || []).map(function (cy) {
+        return {
+          n: cy.n, startDate: cy.startDate || '', endDate: cy.endDate || '', note: cy.note || '',
+          doses: (cy.doses || []).map(function (d) {
+            return { date: d.date || '', drug: d.drug || '', dose: d.dose || '', unit: d.unit || '', note: d.note || '' };
+          })
+        };
+      })
+    };
+  }), null, 1);
 }
 /* 手动补录一条（应对 AI 完全漏掉的患者） */
 function addAiBlankRow() {
   if (sheetCtx) syncAiDraftFromSheet();
   var o = {};
   AI_FIELDS.forEach(function (k) { o[k] = ''; });
+  o.otherTreatments = [];     /* 与其他条目保持同形，避免复核界面取 undefined */
+  o.otherText = '';
+  o.otherErr = '';
   aiDraft.patients.push(o);
   openAiReview();
   toast('已新增一条空记录，请填写后导入');
@@ -2897,6 +3101,22 @@ function openAiReview() {
       '<div class="field" style="margin-bottom:8px"><label>' + aiLabelHtml(p, 'simDate') + '</label>' + textInput(aiDraftKey(i, 'simDate'), p.simDate, '', 'date') + '</div>' +
       '<div class="field" style="margin-bottom:8px"><label>' + aiLabelHtml(p, 'startDate') + '</label>' + textInput(aiDraftKey(i, 'startDate'), p.startDate, '', 'date') + '</div></div>' +
       '<div class="field" style="margin-bottom:0"><label>' + aiLabelHtml(p, 'position') + '</label>' + textInput(aiDraftKey(i, 'position'), p.position) + '</div>' +
+      /* ---- 其他治疗（靶向 / 免疫 / 内分泌 / 介入 / 中医 / 支持治疗…）----
+         嵌套数组用文本框承载，允许两种写法（见 parseAiOtherText）：
+         JSON 数组，或每行「名称 | 开始 | 结束 | 备注」的简写。
+         导入时统一走 normalizeAiOtherList 落成 courses[kind=other]。
+         ★ 这段**不属于 AI_FIELDS**：AI_FIELDS 是扁平单值字段表，
+           塞数组进去会破坏 aiRowEmpty/aiMissingOf/sheetValues 的单值假设，
+           且 test-ai.js 对 AI_FIELDS.length 有硬编码断言。 */
+      '<div class="field" style="margin-top:10px;margin-bottom:0">' +
+        '<label>其他治疗（靶向/免疫/内分泌/介入/中医/支持治疗等）' +
+        '<span class="chip sm">可留空</span></label>' +
+        '<div class="hint" style="margin:4px 0 6px;line-height:1.7">按行填写「名称 | 开始日期 | 结束日期 | 备注」即可；' +
+        '也可粘贴完整 JSON（含逐次用药）。留空表示无其他治疗。</div>' +
+        areaInput(aiOtherKey(i), aiOtherTextOf(p), '如 奥希替尼靶向治疗 | 2026-03-01 |  | 80mg qd') +
+        (p.otherErr ? '<div class="hint" style="color:var(--danger);margin-top:4px">格式有误：' + esc(p.otherErr) + '（原文已保留，请修正后再导入）</div>'
+          : (p.otherTreatments && p.otherTreatments.length ? '<div class="hint" style="margin-top:4px">已识别 <b>' + p.otherTreatments.length + '</b> 项其他治疗</div>' : '')) +
+      '</div>' +
       '</div>';
   });
 
@@ -2918,13 +3138,29 @@ function commitAiDraft() {
   var list = aiDraft.patients;
   var added = 0, noName = 0, noSchedule = 0;
   var names = [], needScheduleNames = [];
+  var otherTotal = 0;
 
-  /* 先预检，让用户知道会发生什么 */
+  /* 先预检，让用户知道会发生什么。
+     其他治疗的文本也在这里解析：格式不合法就拦下，不让脏数据悄悄丢字段。 */
+  var badOther = [];
   var preview = list.map(function (p, i) {
     var o = {};
     AI_FIELDS.forEach(function (k) { o[k] = String(vals[aiDraftKey(i, k)] == null ? '' : vals[aiDraftKey(i, k)]).trim(); });
+    var txt = vals[aiOtherKey(i)];
+    if (txt !== undefined) {
+      var r = parseAiOtherText(txt);
+      if (r.ok) o.otherTreatments = r.list;
+      else { o.otherTreatments = []; badOther.push('· 第 ' + (i + 1) + ' 位「' + (o.name || '（未填姓名）') + '」的其他治疗：' + r.err); }
+    } else {
+      o.otherTreatments = p.otherTreatments || [];
+    }
     return o;
   });
+  if (badOther.length) {
+    alert('以下「其他治疗」内容格式有误，无法导入：\n\n' + badOther.join('\n') +
+      '\n\n请修正后再点「确认导入」。（文本框内容已保留，不会丢失）');
+    return false;
+  }
   var willSkip = preview.filter(function (o) { return !o.name; }).length;
   var willNeedSchedule = preview.filter(function (o) { return o.name && (!o.startDate || !parseInt(o.fractions, 10)); }).length;
 
@@ -2940,9 +3176,13 @@ function commitAiDraft() {
   preview.forEach(function (o) {
     if (!o.name) { noName++; return; }
     if (!o.startDate || !parseInt(o.fractions, 10)) { noSchedule++; needScheduleNames.push(o.name); }
+    var others = o.otherTreatments || [];
+    otherTotal += others.length;
     state.patients.push(normalize({
       patients: [Object.assign(o, {
-        treatDays: treatDaysCfg(), pauses: [], extras: [], doneDates: [], reactions: [], followupPlans: [], notes: [], status: '在治'
+        treatDays: treatDaysCfg(), pauses: [], extras: [], doneDates: [], reactions: [], followupPlans: [], notes: [],
+        courses: others,          /* 已规整成 courses[kind=other] 形状，交给 normalize 统一兜底 */
+        status: '在治'
       })]
     }).patients[0]);
     added++;
@@ -2955,6 +3195,7 @@ function commitAiDraft() {
   view.page = 'tab'; view.tab = 'ward'; render();
 
   var tip = '已导入 ' + added + ' 位：' + names.join('、');
+  if (otherTotal) tip += '；含 ' + otherTotal + ' 项其他治疗';
   if (noName) tip += '；跳过 ' + noName + ' 条（无姓名）';
   toast(tip);
   if (noSchedule) {
@@ -3527,7 +3768,7 @@ function sheetCourse(p, course) {
     title: isNew ? '新增治疗疗程' : '编辑治疗疗程', okText: '保存',
     body: body +
       '<div class="hint" style="line-height:1.7">「' + kindLabel(c.kind) + '」疗程的详细日期请在时间轴上继续录入' +
-      (c.kind === 'chemo' ? '（化疗周期与给药）' : (c.kind === 'surgery' ? '（手术日期）' : '（放疗日期取现有排程）')) + '。</div>',
+      (c.kind === 'chemo' ? '（化疗周期与给药）' : (c.kind === 'surgery' ? '（手术日期）' : (c.kind === 'other' ? '（治疗周期与用药／操作）' : '（放疗日期取现有排程）'))) + '。</div>',
     onSave: function (v) {
       var kind = COURSE_KINDS.indexOf(v.kind) >= 0 ? v.kind : 'chemo';
       var title = String(v.title || '').trim();
@@ -3541,6 +3782,13 @@ function sheetCourse(p, course) {
         var created = p.courses[p.courses.length - 1];
         toast('已新增手术疗程，请填写手术日期');
         sheetSurgery(p, created);
+        return false;
+      }
+      /* other 与 chemo 同构：新增后直接引导录入第一个周期，避免「建完不知道下一步」 */
+      if (COURSE_KINDS_CYCLIC.indexOf(kind) >= 0 && isNew) {
+        var created2 = p.courses[p.courses.length - 1];
+        toast('已新增「' + kindLabel(kind) + '」疗程，请录入第 1 周期');
+        sheetCycle(p, created2.id, null);
         return false;
       }
       toast('已保存');
@@ -3564,18 +3812,20 @@ function sheetSurgery(p, course) {
   });
 }
 
-/* 化疗周期：新增 / 编辑 */
+/* 化疗 / 其他治疗 的周期：新增 / 编辑。
+   两类共用同一套周期结构，文案随 c.kind 变化（不再硬编码「化疗」）。 */
 function sheetCycle(p, cid, n) {
   if (!p) { closeSheet(); return; }
   var c = findCourse(p.id, cid);
   if (!c) { closeSheet(); return; }
+  var kn = COURSE_KIND_LABELS[c.kind] || '化疗';
   var cy = n ? findCycle(p, cid, n) : null;
   var isNew = !cy;
   var autoN = nextCycleNo(c);
   var d = cy || { n: autoN, startDate: '', endDate: '', note: '' };
   openSheet({
-    title: (isNew ? '新增化疗周期' : '编辑第 ' + d.n + ' 周期'), okText: '保存',
-    body: '<div class="hint" style="margin-bottom:8px">' + esc(c.title || '化疗') + (c.regimen ? ' · ' + esc(c.regimen) : '') + '</div>' +
+    title: (isNew ? '新增' : '编辑第 ' + d.n + ' ') + kn + '周期', okText: '保存',
+    body: '<div class="hint" style="margin-bottom:8px">' + esc(c.title || kn) + (c.regimen ? ' · ' + esc(c.regimen) : '') + '</div>' +
       '<div class="field2">' + field('周期序号', numberInput('n', d.n, '', '1')) +
       field('开始日期', textInput('startDate', d.startDate, '', 'date')) + '</div>' +
       field('结束日期', textInput('endDate', d.endDate, '', 'date'), '可留空') +
@@ -3595,9 +3845,13 @@ function sheetCycle(p, cid, n) {
   });
 }
 
-/* 化疗给药：新增 / 编辑 */
+/* 化疗 / 其他治疗 的「给药」：新增 / 编辑。
+   other 类的用药/操作同样是「药物 + 剂量 + 单位」，字段完全通用
+   （如靶向药 奥希替尼 80mg qd），故不另建表单。 */
 function sheetDose(p, cid, n, did) {
   if (!p) { closeSheet(); return; }
+  var c = findCourse(p.id, cid);
+  var kn = (c && COURSE_KIND_LABELS[c.kind]) || '化疗';
   var cy = findCycle(p, cid, n);
   if (!cy) { closeSheet(); return; }
   var d = null;
@@ -3605,16 +3859,16 @@ function sheetDose(p, cid, n, did) {
   var isNew = !d;
   d = d || { date: cy.startDate || todayStr(), drug: '', dose: '', unit: 'mg/m2', note: '' };
   openSheet({
-    title: (isNew ? '新增给药' : '编辑给药'), okText: '保存',
+    title: (isNew ? '新增' : '编辑') + (c && c.kind === 'other' ? '用药' : '给药'), okText: '保存',
     body: '<div class="hint" style="margin-bottom:8px">第 ' + cy.n + ' 周期' + (cy.startDate ? ' · ' + esc(cy.startDate) : '') + '</div>' +
-      field('给药日期', textInput('date', d.date, '', 'date')) +
-      field('药物', textInput('drug', d.drug, '如 紫杉醇 / 顺铂')) +
+      field('用药日期', textInput('date', d.date, '', 'date')) +
+      field('药物 / 措施', textInput('drug', d.drug, c && c.kind === 'other' ? '如 奥希替尼 / 帕博利珠单抗 / TACE' : '如 紫杉醇 / 顺铂')) +
       '<div class="field2">' + field('剂量', numberInput('dose', d.dose, '如 175')) +
       field('单位', textInput('unit', d.unit, '如 mg/m2 / mg')) + '</div>' +
       field('备注', areaInput('note', d.note, '如 预处理、减量')),
     onSave: function (v) {
-      if (!v.date) { toast('请填写给药日期'); return false; }
-      if (!String(v.drug || '').trim()) { toast('请填写药物名称'); return false; }
+      if (!v.date) { toast(c && c.kind === 'other' ? '请填写用药日期' : '请填写给药日期'); return false; }
+      if (!String(v.drug || '').trim()) { toast(c && c.kind === 'other' ? '请填写药物 / 措施名称' : '请填写药物名称'); return false; }
       upsertDose(p.id, cid, n, d.id, {
         date: dateOnly(v.date), drug: String(v.drug).trim(),
         dose: String(v.dose == null ? '' : v.dose).trim(), unit: String(v.unit || '').trim(),
@@ -4308,7 +4562,9 @@ function delCourse(pid, cid) {
   var p = getPatient(pid); if (!p) return;
   var c = findCourse(pid, cid);
   if (!c) return;
-  if (!confirm('确定删除这条「' + (COURSE_KIND_LABELS[c.kind] || '疗程') + '」记录？其下所有周期与给药记录都会一并删除。')) return;
+  /* 只有带周期结构的类别才有「周期与给药」可删；手术/放疗就一条记录，别说多余的话 */
+  var tail = COURSE_KINDS_CYCLIC.indexOf(c.kind) >= 0 ? '其下所有周期与用药记录都会一并删除。' : '';
+  if (!confirm('确定删除这条「' + (COURSE_KIND_LABELS[c.kind] || '疗程') + '」记录？' + tail)) return;
   p.courses = (p.courses || []).filter(function (x) { return x.id !== cid; });
   save(); render(); toast('已删除');
 }
@@ -4733,6 +4989,7 @@ function bind() {
     'course-edit': function (el) {
       var c = findCourse(view.pid, el.dataset.id);
       if (!c) { toast('未找到该疗程'); return; }
+      /* 手术只编辑「日期 + 术式」，故单独走 sheetSurgery；其余（化疗/放疗/其他）走通用表单 */
       if (c.kind === 'surgery') sheetSurgery(getPatient(view.pid), c);
       else sheetCourse(getPatient(view.pid), c);
     },
