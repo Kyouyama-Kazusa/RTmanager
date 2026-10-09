@@ -172,7 +172,7 @@ Classic token 勾选 `gist`；Fine-grained token 把 `Gists` 设为 Read and wri
 > 1. `bash dev-tools/release.sh "改动说明"` —— 应用本体上 GitHub Pages
 > 2. `bash dev-tools/pack-asset.sh`，再由智能体把包上传到**项目资产（网盘）**
 
-**发布用 `dev-tools/release.sh`，它会自动递增 `sw.js` 里的 `CACHE` 版本号（当前 `radiotherapy-v25`）、
+**发布用 `dev-tools/release.sh`，它会自动递增 `sw.js` 里的 `CACHE` 版本号（当前 `radiotherapy-v27`）、
 跑完测试再推送，并轮询确认 Pages 已生效** —— 不递增版本号的话，已安装到桌面的用户会停留在旧版本。
 
 ```bash
@@ -187,7 +187,7 @@ bash dev-tools/pack-asset.sh        # 校验 → 打包到 /workspace/RTmanager-
 
 发布前会自动跑两道门禁：
 
-- 回归测试（`dev-tools/`，共 **1,486 项断言**，19 个套件 + `qa-audit`，全部只读取 `index.html`，不修改源码）
+- 回归测试（`dev-tools/`，共 **1,528 项断言**，19 个套件 + `qa-audit`，全部只读取 `index.html`，不修改源码）
 - 兼容性门禁 `test-compat.js`（58 项）—— 拦截会让老用户丢数据或导致 PWA 装不上的改动
 
 ```bash
