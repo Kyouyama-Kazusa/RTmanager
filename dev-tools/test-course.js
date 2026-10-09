@@ -588,6 +588,201 @@ group('G. 折叠行为（渲染层）');
 }
 
 /* ================================================================ */
+group('H. 顶部治疗概况与末尾疗程管理（渲染层）');
+
+{
+  /* H1. courseSummaryHtml 存在、返回字符串、无治疗时给空态 */
+  ok(typeof courseSummaryHtml === 'function', 'H1 courseSummaryHtml 存在');
+  {
+    const p = mk({ name: 'H1空', startDate: '', fractions: '' });
+    const s = courseSummaryHtml(p);
+    ok(typeof s === 'string' && s.length > 0, 'H1 返回非空字符串');
+    ok(s.indexOf('tls-empty') >= 0, 'H1 无任何治疗 → 空态', s.slice(0, 80));
+    ok(s.indexOf('tls-row') < 0, 'H1 空态不含治疗行');
+  }
+
+  /* H2. ★ 概况区绝不污染 tl-item / timeline-fold 正则计数
+     （test-course.js G 组对 tl-item 系列做精确等值断言，match 是子串匹配，
+       概况区一旦蹭到这些片段，G0/G2/G3 会集体误红 —— 这条断言把约束钉死） */
+  {
+    const p = mk({
+      name: 'H2', startDate: '2026-03-02', fractions: '10', dosePerFraction: '2',
+      courses: [
+        { id: 'hs', kind: 'surgery', title: '手术', date: '2026-02-01' },
+        { id: 'hc', kind: 'chemo', title: '化疗', cycles: [{ id: 'hy', n: 1, startDate: '2026-03-03' }] }
+      ]
+    });
+    const s = courseSummaryHtml(p);
+    ok(s.indexOf('tl-item') < 0, '★★ H2 概况区不含 tl-item 片段', s.indexOf('tl-item'));
+    ok(s.indexOf('timeline-fold') < 0, '★★ H2 概况区不含 timeline-fold');
+    ok(s.indexOf('data-key="r') < 0, '★★ H2 概况区不含 data-key="r');
+    ok(s.indexOf('展开逐次') < 0 && s.indexOf('展开给药') < 0, '★ H2 概况区不含折叠文案');
+  }
+
+  /* H3. 放疗行：数字与治疗进度同口径（doneCount / plannedCount） */
+  {
+    const p = mk({ name: 'H3', startDate: '2026-03-02', fractions: '20', dosePerFraction: '2' });
+    const s = courseSummaryHtml(p);
+    ok(s.indexOf('tls-radio') >= 0, 'H3 纯放疗患者概况含放疗行');
+    ok(s.indexOf('已完成 ' + doneCount(p) + '/' + plannedCount(p) + ' 次') >= 0,
+      '★★ H3 放疗「已完成 x/y 次」与 doneCount/plannedCount 一致',
+      { expect: doneCount(p) + '/' + plannedCount(p) });
+    ok(s.indexOf('tls-chemo') < 0 && s.indexOf('tls-surgery') < 0,
+      'H3 无化疗/手术 → 对应行隐藏');
+  }
+
+  /* H4. 放疗数字随处方次数变化（动态正确性，防写死） */
+  {
+    const a = mk({ name: 'H4a', startDate: '2026-03-02', fractions: '10' });
+    const b = mk({ name: 'H4b', startDate: '2026-03-02', fractions: '25' });
+    const sa = courseSummaryHtml(a), sb = courseSummaryHtml(b);
+    ok(sa.indexOf('/10 次') >= 0 && sb.indexOf('/25 次') >= 0,
+      '★ H4 放疗总数随 fractions 变化', { a: sa.match(/已完成 \d+\/\d+/), b: sb.match(/已完成 \d+\/\d+/) });
+  }
+
+  /* H5. 化疗行：方案名 + 周期数 */
+  {
+    const p = mk({
+      name: 'H5',
+      courses: [{ id: 'c5', kind: 'chemo', title: '第1程', regimen: 'TP方案', cycles: [
+        { id: 'y51', n: 1, startDate: '2026-02-01' }, { id: 'y52', n: 2, startDate: '2026-02-21' }
+      ] }]
+    });
+    const s = courseSummaryHtml(p);
+    ok(s.indexOf('tls-chemo') >= 0, 'H5 化疗行出现');
+    ok(s.indexOf('第1程') >= 0 && s.indexOf('TP方案') >= 0, 'H5 含疗程名与方案名');
+    ok(/2 周期/.test(s), '★ H5 周期数正确（2）', s.match(/\d+ 周期/));
+    ok(s.indexOf('最近 02/21') >= 0, '★ H5 最近周期日期取最新一条', s.match(/最近 [\d/]*/));
+  }
+
+  /* H6. 手术行：术式名 + 日期 */
+  {
+    const p = mk({ name: 'H6', courses: [{ id: 's6', kind: 'surgery', title: '根治术', date: '2026-01-10' }] });
+    const s = courseSummaryHtml(p);
+    ok(s.indexOf('tls-surgery') >= 0, 'H6 手术行出现');
+    ok(s.indexOf('根治术') >= 0, 'H6 含术式名');
+    ok(s.indexOf('01/10') >= 0, '★ H6 含日期', s.match(/tls-meta">[^<]*/));
+  }
+
+  /* H7. 三类齐全 → 三个 class 各出现 */
+  {
+    const p = mk({
+      name: 'H7', startDate: '2026-03-02', fractions: '5',
+      courses: [
+        { id: 'h7s', kind: 'surgery', title: '手术', date: '2026-02-01' },
+        { id: 'h7c', kind: 'chemo', title: '化疗', cycles: [{ id: 'h7y', n: 1, startDate: '2026-03-03' }] }
+      ]
+    });
+    const s = courseSummaryHtml(p);
+    ok(s.indexOf('tls-radio') >= 0 && s.indexOf('tls-chemo') >= 0 && s.indexOf('tls-surgery') >= 0,
+      '★ H7 三类行齐全');
+    ok((s.match(/class="tls-row/g) || []).length === 3, 'H7 恰好 3 行', (s.match(/class="tls-row/g) || []).length);
+  }
+
+  /* H8. ★ 无事件化疗疗程（刚建、还没排周期）仍能拿到「＋ 周期」——
+     这是 test-course.js D2 的命脉，也是真实用户必经路径 */
+  {
+    const p = mk({
+      name: 'H8', startDate: '2026-03-02', fractions: '5',
+      courses: [{ id: 'h8c', kind: 'chemo', title: '空化疗', cycles: [] }]
+    });
+    view.pid = p.id; view.tlDesc = false; view.tlOpen = {};
+    const h = timelineHtml(p);
+    const btn = String(h).match(/<button[^>]*data-act="cycle-add"[^>]*>/);
+    ok(!!btn, '★★ H8 无事件化疗疗程仍渲染「＋ 周期」', btn && btn[0]);
+    ok(!!btn && btn[0].indexOf('data-id="h8c"') >= 0, '★★ H8 该按钮自带正确 data-id', btn && btn[0]);
+    /* 无事件 → 走空态分支，用 tls-actrow 承载 */
+    ok(h.indexOf('tls-actrow') >= 0, 'H8 空态分支用 tls-actrow 承载录入入口');
+  }
+
+  /* H9. 完全无事件且无疗程 → 纯空态文案 */
+  {
+    const p = mk({ name: 'H9', startDate: '', fractions: '' });
+    view.pid = p.id; view.tlDesc = false; view.tlOpen = {};
+    const h = timelineHtml(p);
+    ok(h.indexOf('tl-empty') >= 0, 'H9 全空 → 空态提示');
+    ok(h.indexOf('cycle-add') < 0, 'H9 无疗程 → 无 cycle-add');
+    ok(h.indexOf('tls-actrow') < 0, 'H9 无疗程 → 无管理行');
+  }
+
+  /* H10. ★ 末尾「疗程管理」区：每个疗程恰好一个 course-del，且都带 data-id */
+  {
+    const p = mk({
+      name: 'H10', startDate: '2026-03-02', fractions: '6', dosePerFraction: '2',
+      courses: [
+        { id: 'hAs', kind: 'surgery', title: '手术', date: '2026-03-03' },
+        { id: 'hAc', kind: 'chemo', title: '化疗', cycles: [{ id: 'hAy', n: 1, startDate: '2026-03-04' }] },
+        { id: 'hAr', kind: 'radio', title: '放疗' }
+      ]
+    });
+    view.pid = p.id; view.tlDesc = false; view.tlOpen = {};
+    const h = timelineHtml(p);
+    ok(h.indexOf('tls-sub') >= 0 && h.indexOf('疗程管理') >= 0, '★ H10 出现「疗程管理」区标题');
+    ok((h.match(/class="tls-actrow"/g) || []).length === 3, '★ H10 管理行 = 疗程数（3）',
+      (h.match(/class="tls-actrow"/g) || []).length);
+    const dels = h.match(/<button[^>]*data-act="course-del"[^>]*>/g) || [];
+    ok(dels.length === 3, '★★ H10 course-del 恰好 3 个（每疗程一个，无重复）', dels.length);
+    ok(dels.every(d => d.indexOf('data-id="') >= 0), '★★ H10 每个 course-del 都自带 data-id');
+    /* D6 就是抓第一个 course-del —— 这里正面复验它可用 */
+    ok(dels.length > 0 && dels[0].indexOf('data-id="') >= 0, '★ H10 第一个 course-del 可被 D6 抓取且带 data-id', dels[0]);
+  }
+
+  /* H11. 放疗被切成多段时，疗程级按钮**不重复**堆在每段段头上 */
+  {
+    const p = mk({
+      name: 'H11', startDate: '2026-03-02', fractions: '10', dosePerFraction: '2',
+      courses: [
+        { id: 'hBc', kind: 'chemo', title: '同步化疗', cycles: [{ id: 'hBy', n: 1, startDate: '2026-03-04' }] },
+        { id: 'hBr', kind: 'radio', title: '放疗' }
+      ]
+    });
+    view.pid = p.id; view.tlDesc = false; view.tlOpen = {};
+    const h = timelineHtml(p);
+    const segs = (h.match(/class="tl-item radio tl-seg"/g) || []).length;
+    ok(segs === 2, 'H11 前置：放疗被切成 2 段', segs);
+    const rDel = (h.match(/<button[^>]*data-act="course-del"[^>]*data-id="hBr"[^>]*>/g) || []).length;
+    ok(rDel === 1, '★ H11 放疗疗程删除按钮只出现 1 次（不随段数膨胀）', rDel);
+  }
+
+  /* H12. 时间轴不再输出废弃的疗程头 class（tl-cname/tl-course） */
+  {
+    const p = mk({ name: 'H12', startDate: '2026-03-02', fractions: '5' });
+    view.pid = p.id; view.tlDesc = false; view.tlOpen = {};
+    const h = timelineHtml(p);
+    ok(h.indexOf('tl-cname') < 0, '★ H12 不再输出 tl-cname（疗程头已废弃）');
+    ok(h.indexOf('tl-course') < 0, '★ H12 不再输出 tl-course');
+  }
+
+  /* H13. 倒序不影响概况区与按钮可用性 */
+  {
+    const p = mk({
+      name: 'H13', startDate: '2026-03-02', fractions: '6', dosePerFraction: '2',
+      courses: [{ id: 'hCc', kind: 'chemo', title: '化疗', cycles: [{ id: 'hCy', n: 1, startDate: '2026-03-04' }] }]
+    });
+    view.pid = p.id; view.tlDesc = true; view.tlOpen = {};
+    const h = timelineHtml(p);
+    ok(h.indexOf('tls-radio') >= 0, 'H13 倒序下概况区仍在');
+    ok((h.match(/class="tls-actrow"/g) || []).length === 1, 'H13 倒序下管理行仍完整');
+    ok((h.match(/<button[^>]*data-act="cycle-add"[^>]*>/g) || []).length === 1, 'H13 倒序下 cycle-add 仍可用');
+    view.tlDesc = false; view.tlOpen = {};
+  }
+
+  /* H14. 概况区在详情页里真实渲染出来（端到端，不只手调函数） */
+  {
+    const p = mk({
+      name: 'H14', startDate: '2026-03-02', fractions: '5',
+      courses: [{ id: 'hDs', kind: 'surgery', title: '根治术', date: '2026-03-03' }]
+    });
+    view.page = 'patient'; view.pid = p.id; view.tlDesc = false; view.tlOpen = {};
+    render();
+    const pageHtml = String(getEl('view').innerHTML);
+    ok(pageHtml.indexOf('tls-radio') >= 0, '★★ H14 详情页渲染出概况区放疗行');
+    ok(pageHtml.indexOf('tls-surgery') >= 0, '★★ H14 详情页渲染出概况区手术行');
+    ok(pageHtml.indexOf('疗程管理') >= 0, '★ H14 详情页渲染出疗程管理区');
+  }
+}
+
+/* ================================================================ */
 console.log('');
 console.log('========================================');
 console.log('通过 ' + pass + ' 项，失败 ' + fail + ' 项');
