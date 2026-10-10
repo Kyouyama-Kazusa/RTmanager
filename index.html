@@ -216,6 +216,26 @@ button,input,select,textarea{font:inherit;color:inherit}
 .tls-actrow .tls-acts{display:flex;gap:5px;flex-wrap:wrap;margin-left:auto}
 .tls-actrow .tls-acts .btn{padding:3px 7px;min-height:28px;font-size:12px}
 .tls-empty{color:var(--sub);font-size:13px;padding:6px 2px}
+/* 管理区行内的操作按钮（v0.14.0：管理区成为唯一操作入口，按钮略密） */
+.tls-row .tls-acts{display:flex;gap:5px;flex-wrap:wrap;margin-left:auto}
+.tls-row .tls-acts .btn{padding:3px 7px;min-height:28px;font-size:12px}
+/* 管理区展开后的周期明细行：浅底缩进，与疗程行形成层级 */
+.tls-cyc{display:flex;align-items:center;gap:6px;flex-wrap:wrap;
+  margin:4px 0 4px 10px;padding:5px 8px;background:#f7f9fb;border-radius:9px;
+  border-left:3px solid var(--line)}
+.tls-cyc-n{font-size:13px;font-weight:600;white-space:nowrap}
+.tls-cyc-date{font-size:12px;color:var(--sub);font-variant-numeric:tabular-nums}
+.tls-cyc .tls-acts{margin-left:auto}
+.tls-cyc .tls-acts .btn{padding:3px 7px;min-height:28px;font-size:12px}
+.tls-cyc-empty{margin-left:10px;color:var(--sub);font-size:12px;background:none;border-left-color:transparent}
+/* 给药明细：再缩进一级，右侧仍是编辑/删除 */
+.tls-dose{display:flex;align-items:center;gap:6px;flex-wrap:wrap;
+  margin:3px 0 3px 26px;padding:4px 8px;background:#fbfcfd;border-radius:8px}
+.tls-dose-date{font-size:12px;color:var(--sub);font-variant-numeric:tabular-nums;white-space:nowrap}
+.tls-dose-name{font-size:13px;word-break:break-all}
+.tls-dose-note{font-size:12px;color:var(--sub);word-break:break-all}
+.tls-dose .tls-acts{margin-left:auto}
+.tls-dose .tls-acts .btn{padding:2px 6px;min-height:26px;font-size:12px}
 
 .mask{position:fixed;inset:0;background:rgba(16,24,40,.42);z-index:40;opacity:0;transition:opacity .18s}
 .mask[hidden]{display:none}
@@ -296,7 +316,7 @@ button,input,select,textarea{font:inherit;color:inherit}
 var LS_KEY = 'radiotherapy.v1';
 var SNAP_PREFIX = 'radiotherapy.snap.';
 var SNAP_KEEP = 7;
-var APP_VERSION = '0.13.4';
+var APP_VERSION = '0.14.0';
 
 var SEXES = ['男', '女'];
 var PURPOSES = ['根治性', '术后辅助', '术前新辅助', '姑息性'];
@@ -1798,75 +1818,145 @@ function radioSegTitle(s) {
   return base;
 }
 
-/* 概况区「按周期结构」的一行（化疗 / 其他治疗 共用）。
+/* 管理区「按周期结构」的一行（化疗 / 其他治疗 共用）—— v0.14.0 起
+   **承载全部操作**：本行右侧挂「＋周期 / 编辑 / 删除」，展开后逐周期列出，
+   每个周期右侧挂「＋给药 / 编辑周期 / 删除」。
+
    cls 与 chip 类名由 kind 决定，保证 tls-chemo / tls-other 各自可被测试精确定位。
-   ★ 输出里绝不出现 tl-item 片段 —— 概况区蹭到就把 test-course.js G 组的
+   ★ 输出里绝不出现 tl-item 片段 —— 管理区蹭到就把 test-course.js G 组的
      /class="tl-item chemo"/g 精确计数顶高（match 是子串匹配）。 */
-function cycleSummaryRow(c, fallbackName) {
-  var cys = c.cycles || [];
+function cycleManageRow(c, fallbackName) {
+  var cys = (c.cycles || []).slice().sort(function (a, b) {
+    return (parseInt(a.n, 10) || 0) - (parseInt(b.n, 10) || 0);
+  });
   var last = cys.map(function (x) { return dateOnly(x.startDate); }).filter(Boolean).sort().pop();
-  return '<div class="tls-row tls-' + esc(c.kind) + '">' +
+  var key = mgKey(c.id);
+  var open = !!view.tlOpen[key];
+
+  var h = '<div class="tls-row tls-' + esc(c.kind) + '">' +
     '<span class="chip ' + (COURSE_KIND_CHIPS[c.kind] || '') + ' sm">' + esc(COURSE_KIND_LABELS[c.kind] || fallbackName) + '</span>' +
     '<span class="tls-name">' + esc(c.title || fallbackName) + '</span>' +
     (c.regimen ? '<span class="chip sm">' + esc(c.regimen) + '</span>' : '') +
     '<span class="tls-meta">' + cys.length + ' 周期' + (last ? ' · 最近 ' + esc(mdLabel(last)) : '') + '</span>' +
-    '</div>';
+    '<span class="tls-acts">' +
+    /* 周期列表的展开/收起。无周期也给按钮 —— 用户要先看到「还没有周期」才知道该点＋周期 */
+    '<button class="btn sm" data-act="mg-fold" data-key="' + esc(key) + '">' +
+    (open ? '▾ 收起周期' : '▸ 周期明细') + '</button>' +
+    '<button class="btn sm addbtn" data-act="cycle-add" data-id="' + esc(c.id) + '">＋ 周期</button>' +
+    '<button class="btn sm" data-act="course-edit" data-id="' + esc(c.id) + '">编辑</button>' +
+    '<button class="btn sm danger" data-act="course-del" data-id="' + esc(c.id) + '">删除</button>' +
+    '</span></div>';
+
+  if (!open) return h;
+
+  /* 展开态：逐周期一行，每行挂周期级操作 */
+  if (!cys.length) {
+    h += '<div class="tls-cyc tls-cyc-empty">尚无周期。点上方「＋ 周期」录入第 1 个周期。</div>';
+    return h;
+  }
+  cys.forEach(function (cy) {
+    var ds = cy.doses || [];
+    var kn = COURSE_KIND_LABELS[c.kind] || '化疗';
+    var wl = c.kind === 'chemo' ? '给药' : '用药';   /* 沿用各类别既有措辞，不统一 */
+    h += '<div class="tls-cyc">' +
+      '<span class="tls-cyc-n">第 ' + esc(String(cy.n)) + ' ' + esc(kn) + '周期</span>' +
+      '<span class="tls-cyc-date">' + esc(cy.startDate ? mdLabel(dateOnly(cy.startDate)) : '未定日期') +
+      (cy.endDate ? ' ~ ' + esc(mdLabel(dateOnly(cy.endDate))) : '') + '</span>' +
+      (ds.length ? '<span class="chip sm">' + ds.length + ' 次' + esc(wl) + '</span>' : '') +
+      '<span class="tls-acts">' +
+      '<button class="btn sm addbtn" data-act="dose-add" data-id="' + esc(c.id) + '" data-n="' + esc(String(cy.n)) + '">＋ ' + esc(wl) + '</button>' +
+      '<button class="btn sm" data-act="cycle-edit" data-id="' + esc(c.id) + '" data-n="' + esc(String(cy.n)) + '">编辑周期</button>' +
+      '<button class="btn sm danger" data-act="cycle-del" data-id="' + esc(c.id) + '" data-n="' + esc(String(cy.n)) + '">删除</button>' +
+      '</span></div>';
+    /* 给药明细：只读展示（编辑/删除在下方逐条列出） */
+    ds.forEach(function (d) {
+      var label = [d.drug, (d.dose ? d.dose + (d.unit || '') : '')].filter(Boolean).join(' ') || '（未填药物）';
+      h += '<div class="tls-dose">' +
+        '<span class="tls-dose-date">' + esc(d.date ? mdLabel(dateOnly(d.date)) : '未定日期') + '</span>' +
+        '<span class="tls-dose-name">' + esc(label) + '</span>' +
+        (d.note ? '<span class="tls-dose-note">' + esc(d.note) + '</span>' : '') +
+        '<span class="tls-acts">' +
+        '<button class="btn sm" data-act="dose-edit" data-id="' + esc(c.id) + '" data-n="' + esc(String(cy.n)) + '" data-dose="' + esc(d.id) + '">编辑</button>' +
+        '<button class="btn sm danger" data-act="dose-del" data-id="' + esc(c.id) + '" data-n="' + esc(String(cy.n)) + '" data-dose="' + esc(d.id) + '">删除</button>' +
+        '</span></div>';
+    });
+  });
+  return h;
 }
 
-/* 全程治疗概况：**纯只读**，不含任何操作按钮。
-   放疗一行（全局唯一，口径与「治疗进度」一致）、化疗逐疗程一行、
-   其他治疗逐疗程一行、手术逐疗程一行。
-   无该类治疗则整行隐藏；四类全无则输出空态。
+/* 手术行（管理区）：术式 + 日期 + 改日期/编辑/删除 */
+function surgeryManageRow(c) {
+  return '<div class="tls-row tls-surgery">' +
+    '<span class="chip warn sm">手术</span>' +
+    '<span class="tls-name">' + esc(c.title || '手术') + '</span>' +
+    '<span class="tls-meta">' + (c.date ? esc(mdLabel(dateOnly(c.date))) : '未定日期') + '</span>' +
+    '<span class="tls-acts">' +
+    '<button class="btn sm" data-act="course-edit" data-id="' + esc(c.id) + '">改日期</button>' +
+    '<button class="btn sm danger" data-act="course-del" data-id="' + esc(c.id) + '">删除</button>' +
+    '</span></div>';
+}
+
+/* 放疗行（管理区）：口径与「治疗进度」一致；放疗的疗程记录可能压根不存在，
+   此时仍要能「编辑备注」—— 那就得先有一条 radio 疗程，故按需创建（见 ensureRadioCourse）。 */
+function radioManageRow(p) {
+  var rc = (p.courses || []).filter(function (c) { return c.kind === 'radio'; })[0];
+  var planned = plannedCount(p);
+  var dn = doneCount(p);
+  var sch = computeSchedule(p);
+  var from = sch.length ? sch[0].date : '';
+  var to = sch.length ? sch[sch.length - 1].date : (scheduleEnd(p) || '');
+  return '<div class="tls-row tls-radio">' +
+    '<span class="chip pri sm">放疗</span>' +
+    '<span class="tls-name">' + esc((rc && rc.title) || '放疗排程') + '</span>' +
+    '<span class="chip sm">已完成 ' + dn + '/' + planned + ' 次</span>' +
+    (from ? '<span class="tls-meta">' + esc(mdLabel(from)) + ' ~ ' + esc(mdLabel(to)) + '</span>' : '') +
+    '<span class="tls-acts">' +
+    /* 排程本体在「治疗进度」区编辑；这里只给疗程记录的备注入口 */
+    '<button class="btn sm" data-act="radio-note" data-id="' + esc((rc && rc.id) || '') + '">备注</button>' +
+    '</span></div>';
+}
+
+/* 管理区展开态的 key（与时间轴的 r/cy 前缀刻意区分，避免两处折叠互相干扰） */
+function mgKey(id) { return 'mg' + (id || ''); }
+
+/* ★★★ 治疗管理与概况：**唯一操作入口** ★★★（v0.14.0 起）
+   放疗一行（全局唯一）、化疗/其他治疗逐疗程一行（可展开逐周期）、手术逐疗程一行。
+   下方时间轴从此**只读**，仅保留折叠展开用于浏览。
 
    ★ class 前缀必须是 tls-（timeline summary），绝不可出现 tl-item / timeline-fold /
      data-key="r 这些片段 —— test-course.js 的 G 组对 tl-item 系列正则做**精确计数**断言
-     （如 /class="tl-item chemo"/g 必须恰好 1），match() 是子串匹配，一旦概况区蹭到这些
+     （如 /class="tl-item chemo"/g 必须恰好 1），match() 是子串匹配，一旦这里蹭到这些
      片段就会把计数顶高、把测试弄红。详见 DECISIONS §五之八。 */
 function courseSummaryHtml(p) {
   var rows = [];
 
   /* 放疗：唯一真相在顶层排程，不看 courses 里的 radio 条目（可能压根没有） */
-  var planned = plannedCount(p);
-  if (planned > 0) {
-    var dn = doneCount(p);
-    var sch = computeSchedule(p);
-    var from = sch.length ? sch[0].date : '';
-    var to = sch.length ? sch[sch.length - 1].date : (scheduleEnd(p) || '');
-    var rc = (p.courses || []).filter(function (c) { return c.kind === 'radio'; })[0];
-    rows.push('<div class="tls-row tls-radio">' +
-      '<span class="chip pri sm">放疗</span>' +
-      '<span class="tls-name">' + esc((rc && rc.title) || '放疗排程') + '</span>' +
-      '<span class="chip sm">已完成 ' + dn + '/' + planned + ' 次</span>' +
-      (from ? '<span class="tls-meta">' + esc(mdLabel(from)) + ' ~ ' + esc(mdLabel(to)) + '</span>' : '') +
-      '</div>');
-  }
+  if (plannedCount(p) > 0) rows.push(radioManageRow(p));
 
   /* 化疗：逐疗程一行 */
   (p.courses || []).filter(function (c) { return c.kind === 'chemo'; }).forEach(function (c) {
-    rows.push(cycleSummaryRow(c, '化疗'));
+    rows.push(cycleManageRow(c, '化疗'));
   });
 
   /* 其他治疗（靶向 / 免疫 / 内分泌 / 介入 / 中医 / 支持治疗…）：逐疗程一行 */
   (p.courses || []).filter(function (c) { return c.kind === 'other'; }).forEach(function (c) {
-    rows.push(cycleSummaryRow(c, '其他治疗'));
+    rows.push(cycleManageRow(c, '其他治疗'));
   });
 
   /* 手术：逐疗程一行 */
   (p.courses || []).filter(function (c) { return c.kind === 'surgery'; }).forEach(function (c) {
-    rows.push('<div class="tls-row tls-surgery">' +
-      '<span class="chip warn sm">手术</span>' +
-      '<span class="tls-name">' + esc(c.title || '手术') + '</span>' +
-      '<span class="tls-meta">' + (c.date ? esc(mdLabel(dateOnly(c.date))) : '未定日期') + '</span>' +
-      '</div>');
+    rows.push(surgeryManageRow(c));
   });
 
-  if (!rows.length) return '<div class="tls tls-empty">暂无治疗概况。点右上角「＋ 疗程」添加手术、化疗、放疗或其他治疗。</div>';
+  if (!rows.length) return '<div class="tls tls-empty">暂无治疗记录。点右上角「＋ 疗程」添加手术、化疗、放疗或其他治疗。</div>';
   return '<div class="tls">' + rows.join('') + '</div>';
 }
 
 /* 渲染全程治疗时间轴卡片。
-   分层：先按「疗程」分组给出疗程头（承载疗程级操作：加周期 / 编辑 / 删除），
-   再在该疗程下按日期列出事件（手术节点 / 化疗周期+给药 / 放疗逐次）。
+   ★ v0.14.0 起**纯只读**：所有操作按钮（＋周期 / ＋给药 / 编辑 / 删除 / 改日期）
+     全部上移到顶部「治疗管理与概况」区；这里只保留「折叠展开」用于浏览明细。
+     分层：一条按日期排好的单一流水；放疗逐次按「被非放疗事件打断」切成若干段
+     （段头默认折叠）；手术 / 化疗 / 其他治疗各自成行，插入在其实日期所在位置。
    要点（血的教训）：每个按钮都必须自带 data-id/data-n/data-dose，
    不得依赖 view.pid —— 时间轴可能在不同语境下打开。 */
 function timelineHtml(p) {
@@ -1879,51 +1969,27 @@ function timelineHtml(p) {
     '<button class="btn sm addbtn" data-act="course-add">＋ 疗程</button>' +
     '</span></div>';
 
-  /* 顶部治疗概况：放疗 / 化疗 / 手术三类一眼看全（只读）。 */
+  /* 顶部「治疗管理与概况」：四类一眼看全 + 全部操作入口。 */
   h += courseSummaryHtml(p);
 
   var courses = p.courses || [];
 
-  /* 疗程管理行：承载疗程级操作（＋周期 / 备注 / 编辑 / 删除）。
-     原先这些按钮挂在「疗程头」上内联在事件流里；重构后疗程头取消，
-     疗程管理行统一收在时间轴**末尾**的「疗程管理区」，
-     顶部的 courseSummaryHtml 只读、不重复放按钮。
-     ★ 只用 tls- 前缀，且所有按钮必须自带 data-id
-       （test-course.js D6 会抓第一个 course-del 并断言它带 data-id）。 */
-  function tlsActRow(c) {
-    /* 有周期结构的类别（化疗 / 其他治疗）才给「＋ 周期」；
-       用 COURSE_KINDS_CYCLIC 判定，新增同类类别时不必再改这里。 */
-    var cyclic = COURSE_KINDS_CYCLIC.indexOf(c.kind) >= 0;
-    return '<div class="tls-actrow">' +
-      '<span class="chip ' + (COURSE_KIND_CHIPS[c.kind] || '') + ' sm">' + (COURSE_KIND_LABELS[c.kind] || '') + '</span>' +
-      '<span class="tls-name">' + esc(c.title || COURSE_KIND_LABELS[c.kind]) + '</span>' +
-      (c.regimen ? '<span class="chip sm">' + esc(c.regimen) + '</span>' : '') +
-      '<span class="tls-acts">' +
-      (cyclic ? '<button class="btn sm addbtn" data-act="cycle-add" data-id="' + esc(c.id) + '">＋ 周期</button>' : '') +
-      (c.kind === 'radio' ? '<button class="btn sm" data-act="course-edit" data-id="' + esc(c.id) + '">备注</button>' : '') +
-      '<button class="btn sm" data-act="course-edit" data-id="' + esc(c.id) + '">编辑</button>' +
-      '<button class="btn sm danger" data-act="course-del" data-id="' + esc(c.id) + '">删除</button>' +
-      '</span></div>';
-  }
-
   if (!ev.length) {
     /* 纪要：即使一个事件都没有（如化疗疗程刚建、还没排周期），
-       也必须给出录入入口，否则疗程建完就再也加不了周期 —— 死路。 */
-    if (courses.length) {
-      h += '<div class="tl-empty">以下疗程尚无事件，可在此继续录入：</div>';
-      courses.forEach(function (c) { h += tlsActRow(c); });
-    } else {
-      h += '<div class="tl-empty">暂无治疗记录。点右上角「＋ 疗程」添加手术、化疗、放疗或其他治疗。</div>';
-    }
+       上方管理区也一定给出了录入入口（cycle-add），不会成为死路。 */
+    h += '<div class="tl-empty">' +
+      (courses.length ? '以下疗程尚无事件，可回到上方「治疗管理与概况」继续录入。'
+                      : '暂无治疗记录。点上方的「＋ 疗程」添加手术、化疗、放疗或其他治疗。') +
+      '</div>';
     h += '</div>';
     return h;
   }
 
   /* 时间轴是**一条按日期排好的单一流水**：放疗逐次在全局序列上按「被非放疗事件打断」
-     切成若干段（段头默认折叠）；手术 / 化疗仍各自成行，插入在它们实际日期所在位置。
+     切成若干段（段头默认折叠）；手术 / 化疗 / 其他治疗仍各自成行，
+     插入在它们实际日期所在位置。
      这样「放疗中间夹杂化疗 → 放疗被分开」才成立 —— 若按疗程分组渲染，
-     放疗全落进放疗组、化疗全落进化疗组，两者永不交错，切段也就永远不会触发。
-     疗程管理行（承载 ＋周期 / 编辑 / 删除）统一收在末尾的「疗程管理区」。 */
+     放疗全落进放疗组、化疗全落进化疗组，两者永不交错，切段也就永远不会触发。 */
   var segs0 = radioSegments(ev);                       /* 基于全局升序序列切段 */
   var segOfFirst = {};
   segs0.forEach(function (s) {
@@ -1942,33 +2008,12 @@ function timelineHtml(p) {
     tokens.push({ t: 'ev', x: x });
   });
 
-  /* 疗程管理区：**无条件**列出全部疗程，放在事件流之后。
-     为什么无条件：某疗程即使已有事件，这里再列一行也不冲突（顶部概况是只读的，
-     而这里是唯一的疗程级操作入口）；反过来若按「无事件才列」筛选，
-     抓第一个 course-del 的行为会随日期漂移 —— 跨日期扫描会挂。
-     ★ 这条路径同时是 test-course.js D2 拿到 cycle-add 的唯一来源，绝不能删。 */
-  courses.forEach(function (c) { tokens.push({ t: 'manage', c: c }); });
-
   /* 倒序：**整体反转令牌序列**（而非先反转事件），段头始终跟着自己的段走，
-     不会出现「段头跑到段尾」的错位。
-     注意：疗程管理区也会被一起反转，跑到时间轴**顶部** —— 这是可接受的，
-     因为它本就是独立于时间的操作区，不参与日期排序语义。 */
+     不会出现「段头跑到段尾」的错位。 */
   if (view.tlDesc) tokens.reverse();
 
   var lastYear = '';
-  var mgrHeadDone = false;
   tokens.forEach(function (tk) {
-    /* ---- 疗程管理行（末尾区，独立于时间轴日期语义） ---- */
-    if (tk.t === 'manage') {
-      if (!mgrHeadDone) {
-        mgrHeadDone = true;
-        lastYear = '';
-        h += '<div class="tls-sub">疗程管理</div>';
-      }
-      h += tlsActRow(tk.c);
-      return;
-    }
-
     /* ---- 放疗段：一条折叠头，展开时再逐条渲染该段放疗事件 ---- */
     if (tk.t === 'seg') {
       var s2 = tk.seg;
@@ -1987,8 +2032,8 @@ function timelineHtml(p) {
       h += '<div class="tl-body">' + esc(radioSegTitle(s2)) + '</div>';
       h += '<div><button class="tl-fold" data-act="timeline-fold" data-key="' + esc(skey) + '">' +
         (sOpen ? '▾ 收起逐次' : '▸ 展开逐次') + '</button></div>';
-      /* 放疗疗程级操作（备注 / 编辑 / 删除）**不在这里**放 ——
-         放疗常被切成多段，每段都挂一份按钮会重复；末尾「疗程管理」区已统一提供。 */
+      /* 放疗疗程级操作（备注 / 编辑 / 删除）在上方管理区，不在这里 ——
+         放疗常被切成多段，每段都挂一份按钮会重复。 */
       h += '</div>';
 
       /* 展开态：把该段放疗逐次按原样式逐条渲染（同为 radio，但不带 tl-seg） */
@@ -2007,7 +2052,7 @@ function timelineHtml(p) {
       return;
     }
 
-    /* ---- 其余事件：原样逐条渲染 ---- */
+    /* ---- 其余事件：原样逐条渲染（只读，无操作按钮） ---- */
     var x = tk.x;
     var year = (x.date || '').slice(0, 4);
     if (year && year !== lastYear) { h += '<div class="tl-year">' + esc(year) + ' 年</div>'; lastYear = year; }
@@ -2027,7 +2072,7 @@ function timelineHtml(p) {
     h += '<div class="tl-body">' + esc(x.title || '') + (x.label ? ' <span class="chip sm">' + esc(x.label) + '</span>' : '') + '</div>';
     if (x.detail) h += '<div class="tl-note">' + esc(x.detail) + '</div>';
 
-    /* 周期行：折叠展开用药/给药明细（默认收起）。
+    /* 周期行：折叠展开用药/给药明细（默认收起），仅供浏览。
        文案沿用各类别的既有措辞：化疗叫「给药」，其他治疗叫「用药」。
        之所以不统一：化疗「给药」是既有界面文案，改它会牵动一批渲染层断言，
        属于无收益的连带改动。 */
@@ -2040,29 +2085,11 @@ function timelineHtml(p) {
           (opened ? '▾ 收起' + wtxt : '▸ 展开' + wtxt) + '</button></div>';
       }
     }
-
-    /* 事件级操作 */
-    if (!isSub && x.kind === 'surgery') {
-      h += '<div class="tl-acts">' +
-        '<button class="btn sm" data-act="course-edit" data-id="' + esc(x.courseId) + '">改日期</button>' +
-        '</div>';
-    } else if (!isSub && cyclic) {
-      var wl = x.kind === 'chemo' ? '给药' : '用药';
-      h += '<div class="tl-acts">' +
-        '<button class="btn sm addbtn" data-act="dose-add" data-id="' + esc(x.courseId) + '" data-n="' + x.cycleNo + '">＋ ' + wl + '</button>' +
-        '<button class="btn sm" data-act="cycle-edit" data-id="' + esc(x.courseId) + '" data-n="' + x.cycleNo + '">编辑周期</button>' +
-        '<button class="btn sm danger" data-act="cycle-del" data-id="' + esc(x.courseId) + '" data-n="' + x.cycleNo + '">删除</button>' +
-        '</div>';
-    } else if (isSub) {
-      h += '<div class="tl-acts">' +
-        '<button class="btn sm" data-act="dose-edit" data-id="' + esc(x.courseId) + '" data-n="' + x.parentNo + '" data-dose="' + esc(x.doseId) + '">编辑</button>' +
-        '<button class="btn sm danger" data-act="dose-del" data-id="' + esc(x.courseId) + '" data-n="' + x.parentNo + '" data-dose="' + esc(x.doseId) + '">删除</button>' +
-        '</div>';
-    }
     h += '</div>';
   });
 
-  h += '<div class="hint" style="margin-top:6px">放疗部分由排程自动推算，与上方治疗进度一致；手术、化疗与其他治疗为人工录入（或 AI 识别后复核导入）。</div>';
+  h += '<div class="hint" style="margin-top:6px">本时间轴仅供浏览；录入、编辑与删除请用上方「治疗管理与概况」。' +
+    '放疗部分由排程自动推算，与上方治疗进度一致。</div>';
   h += '</div>';
   return h;
 }
@@ -5008,6 +5035,26 @@ function bind() {
       var k = el.dataset.key;
       if (view.tlOpen[k]) delete view.tlOpen[k]; else view.tlOpen[k] = 1;
       render();
+    },
+    /* 管理区：展开/收起某疗程的周期明细（与时间轴折叠共用 view.tlOpen，
+       但 key 带 mg 前缀，不会与时间轴的 r…/cy… 互相干扰） */
+    'mg-fold': function (el) {
+      var k = el.dataset.key;
+      if (view.tlOpen[k]) delete view.tlOpen[k]; else view.tlOpen[k] = 1;
+      render();
+    },
+    /* 管理区：放疗「备注」。放疗的疗程记录常常不存在（唯一真相在顶层排程），
+       此时先按需补建一条 radio 疗程再打开表单，否则用户点了没反应。 */
+    'radio-note': function (el) {
+      var p = getPatient(view.pid); if (!p) return;
+      var c = el.dataset.id ? findCourse(view.pid, el.dataset.id) : null;
+      if (!c) {
+        c = { id: uid('co'), kind: 'radio', title: '放疗', date: '', note: '', createdVia: 'manual' };
+        p.courses = p.courses || [];
+        p.courses.push(c);
+        save();
+      }
+      sheetCourse(p, c);
     },
     'cal-prev': function () { shiftCal(-1); },
     'cal-next': function () { shiftCal(1); },
