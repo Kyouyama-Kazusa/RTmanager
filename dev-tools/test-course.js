@@ -1267,6 +1267,108 @@ group('J. 操作上移：管理区承载全部按钮 / 时间轴纯浏览（v0.1
 }
 
 /* ================================================================ */
+group('K. 可读性优化：时间轴瘦身 / 尾部入卡 / 枚举容错（v0.14.1）');
+
+{
+  /* K1. ★ 时间轴尾部提示已缩短（旧文案 40 字 → 新文案 24 字），且不再重复描述放疗推算规则 */
+  {
+    const p = mk({ name: 'K1', startDate: '2026-03-02', fractions: '5', dosePerFraction: '2' });
+    view.pid = p.id; view.tlDesc = false; view.tlOpen = {};
+    const h = String(timelineHtml(p));
+    ok(h.indexOf('仅供浏览，录入与修改请用上方「治疗管理与概况」。') >= 0, '★ K1 尾部提示已缩短');
+    ok(h.indexOf('放疗部分由排程自动推算') < 0, '★ K1 删掉与治疗进度卡重复的放疗说明');
+  }
+
+  /* K2. ★★ 放疗段头「本段已完成 x/y 次」——与管理区全疗程口径「已完成 x/N 次」区分。
+     旧文案两处都写「已完成 x 次」，读者会误以为重复；新文案带「本段」与分母。
+     ★ 必须用**相对 today 的过去日期**造数据：若把 startDate 写成固定的未来日期，
+       到那天之前没有任何已完成次数，段头不会输出 chip，断言就会随当天日期漂移
+       （跨日期扫描在 2026-02-17 抓到过这个坑）。 */
+  {
+    const p = mk({
+      name: 'K2', startDate: addDays(today, -14), fractions: '10', dosePerFraction: '2', treatDays: [1, 2, 3, 4, 5],
+      /* 手术插在一次治疗中间，确保放疗被打断成 ≥2 段 */
+      courses: [{ id: 'k2s', kind: 'surgery', title: '手术', date: addDays(today, -7) }]
+    });
+    view.pid = p.id; view.tlDesc = false; view.tlOpen = {};
+    const h = String(timelineHtml(p));
+    const mgr = String(courseSummaryHtml(p));
+    /* 分段头出现「本段已完成 x/y 次」 */
+    const segChip = h.match(/本段已完成 (\d+)\/(\d+) 次/);
+    ok(!!segChip, '★★ K2 放疗段头用「本段已完成 x/y 次」区分口径', h.match(/已完成[^<]{0,20}/g));
+    if (segChip) {
+      ok(Number(segChip[1]) <= Number(segChip[2]), '★ K2 本段已完成 ≤ 本段总数', segChip[0]);
+      ok(Number(segChip[2]) >= 1, '★ K2 本段总数 ≥ 1', segChip[0]);
+    }
+    /* 管理区仍是全疗程口径：已完成 x/N 次，且**不带**「本段」二字 */
+    ok(mgr.indexOf('已完成 ' + doneCount(p) + '/' + plannedCount(p) + ' 次') >= 0,
+      '★★ K2 管理区仍是全疗程口径', { done: doneCount(p), planned: plannedCount(p) });
+    ok(mgr.indexOf('本段') < 0, '★ K2 管理区不出现「本段」字样（避免口径混淆）');
+    /* 前置：这份数据确实产生了已完成次数，否则本组断言等于没测 */
+    ok(doneCount(p) > 0, '★★ K2 前置：造出的患者已有已完成次数（否则段头无 chip）', doneCount(p));
+  }
+
+  /* K3. ★ 空态文案已收紧，且仍指向管理区（不成为死路） */
+  {
+    const p = mk({ name: 'K3', courses: [{ id: 'k3c', kind: 'chemo', title: '第1程', cycles: [] }] });
+    view.pid = p.id; view.tlDesc = false; view.tlOpen = {};
+    const h = String(timelineHtml(p));
+    ok(h.indexOf('以下疗程尚无事件，可回上方「治疗管理与概况」继续录入。') >= 0, '★ K3 空态文案已收紧并指向管理区');
+    const p2 = mk({ name: 'K3b' });
+    view.pid = p2.id;
+    const h2 = String(timelineHtml(p2));
+    ok(h2.indexOf('点上方「＋ 疗程」添加手术、化疗、放疗或其他治疗。') >= 0, '★ K3 无疗程空态指向「＋ 疗程」');
+  }
+
+  /* K4. ★★ 备注 / 交班记录与患者状态**各自成为一张 card**（此前是裸 section-title + btnrow）。
+     这是 v0.14.1 的核心观感修复：页面尾部不再「散架」。 */
+  {
+    const p = mk({ name: 'K4', startDate: '2026-03-02', fractions: '5' });
+    p.notes = [{ id: 'kn1', at: '2026-03-02T09:00', content: '交班：血象偏低' }];
+    view.page = 'patient'; view.pid = p.id; view.tlDesc = false; view.tlOpen = {};
+    render();
+    const v = String(getEl('view').innerHTML);
+    /* 备注块被 card 包住：card 内先出现 section-title「备注 / 交班记录」 */
+    ok(/<div class="card"><div class="section-title">备注 \/ 交班记录/.test(v),
+      '★★ K4 备注区块已被 .card 包裹', v.slice(v.indexOf('备注 / 交班记录') - 60, v.indexOf('备注 / 交班记录') + 20));
+    ok(/<div class="card"><div class="section-title">患者状态/.test(v),
+      '★★ K4 患者状态区块已被 .card 包裹');
+    /* 备注条数以 chip 呈现（不再拼在标题里） */
+    ok(v.indexOf('<span class="chip sm">1 条</span>') >= 0, '★ K4 备注条数以 chip 呈现');
+    /* 底部危险操作仍在，且未被折叠掉 */
+    ok(v.indexOf('data-act="delete-patient"') >= 0, '★ K4 删除按钮仍可达');
+    /* 备注按钮仍在（R 组会点击它，此处只保证存在） */
+    ok(v.indexOf('data-act="note-add"') >= 0, '★ K4 「＋ 添加备注」仍可达');
+    view.page = 'tab';
+  }
+
+  /* K5. ★★★ 枚举容错：非法写法「根治性放疗」不再被静默清空（v0.14.1 修复的 bug）。
+     这是导入/开机的唯一数据关口，修复前会把这一格永久变成空串且不报错。 */
+  {
+    function normEnum(k, v) {
+      var o = { name: 'K5' }; o[k] = v;
+      return normalize({ version: 2, updatedAt: '', patients: [o] }).patients[0][k];
+    }
+    ok(normEnum('purpose', '根治性放疗') === '根治性', '★★★ K5 「根治性放疗」归一化为「根治性」（此前被清空）');
+    ok(normEnum('purpose', '术后辅助放疗') === '术后辅助', '★★ K5 「术后辅助放疗」→「术后辅助」');
+    ok(normEnum('purpose', '新辅助') === '术前新辅助', '★ K5 别名「新辅助」→「术前新辅助」');
+    ok(normEnum('purpose', '姑息减症') === '姑息性', '★ K5 别名「姑息减症」→「姑息性」');
+    ok(normEnum('technique', '容积旋转调强放疗') === 'VMAT', '★★ K5 技术别名长键优先：→ VMAT');
+    ok(normEnum('technique', '调强适形') === 'IMRT', '★ K5 「调强适形」→ IMRT');
+    ok(normEnum('planStatus', '已批准') === '已通过', '★ K5 流程状态「已批准」→「已通过」');
+    /* 关键：完全无法识别的垃圾值仍然清空（容错 ≠ 放行脏数据） */
+    ok(normEnum('purpose', '完全看不懂的东西') === '', '★★ K5 无法识别的值仍清空（未放行脏数据）');
+    ok(normEnum('technique', 'xyz乱写') === '', '★ K5 技术脏值仍清空');
+    /* 关键：合法值必须原样透传（不能被别名表改写） */
+    ['根治性', '术后辅助', '术前新辅助', '姑息性'].forEach(function (v) {
+      ok(normEnum('purpose', v) === v, '★★ K5 合法值原样透传：' + v);
+    });
+    /* 空 / null 不得抛错 */
+    ok(normEnum('purpose', '') === '' && normEnum('purpose', null) === '', '★ K5 空值与 null 安全');
+  }
+}
+
+/* ================================================================ */
 console.log('');
 console.log('========================================');
 console.log('通过 ' + pass + ' 项，失败 ' + fail + ' 项');

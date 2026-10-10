@@ -316,7 +316,7 @@ button,input,select,textarea{font:inherit;color:inherit}
 var LS_KEY = 'radiotherapy.v1';
 var SNAP_PREFIX = 'radiotherapy.snap.';
 var SNAP_KEEP = 7;
-var APP_VERSION = '0.14.0';
+var APP_VERSION = '0.14.1';
 
 var SEXES = ['男', '女'];
 var PURPOSES = ['根治性', '术后辅助', '术前新辅助', '姑息性'];
@@ -563,9 +563,16 @@ function normalize(d) {
 
     out.patients.push(keepExtra(p, {
       id: p.id || uid('p'), mrn: p.mrn || '', name: p.name || '', sex: SEXES.indexOf(p.sex) >= 0 ? p.sex : '', age: p.age || '',
-      physician: p.physician || '', diagnosis: p.diagnosis || '', purpose: PURPOSES.indexOf(p.purpose) >= 0 ? p.purpose : '',
-      technique: TECHNIQUES.indexOf(p.technique) >= 0 ? p.technique : '',
-      simDate: p.simDate || '', position: p.position || '', planStatus: PLAN_STATUSES.indexOf(p.planStatus) >= 0 ? p.planStatus : '',
+      /* v0.14.1 修复：此处原为「严格枚举，非法值一律清空」——
+         一份手写/外部生成的 JSON 只要把放疗目的写成「根治性放疗」，
+         导入后这一格会被**静默清空成空串**（不报错、不提示），用户无从察觉。
+         改用 matchEnum()：先精确匹配，再走 AI_ENUM_ALIAS 别名表，最后子串兜底，
+         与 AI 通道口径一致，避免「同值不同命」。
+         normalize() 每次开机、每次导入、每次快照恢复都会走，是数据的唯一关口。 */
+      physician: p.physician || '', diagnosis: p.diagnosis || '',
+      purpose: matchEnum(p.purpose, PURPOSES, 'purpose'),
+      technique: matchEnum(p.technique, TECHNIQUES, 'technique'),
+      simDate: p.simDate || '', position: p.position || '', planStatus: matchEnum(p.planStatus, PLAN_STATUSES, 'planStatus'),
       totalDose: p.totalDose || '', fractions: p.fractions || '', dosePerFraction: p.dosePerFraction || '',
       startDate: start,
       treatDays: (p.treatDays && p.treatDays.length) ? p.treatDays : treatDaysCfg(),
@@ -1978,8 +1985,8 @@ function timelineHtml(p) {
     /* 纪要：即使一个事件都没有（如化疗疗程刚建、还没排周期），
        上方管理区也一定给出了录入入口（cycle-add），不会成为死路。 */
     h += '<div class="tl-empty">' +
-      (courses.length ? '以下疗程尚无事件，可回到上方「治疗管理与概况」继续录入。'
-                      : '暂无治疗记录。点上方的「＋ 疗程」添加手术、化疗、放疗或其他治疗。') +
+      (courses.length ? '以下疗程尚无事件，可回上方「治疗管理与概况」继续录入。'
+                      : '暂无治疗记录。点上方「＋ 疗程」添加手术、化疗、放疗或其他治疗。') +
       '</div>';
     h += '</div>';
     return h;
@@ -2027,7 +2034,9 @@ function timelineHtml(p) {
         '<span class="chip pri sm">放疗</span>' +
         '<span class="tl-date">' + esc(mdLabel(s2.from) || '') + ' ~ ' + esc(mdLabel(s2.to) || '') + '</span>' +
         '<span class="chip sm">' + s2.count + ' 次</span>' +
-        (sDone ? '<span class="chip sm">已完成 ' + sDone + ' 次</span>' : '') +
+        /* 「本段已完成」：与管理区放疗行的「已完成 x/N 次」（全疗程口径）区分开。
+           两个数字口径不同（本段 vs 全程），旧文案都写「已完成 x 次」会被误读成重复。 */
+        (sDone ? '<span class="chip sm">本段已完成 ' + sDone + '/' + s2.count + ' 次</span>' : '') +
         '</div>';
       h += '<div class="tl-body">' + esc(radioSegTitle(s2)) + '</div>';
       h += '<div><button class="tl-fold" data-act="timeline-fold" data-key="' + esc(skey) + '">' +
@@ -2088,8 +2097,7 @@ function timelineHtml(p) {
     h += '</div>';
   });
 
-  h += '<div class="hint" style="margin-top:6px">本时间轴仅供浏览；录入、编辑与删除请用上方「治疗管理与概况」。' +
-    '放疗部分由排程自动推算，与上方治疗进度一致。</div>';
+  h += '<div class="hint" style="margin-top:6px">仅供浏览，录入与修改请用上方「治疗管理与概况」。</div>';
   h += '</div>';
   return h;
 }
@@ -2632,9 +2640,13 @@ function renderPatientPage() {
     h += '</div>';
   }
 
-  /* 备注 / 交班记录（之前只有 schema 没有界面，数据只能靠合并导入悄悄累积） */
+  /* 备注 / 交班记录（之前只有 schema 没有界面，数据只能靠合并导入悄悄累积）
+     v0.14.1：改用 .card 包裹 —— 此前是裸 section-title + btnrow，
+     与上方 5 张卡视觉不一致，页面尾部显得「散架」。 */
   var noteList = (p.notes || []).slice().sort(function (a, b) { return String(b.at).localeCompare(String(a.at)); });
-  h += '<div class="section-title">备注 / 交班记录' + (noteList.length ? '（' + noteList.length + '）' : '') + '</div>';
+  h += '<div class="card"><div class="section-title">备注 / 交班记录' +
+    (noteList.length ? '<span class="chip sm">' + noteList.length + ' 条</span>' : '') +
+    '</div>';
   if (noteList.length) {
     noteList.forEach(function (n) {
       h += '<div class="event"><div class="head"><span class="chip sm">' + esc(fmtDT(n.at) || '未记时间') + '</span></div>' +
@@ -2643,17 +2655,22 @@ function renderPatientPage() {
         '<button class="btn sm danger" data-act="note-del" data-id="' + n.id + '">删除</button></div></div>';
     });
   } else {
-    h += '<div class="hint" style="padding:0 2px 8px">暂无备注，可记录交班事项、患者主诉、特殊情况等。</div>';
+    h += '<div class="hint">暂无备注，可记录交班事项、患者主诉、特殊情况等。</div>';
   }
-  h += '<div class="btnrow" style="margin:0 2px"><button class="btn sm addbtn" data-act="note-add">＋ 添加备注</button></div>';
+  h += '<div class="btnrow" style="margin:8px 0 0"><button class="btn sm addbtn" data-act="note-add">＋ 添加备注</button></div></div>';
 
-  /* 状态操作：在治→完成/失访；已完成→转回在治；失访→转回在治 */
-  h += '<div class="btnrow" style="margin:12px 2px"><button class="btn" data-act="edit-patient">编辑患者信息</button>' +
+  /* 状态操作：在治→完成/失访；已完成→转回在治；失访→转回在治
+     v0.14.1：收进卡片（标题「患者状态」），与临床内容分开；删除按钮单独成行降低误触。 */
+  h += '<div class="card"><div class="section-title">患者状态' +
+    '<span class="chip sm">' + esc(p.status || '') + '</span></div>' +
+    '<div class="btnrow" style="margin:2px">' +
+    '<button class="btn" data-act="edit-patient">编辑患者信息</button>' +
     (p.status === '在治'
       ? '<button class="btn" data-act="complete-patient">完成治疗</button>' +
       '<button class="btn" data-act="lost-patient">标记失访</button>'
       : '<button class="btn" data-act="reopen-patient">转回在治</button>') +
-    '<button class="btn danger" data-act="delete-patient">删除</button></div>';
+    '</div>' +
+    '<div class="btnrow" style="margin:8px 2px 2px"><button class="btn danger" data-act="delete-patient">删除该患者</button></div></div>';
 
   $('view').innerHTML = h + '<div style="height:40px"></div>';
 
