@@ -262,6 +262,21 @@ button,input,select,textarea{font:inherit;color:inherit}
 .field textarea{min-height:76px;resize:vertical}
 .field2{display:flex;gap:10px}
 .field2 .field{flex:1}
+/* ★ 表单分节（v0.15.0）：弹层内长表单按语义分组，避免十几个字段平铺。
+   ★ 类名前缀 fg-（form group），**不得用 field/tl- 等既有前缀** ——
+     test-course.js 的 G 组对 tl-item 做精确计数、field 有既有断言，
+     混入新类名会污染那些断言（同 §五之八 tls- 的坑）。
+   用 <details>/<summary> 做折叠：原生、无需 JS、离线可用、键盘可达。 */
+.fg{margin:0 0 4px}
+.fg > summary{list-style:none;cursor:pointer;display:flex;align-items:center;gap:6px;
+  font-size:13px;font-weight:600;color:var(--pri);padding:9px 2px 7px;
+  border-top:1px solid var(--line);margin-top:10px}
+.fg:first-of-type > summary{border-top:0;margin-top:0}
+.fg > summary::-webkit-details-marker{display:none}
+.fg > summary::after{content:'▸';margin-left:auto;color:var(--sub);font-size:12px;transition:transform .15s}
+.fg[open] > summary::after{transform:rotate(90deg)}
+.fg > summary .chip{font-weight:400}
+.fg-body{padding:2px 0 6px}
 .seg{display:flex;flex-wrap:wrap;gap:6px}
 .seg button{border:1px solid var(--line);background:#fff;border-radius:999px;padding:5px 12px;font-size:13px;cursor:pointer}
 .seg button.on{background:var(--pri-soft);border-color:var(--pri);color:var(--pri);font-weight:600}
@@ -316,7 +331,7 @@ button,input,select,textarea{font:inherit;color:inherit}
 var LS_KEY = 'radiotherapy.v1';
 var SNAP_PREFIX = 'radiotherapy.snap.';
 var SNAP_KEEP = 7;
-var APP_VERSION = '0.14.2';
+var APP_VERSION = '0.15.0';
 
 var SEXES = ['男', '女'];
 var PURPOSES = ['根治性', '术后辅助', '术前新辅助', '姑息性'];
@@ -2885,6 +2900,19 @@ function selectInput(name, value, options) {
   return '<select name="' + esc(name) + '">' + options.map(function (o) { return '<option value="' + esc(o) + '"' + (o === value ? ' selected' : '') + '>' + esc(o) + '</option>'; }).join('') + '</select>';
 }
 
+/* ★★ 表单分节（v0.15.0）：长表单按语义分组，可折叠。
+   - open 省略时默认展开；open=false 时默认折叠（用于低频/高级字段）
+   - chip 传入则在标题右侧显示一个小徽标（如「可留空」「选填」）
+   - 返回 <details> 而非 <div>：原生折叠、零 JS、离线可用、键盘可达。
+   ★ 类名一律 fg-/fg-body，不得复用 field / tl- 前缀（会污染既有计数断言）。 */
+function formGroup(label, inner, opts) {
+  var o = opts || {};
+  return '<details class="fg"' + (o.open === false ? '' : ' open') + '>' +
+    '<summary>' + esc(label) +
+    (o.chip ? '<span class="chip sm">' + esc(o.chip) + '</span>' : '') +
+    '</summary><div class="fg-body">' + inner + '</div></details>';
+}
+
 /* ================= AI 界面：配置 / 导入 / 复核 ================= */
 
 /* 复核用：带空选项的下拉（AI 没识别出来时保持"未填"） */
@@ -3289,54 +3317,94 @@ function commitAiDraft() {
 }
 
 /* ================= 表单：患者 ================= */
+/* ★★★ 添加 / 编辑患者表单（v0.15.0 重构）
+   旧版是 10 个字段平铺（4042 字符、无分组），在手机上要滚很久才看得到「排程」。
+   现按**录入顺序的语义**分 4 节：
+     ① 基本信息（必填，姓名/住院号/性别/年龄）
+     ② 诊断与方案（诊断 / 目的 / 技术 / 医生 / 流程状态）
+     ③ 排程与剂量（处方剂量 / 定位 / 开始日期 —— 决定日历能否生成）
+     ④ 放疗验证（低频高级项，**默认折叠**）
+   ★ 分组只改**呈现**，所有 input 的 name 属性一字未动 ——
+     sheetValues() 按 name 收集，改动 name 会同时打断既有断言与历史数据。
+   ★ 折叠用 <details>：原生、零 JS、离线可用。
+   ★ 折叠态不影响提交：<details> 收起时子元素仍在 DOM 里，querySelectorAll 照样取得到。 */
 function sheetPatient(p) {
   var isNew = !p;
   var d = p || {
     mrn: '', name: '', sex: '男', age: '', physician: '', diagnosis: '', purpose: '根治性', technique: 'IMRT',
     simDate: '', position: '', planStatus: '待定位', totalDose: '', fractions: '', dosePerFraction: '', startDate: ''
   };
+  var vCfg = verifyCfgOf(d);
+
+  /* ① 基本信息 */
+  var gBasic =
+    '<div class="field2"><div class="field"><label>姓名 *</label>' + textInput('name', d.name, '如 张三') + '</div>' +
+    '<div class="field"><label>住院号</label>' + textInput('mrn', d.mrn, '可留空') + '</div></div>' +
+    '<div class="field2"><div class="field"><label>性别</label>' + selectInput('sex', d.sex || '男', SEXES) + '</div>' +
+    '<div class="field"><label>年龄</label>' + textInput('age', d.age, '如 56') + '</div></div>';
+
+  /* ② 诊断与方案 */
+  var gPlan =
+    field('诊断（部位/病理/分期）', areaInput('diagnosis', d.diagnosis, '如 鼻咽癌 T3N2M0 III期')) +
+    '<div class="field2"><div class="field"><label>放疗目的</label>' + selectInput('purpose', d.purpose || '根治性', PURPOSES) + '</div>' +
+    '<div class="field"><label>放疗技术</label>' + selectInput('technique', d.technique || 'IMRT', TECHNIQUES) + '</div></div>' +
+    '<div class="field2"><div class="field"><label>主管医生</label>' + textInput('physician', d.physician, '可留空') + '</div>' +
+    '<div class="field"><label>流程状态</label>' + selectInput('planStatus', d.planStatus || '待定位', PLAN_STATUSES) + '</div></div>';
+
+  /* ③ 排程与剂量 —— 决定「治疗日历」能否生成，故与基本信息同为默认展开 */
+  var gSched =
+    field('处方剂量', '<div class="field2"><div class="field">' + numberInput('totalDose', d.totalDose, '总剂量 Gy', '0.1') + '</div>' +
+      '<div class="field">' + numberInput('fractions', d.fractions, '总次数', '1') + '</div>' +
+      '<div class="field">' + numberInput('dosePerFraction', d.dosePerFraction, '单次 Gy', '0.01') + '</div></div>',
+      '如 60 Gy / 30 次 / 2.0 Gy 每次') +
+    '<div class="field2"><div class="field"><label>定位日期</label>' + textInput('simDate', d.simDate, '', 'date') + '</div>' +
+    '<div class="field"><label>放疗开始日期 *</label>' + textInput('startDate', d.startDate, '', 'date') + '</div></div>' +
+    '<div class="hint" style="margin:-6px 0 10px">填写开始日期后，系统按「工作日」自动排程并算出结束日期</div>' +
+    field('体位/固定装置', textInput('position', d.position, '如 头颈肩热塑面罩'));
+
+  /* ④ 放疗验证 —— 低频高级项，默认折叠 */
+  var gVerify =
+    '<div class="field2"><div class="field">' + textInput('verifyFractions', vCfg.nums.join(','), '如 10 或 10,20，留空=不验证') + '</div>' +
+    '<div class="field">' + textInput('verifyNote', vCfg.note, '验证内容（可选）') + '</div></div>' +
+    '<div class="hint">填「第几次治疗」时做验证，多个用逗号分隔（如 10,20）；留空表示不做验证。' +
+    '到点前会提前 ' + VERIFY_LEAD_FRACTIONS + ' 次进入待办提醒</div>';
+
   openSheet({
     title: isNew ? '添加患者' : '编辑患者信息', okText: '保存',
     body:
-      '<div class="field2"><div class="field"><label>姓名 *</label>' + textInput('name', d.name, '如 张三') + '</div>' +
-      '<div class="field"><label>住院号</label>' + textInput('mrn', d.mrn, '可留空') + '</div></div>' +
-      '<div class="field2"><div class="field"><label>性别</label>' + selectInput('sex', d.sex || '男', SEXES) + '</div>' +
-      '<div class="field"><label>年龄</label>' + textInput('age', d.age, '如 56') + '</div></div>' +
-      field('诊断（部位/病理/分期）', areaInput('diagnosis', d.diagnosis, '如 鼻咽癌 T3N2M0 III期')) +
-      '<div class="field2"><div class="field"><label>放疗目的</label>' + selectInput('purpose', d.purpose || '根治性', PURPOSES) + '</div>' +
-      '<div class="field"><label>放疗技术</label>' + selectInput('technique', d.technique || 'IMRT', TECHNIQUES) + '</div></div>' +
-      '<div class="field2"><div class="field"><label>主管医生</label>' + textInput('physician', d.physician, '可留空') + '</div>' +
-      '<div class="field"><label>流程状态</label>' + selectInput('planStatus', d.planStatus || '待定位', PLAN_STATUSES) + '</div></div>' +
-      field('处方剂量', '<div class="field2"><div class="field">' + numberInput('totalDose', d.totalDose, '总剂量 Gy', '0.1') + '</div>' +
-        '<div class="field">' + numberInput('fractions', d.fractions, '总次数', '1') + '</div>' +
-        '<div class="field">' + numberInput('dosePerFraction', d.dosePerFraction, '单次 Gy', '0.01') + '</div></div>', '如 60 Gy / 30 次 / 2.0 Gy 每次') +
-      '<div class="field2"><div class="field"><label>定位日期</label>' + textInput('simDate', d.simDate, '', 'date') + '</div>' +
-      '<div class="field"><label>放疗开始日期 *</label>' + textInput('startDate', d.startDate, '', 'date') + '</div></div>' +
-      '<div class="hint" style="margin:-6px 0 10px">填写开始日期后，系统按「工作日」自动排程并算出结束日期</div>' +
-      field('体位/固定装置', textInput('position', d.position, '如 头颈肩热塑面罩')) +
-      field('放疗验证（第几次治疗时验证）',
-        '<div class="field2"><div class="field">' + textInput('verifyFractions', (d.verifyAt && d.verifyAt.fractions) || '', '如 10 或 10,20，留空=不验证') + '</div>' +
-        '<div class="field">' + textInput('verifyNote', (d.verifyAt && d.verifyAt.note) || '', '验证内容（可选）') + '</div></div>',
-        '填「第几次治疗」时做验证，多个用逗号分隔（如 10,20）；留空表示不做验证。到点前会提前 ' + VERIFY_LEAD_FRACTIONS + ' 次进入待办提醒'),
+      formGroup('基本信息', gBasic) +
+      formGroup('诊断与方案', gPlan) +
+      formGroup('排程与剂量', gSched) +
+      formGroup('放疗验证', gVerify, { open: vCfg.nums.length > 0, chip: vCfg.nums.length ? '已设置' : '选填' }),
     onSave: function (v) {
       if (!String(v.name || '').trim()) { toast('请填写姓名'); return false; }
       var vf = String(v.verifyFractions == null ? '' : v.verifyFractions);
       /* 非法输入不静默吞掉：有内容却一个有效次数都解析不出来时明确提示 */
       if (vf.trim() && !parseVerifyNums(vf).length) { toast('验证次数请填正整数，如 10 或 10,20'); return false; }
+      /* ★ 验证配置统一构造（v0.15.0 修复）：
+         旧代码只在编辑分支写 p.verifyAt，新增分支直接 Object.assign(v, …) 丢掉它 ——
+         于是「添加患者」时填的验证次数**静默消失**，而同样输入在「编辑」里却生效。
+         现在两个分支走同一套构造，done 只保留仍然有效的次数。 */
+      function buildVerifyAt(oldDone) {
+        var nums = parseVerifyNums(vf);
+        return {
+          fractions: vf.trim(),
+          note: String(v.verifyNote || ''),
+          done: (oldDone || []).filter(function (x) { return nums.indexOf(parseInt(x, 10)) >= 0; })
+        };
+      }
       if (isNew) {
-        state.patients.push(normalize({ patients: [Object.assign({}, v, { treatDays: treatDaysCfg(), pauses: [], extras: [], doneDates: [], reactions: [], followupPlans: [], notes: [], status: '在治' })] }).patients[0]);
+        var np = normalize({ patients: [Object.assign({}, v, {
+          treatDays: treatDaysCfg(), pauses: [], extras: [], doneDates: [], reactions: [],
+          followupPlans: [], notes: [], status: '在治', verifyAt: buildVerifyAt([])
+        })] }).patients[0];
+        state.patients.push(np);
         toast(v.startDate && v.fractions ? '已添加，日历已生成' : '已添加');
       } else {
         ['mrn', 'name', 'sex', 'age', 'physician', 'diagnosis', 'purpose', 'technique', 'simDate', 'position', 'planStatus', 'totalDose', 'fractions', 'dosePerFraction', 'startDate'].forEach(function (k) { p[k] = v[k] || ''; });
         /* 验证配置单独处理：次数变化时，把不再存在的次数的完成标记一并清掉，
            避免「改成 15 后第 10 次仍显示已完成」这种脏数据 */
-        var oldDone = verifyCfgOf(p).done;
-        var nums = parseVerifyNums(vf);
-        p.verifyAt = {
-          fractions: vf.trim(),
-          note: String(v.verifyNote || ''),
-          done: oldDone.filter(function (x) { return nums.indexOf(parseInt(x, 10)) >= 0; })
-        };
+        p.verifyAt = buildVerifyAt(verifyCfgOf(p).done);
         toast('已保存');
       }
       save(); render();
@@ -4497,6 +4565,12 @@ function runSelfTest() {
 /* ================= Toast ================= */
 var toastTimer = null;
 function toast(msg) {
+  /* ★ 测试挂钩（v0.15.0）：测试用 `eval(js)` 加载源码，`function toast` 会在 eval 的
+     **函数作用域**里创建局部绑定，`global.toast = ...` 覆盖不到它 ——
+     于是「验证 toast 文案」类断言永远拿不到内容（曾让一条断言恒失败）。
+     这里显式向 globalThis 上的 sink 转发一次，测试只需设置 `global.__rtToastSink`
+     即可拿到全部提示文案。生产环境该 sink 不存在，多一个 typeof 判断，无副作用。 */
+  try { if (typeof globalThis !== 'undefined' && typeof globalThis.__rtToastSink === 'function') globalThis.__rtToastSink(msg); } catch (e) { }
   var el = document.createElement('div');
   el.textContent = msg;
   el.style.cssText = 'position:fixed;left:50%;bottom:100px;transform:translateX(-50%);background:rgba(16,24,40,.88);color:#fff;padding:10px 18px;border-radius:10px;font-size:14px;z-index:99;max-width:80%;text-align:center;transition:opacity .3s';

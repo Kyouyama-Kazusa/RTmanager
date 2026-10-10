@@ -502,6 +502,101 @@ purpose: PURPOSES.indexOf(p.purpose) >= 0 ? p.purpose : '',   // ← 旧代码
 K1–K5 覆盖以上全部行为，并**双向**断言：既拦「过严」（注入 5：改回严格枚举 → 6 项红），
 也拦「过宽」（注入 6b：让 `matchEnum` 放行脏值 → 2 项红）。
 
+#### 添加 / 编辑患者表单：语义分节 + 低频字段折叠（v0.15.0）
+
+「添加患者」是**新用户见到的第一个界面**，旧版却是 10 个字段一路平铺（4,042 字符、无分组），
+手机上一屏看不到「排程与剂量」——而那是决定治疗日历能否生成的关键字段。
+
+v0.15.0 按**录入顺序的语义**分 4 节，用原生 `<details>` 折叠：
+
+| 节 | 字段 | 默认 |
+|---|---|---|
+| 基本信息 | 姓名* / 住院号 / 性别 / 年龄 | 展开 |
+| 诊断与方案 | 诊断 / 目的 / 技术 / 主管医生 / 流程状态 | 展开 |
+| 排程与剂量 | 处方剂量（总剂量·总次数·单次） / 定位日期 / 开始日期* / 体位 | 展开 |
+| 放疗验证 | 验证次数 / 验证内容（低频高级项） | **折叠** |
+
+```js
+function formGroup(label, inner, opts) {
+  var o = opts || {};
+  return '<details class="fg"' + (o.open === false ? '' : ' open') + '>' +
+    '<summary>' + esc(label) +
+    (o.chip ? '<span class="chip sm">' + esc(o.chip) + '</span>' : '') +
+    '</summary><div class="fg-body">' + inner + '</div></details>';
+}
+```
+
+> **★ 分组只改「呈现」，所有 input 的 `name` 属性一字未动。**
+> `sheetValues()` 是按 `name` 收集的，改 `name` 会同时打断既有断言与历史数据。
+> 16b 断言逐个核对 17 个 name「不缺不多」。
+
+> **★ 折叠用 `<details>` 而不是自己写 JS 开关**：原生、零 JS、离线优先（本项目硬约束）、
+> 键盘可达。而且**折叠态不影响提交** —— 收起时子元素仍在 DOM 里，`querySelectorAll('#sheetBody [name]')` 照样取得到。
+> 若改用「折叠时把 DOM 摘掉」的写法，就必须同步改 `sheetValues()`，风险大得多。
+
+> **★ 类名前缀隔离（同 v0.13.3 的 `tls-` 教训）**：新类名一律 `fg-` / `fg-body`，
+> **不得复用 `field` 或 `tl-` 前缀** —— 后者被 `test-course.js` G 组做精确计数。
+
+| 断言 | 覆盖 |
+|---|---|
+| **test-buttons.js 第 16 组（26 项）** | 4 节结构与顺序；前三节展开、第四节折叠；17 个 name 不缺不多；`details` 恰好 4 个；新增/编辑 verifyAt 一致性；done 保留语义；非法输入仍被拦 |
+
+全量 **1,772 项 / 0 失败**。三处故障注入（F1/F2/F3）失败集互不重叠，全部退出码 1。
+
+#### 放疗验证配置：新增患者时被静默丢弃（v0.15.0 修复）
+
+`sheetPatient()` 的**两个分支不对称**：
+
+```js
+if (isNew) {
+  state.patients.push(normalize({ patients: [Object.assign({}, v, { treatDays: …, pauses: … })] }).patients[0]);
+  // ↑ v 里有 verifyFractions / verifyNote，但**没有**把它们组装成 p.verifyAt
+} else {
+  p.verifyAt = { fractions: vf.trim(), note: …, done: … };   // ← 只有编辑分支写了
+}
+```
+
+后果：**「添加患者」时填的验证次数永久消失**，而**完全相同的输入**在「编辑患者信息」里却生效。
+`hasVerify(p)` 对这类患者恒为 `false`，「放疗验证」功能对他们**完全失效**，
+且不报错、不提示 —— 又一处「同值不同命」的静默数据丢失（与 v0.14.1 修的枚举清空是同族缺陷）。
+
+修复：抽出 `buildVerifyAt(oldDone)`，**两个分支走同一套构造**，`done` 只保留仍然有效的次数。
+
+| 输入 | 修复前（新增） | 修复后（新增） |
+|---|---|---|
+| `verifyFractions: '10,20'` | `verifyAt = { fractions:'', note:'', done:[] }` | `{ fractions:'10,20', note:'复位+CBCT', done:[] }` |
+| `hasVerify(p)` | `false` | `true` |
+
+16d / 16e 是**一对对照断言**：16d 锁新增分支必须落库，16e 锁编辑分支行为不变（含 done 的保留/清理语义）。
+
+#### ★★ 测试基础设施坑：`eval` 的局部绑定无法用 `global.x` 覆盖（v0.15.0）
+
+写 16g「非法验证输入要被拦下并弹提示」时，我照惯例在测试头部放了：
+
+```js
+const origToast = global.toast;
+global.toast = function (m) { toastMsgs.push(String(m)); };   // ← 无效！
+```
+
+**它一直是无效的。** `eval(js)` 在**函数作用域**内执行时，源码里的 `function toast(){}`
+创建的是 **eval 局部绑定**，根本不挂到 `global` 上；`global.toast` 是另一个对象。
+断言读 `toastMsgs` 永远拿到空数组。
+
+> ★ 这类错误最危险的地方是：**把 `ok(...)` 反过来写（断言「不该有 toast」）就会静默通过**。
+> 只有需要「断言某提示确实出现了」时才暴露。
+
+修复：在 `toast()` 里显式向 `globalThis.__rtToastSink` 转发一次（生产环境该 sink 不存在，
+多一个 `typeof` 判断，无副作用），测试设置该 sink 即可拿到全部提示文案。
+
+```js
+function toast(msg) {
+  try { if (typeof globalThis !== 'undefined' && typeof globalThis.__rtToastSink === 'function') globalThis.__rtToastSink(msg); } catch (e) { }
+  …
+}
+```
+
+---
+
 #### 详情页卡片布局：管理区独立成卡 + 高频内容前置（v0.14.2）
 
 v0.14.1 暂缓的 A/B 两组在本轮落地。核心变化是**详情页从「5 张卡 + 2 处裸元素」变成 8 张职责清晰的卡**。
@@ -1142,7 +1237,7 @@ v0.1 的「暂停」在新版语义里由 `pauses` 中断区间表达，所以�
 
 **规则**：任何改动都要跑测试；**涉及兼容性的改动还要做故障注入**。
 
-**19 个套件 / 1,746 项断言**全部只读 `index.html`，用 DOM 打桩 + `eval` 加载源码。
+**19 个套件 / 1,772 项断言**全部只读 `index.html`，用 DOM 打桩 + `eval` 加载源码。
 
 **最关键的一条经验**（踩过两次坑）：
 

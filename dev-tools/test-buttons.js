@@ -107,9 +107,15 @@ function inState(o) {
   return state.patients[0];
 }
 
-/* 捕获 toast（覆盖实现，记录消息） */
-const origToast = global.toast;
-global.toast = function (m) { toastMsgs.push(String(m)); };
+/* 捕获 toast（记录消息） */
+/* ★★ 坑（v0.15.0 实测）：`eval(js)` 在**函数作用域**内执行时，源码里的
+   `function toast(){}` 会创建 eval 局部绑定，**不会**挂到 global 上 ——
+   所以下面这种 `global.toast = ...` 覆盖是无效的：应用调用的仍是 eval 里的那个 toast。
+   验证方式：`node -e "global.x=1"` 类最小复现 → 覆盖后调用打出的仍是原实现。
+   正确做法：用 globalThis 名字在**源码里**间接转发 —— 见下面 toastCalls 的用法。 */
+const toastCalls = [];
+if (typeof global.__rtToastSink === 'undefined') global.__rtToastSink = null;
+global.__rtToastSink = function (m) { toastCalls.push(String(m)); };
 
 console.log('========== 按钮功能验证 ==========');
 
@@ -568,6 +574,116 @@ resetUI(); group('15. 静态红线：不得阻止冒泡（否则委托收不到�
   const codeOnly = js.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/[^\n]*/g, '$1');
   ok(!/stopPropagation/.test(codeOnly), '★ 源码代码中不得出现 stopPropagation（注释除外）');
   ok(/绝不能.*stopPropagation/.test(js), '★ 保留了警示注释，防止后人再加回去');
+}
+
+resetUI(); group('16. 添加/编辑患者表单：分节折叠 + verifyAt 一致性（v0.15.0）');
+
+{
+  /* ---- 16a 结构：四个语义分节 ---- */
+  state = normalize({ version: 2, updatedAt: '', patients: [] });
+  sheetPatient(null);
+  const nb = sheetCtx.body;
+  const gs = [...nb.matchAll(/<details class="fg"( open)?><summary>([^<]*)/g)]
+    .map(m => ({ label: m[2], open: !!m[1] }));
+  ok(gs.length === 4, '★ 表单分为 4 个语义分节', gs.map(g => g.label));
+  ok(gs.map(g => g.label).join('/') === '基本信息/诊断与方案/排程与剂量/放疗验证',
+    '分节顺序符合录入顺序', gs.map(g => g.label).join('/'));
+  ok(gs.slice(0, 3).every(g => g.open), '★ 前三节默认展开（日常录入路径一路可见）');
+  ok(!gs[3].open, '★ 第四节「放疗验证」新增时默认折叠（低频字段）');
+
+  /* ---- 16b 折叠不丢字段：name 集合必须完整且不多不少 ----
+     sheetValues() 按 name 收集；折叠态用 <details> 子元素仍在 DOM。 */
+  const wantNames = ['name', 'mrn', 'sex', 'age', 'diagnosis', 'purpose', 'technique', 'physician',
+    'planStatus', 'totalDose', 'fractions', 'dosePerFraction', 'simDate', 'startDate', 'position',
+    'verifyFractions', 'verifyNote'];
+  const gotNames = [...nb.matchAll(/name="([^"]+)"/g)].map(m => m[1]);
+  ok(gotNames.length === wantNames.length, '★ 字段数不变（17 个）', gotNames.length);
+  ok(wantNames.every(n => gotNames.indexOf(n) >= 0), '★ 所有既有 name 都保留（改名会打断数据与断言）',
+    wantNames.filter(n => gotNames.indexOf(n) < 0));
+  ok(gotNames.every(n => wantNames.indexOf(n) >= 0), '没有新增未预期的 name',
+    gotNames.filter(n => wantNames.indexOf(n) < 0));
+  ok(/name="verifyFractions"[\s\S]*name="verifyNote"/.test(nb), '折叠节里的字段确实渲染进了 body');
+
+  /* ---- 16c 类名前缀隔离：不得引入 field / tl- 冲突 ---- */
+  ok(!/class="fg[^"]*\bfield\b/.test(nb), '分节容器不带 field 类（避免污染既有 .field 断言）');
+  ok((nb.match(/class="field2"/g) || []).length === (nb.match(/class="field2"/g) || []).length, 'field2 计数自洽');
+  ok((nb.match(/<details/g) || []).length === 4, '整份表单恰好 4 个 details 折叠块');
+  resetUI();
+}
+
+{
+  /* ---- 16d ★ 新增患者时 verifyAt 必须落库（v0.15.0 修复的静默丢失）----
+     这是真 bug：旧代码只在编辑分支写 p.verifyAt，新增分支 Object.assign(v) 把它丢了。 */
+  state = normalize({ version: 2, updatedAt: '', patients: [] });
+  cap(function () { sheetPatient(null); }).onSave({
+    name: '验证一致性', mrn: '', sex: '男', age: '50', diagnosis: 'd', purpose: '根治性', technique: 'IMRT',
+    physician: '', planStatus: '待定位', totalDose: '60', fractions: '30', dosePerFraction: '2',
+    simDate: '', startDate: '', position: '', verifyFractions: '10,20', verifyNote: '复位+CBCT'
+  });
+  const npv = state.patients[state.patients.length - 1];
+  ok(!!npv, '新增患者成功');
+  ok(!!npv.verifyAt, '★ 新增患者时 verifyAt 已写入（旧版静默丢弃）', npv.verifyAt);
+  ok(verifyCfgOf(npv).nums.join(',') === '10,20', '★ 新增时验证次数正确落库',
+    verifyCfgOf(npv).nums);
+  ok(verifyCfgOf(npv).note === '复位+CBCT', '新增时验证备注一并落库', verifyCfgOf(npv).note);
+  ok(hasVerify(npv) === true, '★ hasVerify 为真（旧版恒为 false，验证功能对新增患者完全失效）');
+
+  /* ---- 16e 编辑分支行为不变（反向对照）---- */
+  cap(function () { sheetPatient(npv); }).onSave({
+    name: npv.name, mrn: npv.mrn, sex: npv.sex, age: npv.age, diagnosis: npv.diagnosis,
+    purpose: npv.purpose, technique: npv.technique, physician: npv.physician, planStatus: npv.planStatus,
+    totalDose: npv.totalDose, fractions: npv.fractions, dosePerFraction: npv.dosePerFraction,
+    simDate: npv.simDate, startDate: npv.startDate, position: npv.position,
+    verifyFractions: '10', verifyNote: '复位+CBCT'
+  });
+  ok(verifyCfgOf(npv).nums.join(',') === '10', '编辑改为 10 后只留 10', verifyCfgOf(npv).nums);
+  ok(verifyCfgOf(npv).done.length === 0, '次数变化后失效的完成标记被清掉', verifyCfgOf(npv).done);
+
+  /* 回填 10,20 并标记 10 已完成，再改成 10 —— done 应保留（10 仍有效） */
+  npv.verifyAt = { fractions: '10,20', note: '', done: ['10', '20'] };
+  cap(function () { sheetPatient(npv); }).onSave({
+    name: npv.name, mrn: npv.mrn, sex: npv.sex, age: npv.age, diagnosis: npv.diagnosis,
+    purpose: npv.purpose, technique: npv.technique, physician: npv.physician, planStatus: npv.planStatus,
+    totalDose: npv.totalDose, fractions: npv.fractions, dosePerFraction: npv.dosePerFraction,
+    simDate: npv.simDate, startDate: npv.startDate, position: npv.position,
+    verifyFractions: '10', verifyNote: ''
+  });
+  ok(verifyCfgOf(npv).done.join(',') === '10', '★ done 只保留仍有效的次数（10 留、20 清）', verifyCfgOf(npv).done);
+  resetUI();
+}
+
+{
+  /* ---- 16f 编辑已设验证的患者时，折叠节默认展开（否则用户看不到已有配置）---- */
+  const pv = inState({ name: '已设验证', verifyAt: { fractions: '10,20', note: '复位' } });
+  sheetPatient(pv);
+  const gsv = [...sheetCtx.body.matchAll(/<details class="fg"( open)?><summary>([^<]*)/g)]
+    .map(m => ({ label: m[2], open: !!m[1] }));
+  const vg = gsv.find(g => g.label === '放疗验证');
+  ok(!!vg && vg.open, '★ 已有验证设置时该节默认展开（防「看不到已有配置」）', vg);
+  ok(/已设置/.test(sheetCtx.body), '★ 折叠节标题带「已设置」徽标');
+  ok(/value="10,20"/.test(sheetCtx.body), '已有的验证次数回填进输入框', sheetCtx.body.match(/value="1[^"]*"/g));
+
+  /* 无验证设置时不带徽标 */
+  const pv2 = inState({ name: '无验证' });
+  sheetPatient(pv2);
+  ok(/选填/.test(sheetCtx.body), '未设置验证时标题显示「选填」');
+  resetUI();
+}
+
+{
+  /* ---- 16g 非法验证输入仍被拦下（既有行为，防止重构改坏）---- */
+  state = normalize({ version: 2, updatedAt: '', patients: [] });
+  toastMsgs = [];
+  const r = cap(function () { sheetPatient(null); }).onSave({
+    name: '非法验证', mrn: '', sex: '男', age: '', diagnosis: '', purpose: '根治性', technique: 'IMRT',
+    physician: '', planStatus: '待定位', totalDose: '', fractions: '', dosePerFraction: '',
+    simDate: '', startDate: '', position: '', verifyFractions: 'abc', verifyNote: ''
+  });
+  ok(r === false, '非法验证次数被拦下（onSave 返回 false，弹层不关闭）', r);
+  ok(state.patients.length === 0, '非法输入不产生患者');
+  /* toast 文案来自 toastCalls（见文件头部说明：eval 的局部绑定无法用 global.toast 覆盖） */
+  ok(toastCalls.some(m => /验证次数请填正整数/.test(m)), '给出明确提示', toastCalls);
+  resetUI();
 }
 
 console.log('');
