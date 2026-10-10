@@ -310,22 +310,23 @@ group('D. 增删改（走渲染层点击）');
   ok(!!cycleAddBtn && cycleAddBtn[0].indexOf('data-id="' + chemo.id + '"') >= 0,
     '★ 管理区「＋周期」按钮自带 data-id', cycleAddBtn && cycleAddBtn[0]);
   /* ★ v0.14.0：操作按钮全部上移到「治疗管理与概况」区。
-     D2 前置断言：时间轴**事件流部分**不得再出现任何增删改按钮（只读）。
-     ★ 注意：timelineHtml() 返回的卡片**同时包含**管理区，
-       所以必须先把管理区（courseSummaryHtml 那段）切掉再扫，
-       否则会误报 —— 管理区本来就该有按钮。 */
+     ★ v0.14.2：管理区已**独立成卡**（courseManageCard），不再嵌在 timelineHtml 里，
+     因此下面不需要再「切掉管理区再扫」—— 时间轴卡里本来就一个管理按钮都没有，
+     这是**结构性成立**的，比靠字符串切片强得多。 */
   {
-    const tlFull = String(timelineHtml(p));
-    const mgr = String(courseSummaryHtml(p));
-    const cut = tlFull.indexOf(mgr);
-    ok(cut > 0, 'D2 前置：管理区确实是卡片的一部分', cut);
-    const tlOnly = cut > 0 ? tlFull.slice(cut + mgr.length) : tlFull;
-    const acts = ['cycle-add', 'cycle-edit', 'cycle-del', 'dose-add', 'dose-edit', 'dose-del', 'course-edit', 'course-del'];
-    const leaked = acts.filter(function (a) { return tlOnly.indexOf('data-act="' + a + '"') >= 0; });
-    /* course-add（右上角＋疗程）与 timeline-fold/timeline-dir 属浏览态，允许保留 */
-    ok(leaked.length === 0, '★★ D2 时间轴事件流内无任何增删改按钮（全部上移到管理区）', leaked);
-    ok(tlFull.indexOf('data-act="course-add"') >= 0, '★ D2 时间轴仍保留「＋ 疗程」与排序按钮');
-    ok(tlOnly.indexOf('data-act="timeline-fold"') >= 0, '★ D2 时间轴仍保留折叠展开（浏览用）');
+    const tl = String(timelineHtml(p));
+    const acts = ['cycle-add', 'cycle-edit', 'cycle-del', 'dose-add', 'dose-edit', 'dose-del',
+      'course-edit', 'course-del', 'mg-fold', 'radio-note'];
+    const leaked = acts.filter(function (a) { return tl.indexOf('data-act="' + a + '"') >= 0; });
+    ok(leaked.length === 0, '★★ D2 时间轴卡内无任何管理按钮（结构性只读）', leaked);
+    /* 时间轴卡只保留浏览态按钮；「＋ 疗程」已随管理区迁走（v0.14.2） */
+    ok(tl.indexOf('data-act="timeline-fold"') >= 0, '★ D2 时间轴保留折叠展开（浏览用）');
+    ok(tl.indexOf('data-act="timeline-dir"') >= 0, '★ D2 时间轴保留正/倒序切换');
+    ok(tl.indexOf('data-act="course-add"') < 0, '★ D2 「＋ 疗程」已迁至管理区卡（本卡不再有）');
+    /* 管理区卡里则必须齐备 */
+    const mgr = String(courseManageCard(p));
+    ok(mgr.indexOf('data-act="course-add"') >= 0, '★ D2 管理区卡承载「＋ 疗程」');
+    ok(mgr.indexOf('tls-row') >= 0, '★ D2 管理区卡承载 tls-row');
   }
   fireFromHtml(htmlWithChemo, 'cycle-add');
   ok(getEl('sheetTitle').textContent.indexOf('周期') >= 0, '★ 点「＋周期」打开周期弹层', getEl('sheetTitle').textContent);
@@ -719,19 +720,26 @@ group('H. 顶部治疗概况与末尾疗程管理（渲染层）');
   /* H8. ★ 无事件化疗疗程（刚建、还没排周期）仍能拿到「＋ 周期」——
      这是 test-course.js D2 的命脉，也是真实用户必经路径。
      ★ v0.14.0：入口从时间轴末尾移到顶部管理区，且时间轴走空态分支也不再
-       重复给出按钮（管理区已是唯一入口）。 */
+       重复给出按钮（管理区已是唯一入口）。
+     ★ v0.14.2：管理区独立成卡（courseManageCard），故改从该卡取按钮。 */
   {
     const p = mk({
       name: 'H8', startDate: '2026-03-02', fractions: '5',
       courses: [{ id: 'h8c', kind: 'chemo', title: '空化疗', cycles: [] }]
     });
     view.pid = p.id; view.tlDesc = false; view.tlOpen = {};
-    const h = timelineHtml(p);
-    const btn = String(h).match(/<button[^>]*data-act="cycle-add"[^>]*>/);
+    const h = String(courseManageCard(p));
+    const btn = h.match(/<button[^>]*data-act="cycle-add"[^>]*>/);
     ok(!!btn, '★★ H8 无事件化疗疗程仍渲染「＋ 周期」', btn && btn[0]);
     ok(!!btn && btn[0].indexOf('data-id="h8c"') >= 0, '★★ H8 该按钮自带正确 data-id', btn && btn[0]);
     /* 管理区行用 tls-row 承载（不再是末尾的 tls-actrow） */
     ok((h.match(/class="tls-row tls-chemo"/g) || []).length === 1, 'H8 管理区用 tls-row 承载该疗程');
+    /* 时间轴卡此时**不走空态**：该患者有放疗排程（fractions=5），
+       放疗逐次会自己产生事件，所以时间轴是满的。
+       重点是「时间轴里不再有 cycle-add」——入口唯一。 */
+    const tl = String(timelineHtml(p));
+    ok(tl.indexOf('data-act="cycle-add"') < 0, '★ H8 时间轴不再重复给出「＋ 周期」（入口唯一）');
+    ok(tl.indexOf('data-act="timeline-fold"') >= 0, '★ H8 时间轴正常渲染（放疗段头在）');
   }
 
   /* H9. 完全无事件且无疗程 → 纯空态文案 */
@@ -741,12 +749,14 @@ group('H. 顶部治疗概况与末尾疗程管理（渲染层）');
     const h = timelineHtml(p);
     ok(h.indexOf('tl-empty') >= 0, 'H9 全空 → 空态提示');
     ok(h.indexOf('cycle-add') < 0, 'H9 无疗程 → 无 cycle-add');
-    ok(h.indexOf('tls-empty') >= 0, 'H9 无疗程 → 管理区给空态');
+    ok(String(courseManageCard(p)).indexOf('tls-empty') >= 0, 'H9 无疗程 → 管理区给空态');
   }
 
-  /* H10. ★ 管理区（顶部）：每个疗程恰好一个 course-del，且都带 data-id。
+  /* H10. ★ 管理区（独立卡）：每个疗程恰好一个 course-del，且都带 data-id。
      ★ v0.14.0：管理区从时间轴**末尾**移到**顶部**，行 class 由 tls-actrow
-       改为 tls-row（带类别后缀），但「每疗程恰好一个删除按钮」的约束不变。 */
+       改为 tls-row（带类别后缀），但「每疗程恰好一个删除按钮」的约束不变。
+     ★ v0.14.2：管理区成为独立卡片，位置断言改为「在时间轴**卡**之前」，
+       由页面级渲染（N 组）来验证；本组只验卡内构成。 */
   {
     const p = mk({
       name: 'H10', startDate: '2026-03-02', fractions: '6', dosePerFraction: '2',
@@ -757,11 +767,9 @@ group('H. 顶部治疗概况与末尾疗程管理（渲染层）');
       ]
     });
     view.pid = p.id; view.tlDesc = false; view.tlOpen = {};
-    const h = timelineHtml(p);
-    /* 管理区在卡片顶部：应出现在时间轴「年」分节之前 */
-    const mgrPos = h.indexOf('tls-surgery');
-    const yearPos = h.indexOf('class="tl-year"');
-    ok(mgrPos >= 0 && (yearPos < 0 || mgrPos < yearPos), '★★ H10 管理区位于时间轴之前（顶部）', { mgrPos: mgrPos, yearPos: yearPos });
+    const h = String(courseManageCard(p));
+    ok(h.indexOf('tls-surgery') >= 0, '★★ H10 管理区卡含手术行');
+    ok(h.indexOf('data-act="course-add"') >= 0, '★★ H10 管理区卡承载「＋ 疗程」');
     const dels = h.match(/<button[^>]*data-act="course-del"[^>]*>/g) || [];
     ok(dels.length === 2, '★★ H10 course-del 恰好 2 个（手术+化疗；放疗行只给备注）', dels.length);
     ok(dels.every(d => d.indexOf('data-id="') >= 0), '★★ H10 每个 course-del 都自带 data-id');
@@ -781,14 +789,21 @@ group('H. 顶部治疗概况与末尾疗程管理（渲染层）');
       ]
     });
     view.pid = p.id; view.tlDesc = false; view.tlOpen = {};
-    const h = timelineHtml(p);
-    const segs = (h.match(/class="tl-item radio tl-seg"/g) || []).length;
+    const tl = String(timelineHtml(p));
+    const mgr = String(courseManageCard(p));
+    const segs = (tl.match(/class="tl-item radio tl-seg"/g) || []).length;
     ok(segs === 2, 'H11 前置：放疗被切成 2 段', segs);
-    const rDel = (h.match(/<button[^>]*data-act="course-del"[^>]*data-id="hBr"[^>]*>/g) || []).length;
+    /* 段头里不得有任何疗程级按钮（结构性只读） */
+    const rDel = (tl.match(/<button[^>]*data-act="course-del"[^>]*data-id="hBr"[^>]*>/g) || []).length;
     ok(rDel === 0, '★ H11 放疗不提供 course-del（改为备注入口，避免删掉自动排程）', rDel);
-    const rNote = (h.match(/<button[^>]*data-act="radio-note"[^>]*>/g) || []).length;
-    ok(rNote === 1, '★ H11 放疗「备注」只出现 1 次（不随段数膨胀）', rNote);
-    const segsFold = (h.match(/data-act="timeline-fold"/g) || []).length;
+    const rNoteTl = (tl.match(/<button[^>]*data-act="radio-note"[^>]*>/g) || []).length;
+    ok(rNoteTl === 0, '★★ H11 时间轴卡内不含 radio-note（已迁至管理区）', rNoteTl);
+    /* 管理区里放疗「备注」只出现 1 次（不随段数膨胀） */
+    const rNote = (mgr.match(/<button[^>]*data-act="radio-note"[^>]*>/g) || []).length;
+    ok(rNote === 1, '★ H11 管理区放疗「备注」只出现 1 次（不随段数膨胀）', rNote);
+    const segsFold = (tl.match(/data-act="timeline-fold"/g) || []).length;
+    /* 本用例的化疗周期**没有 dose**，故不渲染周期折叠按钮；
+       时间轴 fold 恰好等于 2 个放疗段头。 */
     ok(segsFold === 2, '★ H11 两个放疗段头各有折叠按钮（浏览用）', segsFold);
   }
 
@@ -810,14 +825,17 @@ group('H. 顶部治疗概况与末尾疗程管理（渲染层）');
       courses: [{ id: 'hCc', kind: 'chemo', title: '化疗', cycles: [{ id: 'hCy', n: 1, startDate: '2026-03-04' }] }]
     });
     view.pid = p.id; view.tlDesc = true; view.tlOpen = {};
-    const h = timelineHtml(p);
-    ok(h.indexOf('tls-radio') >= 0, 'H13 倒序下管理区放疗行仍在');
-    ok((h.match(/class="tls-row tls-chemo"/g) || []).length === 1, 'H13 倒序下化疗管理行完整');
-    ok((h.match(/<button[^>]*data-act="cycle-add"[^>]*>/g) || []).length === 1, 'H13 倒序下 cycle-add 仍可用');
-    /* 倒序下放疗段头仍排在管理区之后 */
-    const mgrEnd = h.indexOf('tls-actrow') >= 0 ? h.indexOf('tls-actrow') : h.indexOf('class="tl-year"');
-    const segPos = h.indexOf('class="tl-item radio tl-seg"');
-    ok(segPos > mgrEnd, '★ H13 倒序下管理区仍在时间轴之前', { segPos: segPos, mgrEnd: mgrEnd });
+    /* ★ v0.14.2：管理区独立成卡，倒序**不应影响它**（它根本不在时间轴卡内）。
+       这条断言因此比 v0.14.0 更强：管理区完全不受排序状态影响。 */
+    const mgrDesc = String(courseManageCard(p));
+    const mgrAsc = (function () { view.tlDesc = false; const x = String(courseManageCard(p)); view.tlDesc = true; return x; })();
+    ok(mgrDesc === mgrAsc, '★★ H13 管理区卡不随正/倒序改变（完全解耦）');
+    ok((mgrDesc.match(/class="tls-row tls-chemo"/g) || []).length === 1, 'H13 倒序下化疗管理行完整');
+    ok((mgrDesc.match(/<button[^>]*data-act="cycle-add"[^>]*>/g) || []).length === 1, 'H13 倒序下 cycle-add 仍可用');
+    /* 倒序下时间轴仍正常渲染（放疗段头存在） */
+    const tlDesc = String(timelineHtml(p));
+    ok(tlDesc.indexOf('class="tl-item radio tl-seg"') >= 0 || tlDesc.indexOf('tl-item chemo') >= 0,
+      '★ H13 倒序下时间轴仍正常渲染');
     view.tlDesc = false; view.tlOpen = {};
   }
 
@@ -926,14 +944,15 @@ group('I. 其他治疗（kind=other）：枚举钳制 / 时间轴 / 概况 / AI 
     ok(s.indexOf('其他治疗') >= 0, 'I7 行内显示中文标签');
   }
 
-  /* I8. 管理区：other 也有「＋ 周期」，且按钮自带 data-id */
+  /* I8. 管理区：other 也有「＋ 周期」，且按钮自带 data-id
+     ★ v0.14.2：管理区独立成卡，改从 courseManageCard 取 */
   {
     const p = mk({
       name: 'I8', startDate: '2026-03-02', fractions: '5',
       courses: [{ id: 'iO', kind: 'other', title: '靶向', cycles: [{ id: 'iOc', n: 1, startDate: '2026-03-05' }] }]
     });
     view.pid = p.id; view.tlDesc = false; view.tlOpen = {};
-    const h = timelineHtml(p);
+    const h = String(courseManageCard(p));
     const add = h.match(/<button[^>]*data-act="cycle-add"[^>]*>/g) || [];
     ok(add.length === 1, '★ I8 other 疗程也有「＋ 周期」按钮', add.length);
     ok(add.length > 0 && add[0].indexOf('data-id="iO"') >= 0, '★ I8 按钮带正确的 data-id', add[0]);
@@ -951,15 +970,15 @@ group('I. 其他治疗（kind=other）：枚举钳制 / 时间轴 / 概况 / AI 
     let h = timelineHtml(p);
     ok((h.match(/class="tl-item other"/g) || []).length === 1, '★ I9 时间轴渲染出 other 周期行');
     ok(h.indexOf('▸ 展开用药') >= 0, '★ I9 时间轴折叠文案为「▸ 展开用药」（区别于化疗「给药」）');
-    /* 展开管理区：周期级按钮文案为「＋ 用药」 */
-    view.tlOpen = {}; view.pid = p.id; render();
+    /* 管理区卡展开后：周期级按钮文案为「＋ 用药」 */
     const mgKeyV = 'mg' + 'iO2';
-    const hMgrOpen = (function () { view.tlOpen[mgKeyV] = 1; return timelineHtml(p); })();
-    ok(hMgrOpen.indexOf('＋ 用药') >= 0, '★ I9 管理区周期按钮文案为「＋ 用药」');
-    ok(hMgrOpen.indexOf('第 1 其他治疗周期') >= 0, '★ I9 管理区周期标题带上类别名',
-      (hMgrOpen.match(/tls-cyc-n">[^<]*/) || [])[0]);
-    ok(hMgrOpen.indexOf('tls-dose') >= 0, '★ I9 管理区列出给药明细（tls-dose）');
-    /* 展开时间轴用药明细 */
+    view.tlOpen = {}; view.tlOpen[mgKeyV] = 1;
+    const hMgrOpen2 = String(courseManageCard(p));
+    ok(hMgrOpen2.indexOf('＋ 用药') >= 0, '★ I9 管理区周期按钮文案为「＋ 用药」');
+    ok(hMgrOpen2.indexOf('第 1 其他治疗周期') >= 0, '★ I9 管理区周期标题带上类别名',
+      (hMgrOpen2.match(/tls-cyc-n">[^<]*/) || [])[0]);
+    ok(hMgrOpen2.indexOf('tls-dose') >= 0, '★ I9 管理区列出给药明细（tls-dose）');
+    /* 展开时间轴用药明细（浏览态，仍可展开） */
     view.tlOpen = { iOc2: 1 };
     h = timelineHtml(p);
     ok((h.match(/class="tl-item other sub"/g) || []).length === 1, '★ I9 时间轴展开后出现 other 用药子行',
@@ -968,22 +987,22 @@ group('I. 其他治疗（kind=other）：枚举钳制 / 时间轴 / 概况 / AI 
     view.tlOpen = {};
   }
 
-  /* I10. 化疗文案未被污染：时间轴与管理员都仍是「给药」 */
+  /* I10. 化疗文案未被污染：时间轴与管理区都仍是「给药」 */
   {
     const p = mk({
       name: 'I10', startDate: '2026-03-02', fractions: '5',
       courses: [{ id: 'iC', kind: 'chemo', title: '化疗', cycles: [{ id: 'iCc', n: 1, startDate: '2026-03-05', doses: [{ id: 'iCd', date: '2026-03-05', drug: '顺铂' }] }] }]
     });
     view.pid = p.id; view.tlDesc = false; view.tlOpen = {};
-    let h = timelineHtml(p);
     view.tlOpen['iCc'] = 1;
-    h = timelineHtml(p);
-    ok(h.indexOf('收起给药') >= 0, '★★ I10 时间轴化疗折叠文案仍为「给药」');
+    const tl = String(timelineHtml(p));
+    ok(tl.indexOf('收起给药') >= 0, '★★ I10 时间轴化疗折叠文案仍为「给药」');
+    /* 管理区卡：化疗周期按钮仍是「＋ 给药」 */
     view.tlOpen = { mgiC: 1 };
-    h = timelineHtml(p);
-    ok(h.indexOf('＋ 给药') >= 0, '★★ I10 管理区化疗周期按钮仍为「＋ 给药」（未被 other 覆盖）');
-    ok(h.indexOf('第 1 化疗周期') >= 0, '★ I10 管理区化疗周期标题为「第 1 化疗周期」',
-      (h.match(/tls-cyc-n">[^<]*/) || [])[0]);
+    const mgr = String(courseManageCard(p));
+    ok(mgr.indexOf('＋ 给药') >= 0, '★★ I10 管理区化疗周期按钮仍为「＋ 给药」（未被 other 覆盖）');
+    ok(mgr.indexOf('第 1 化疗周期') >= 0, '★ I10 管理区化疗周期标题为「第 1 化疗周期」',
+      (mgr.match(/tls-cyc-n">[^<]*/) || [])[0]);
     view.tlOpen = {};
   }
 
@@ -1089,22 +1108,24 @@ group('J. 操作上移：管理区承载全部按钮 / 时间轴纯浏览（v0.1
   }
   const MGR_ACTS = ['mg-fold', 'cycle-add', 'cycle-edit', 'cycle-del', 'dose-add', 'dose-edit', 'dose-del', 'course-edit', 'course-del', 'radio-note'];
 
-  /* J1. ★★ 时间轴事件流内**零**操作按钮（仅保留 course-add / timeline-dir / timeline-fold） */
+  /* J1. ★★ 时间轴卡内**零**操作按钮（仅保留 timeline-dir / timeline-fold）
+     ★ v0.14.2：管理区独立成卡后，这条断言不再需要「切掉管理区再扫」——
+     时间轴卡里本来就一个管理按钮都没有，是**结构性只读**。
+     「＋ 疗程」已随管理区迁至 courseManageCard，故本卡不再含 course-add。 */
   {
     const p = jPatient();
     view.pid = p.id; view.tlDesc = false; view.tlOpen = {};
-    const full = String(timelineHtml(p));
-    const mgr = String(courseSummaryHtml(p));
-    const cut = full.indexOf(mgr);
-    ok(cut > 0, 'J1 前置：能在卡片里定位到管理区');
-    const tlOnly = full.slice(cut + mgr.length);
-    const leaked = MGR_ACTS.filter(function (a) { return tlOnly.indexOf('data-act="' + a + '"') >= 0; });
-    ok(leaked.length === 0, '★★ J1 时间轴事件流内不含任何管理类按钮', leaked);
-    /* 浏览态按钮必须保留。注意：正/倒序在卡片头（管理区**之前**），
-       所以要在整张卡片里查，而不是切出来的 tlOnly。 */
-    ok(full.indexOf('data-act="timeline-dir"') >= 0, '★ J1 保留正/倒序切换');
-    ok(tlOnly.indexOf('data-act="timeline-fold"') >= 0, '★ J1 保留折叠展开（浏览用）');
-    ok(full.indexOf('data-act="course-add"') >= 0, '★ J1 保留「＋ 疗程」');
+    const tl = String(timelineHtml(p));
+    const leaked = MGR_ACTS.filter(function (a) { return tl.indexOf('data-act="' + a + '"') >= 0; });
+    ok(leaked.length === 0, '★★ J1 时间轴卡内不含任何管理类按钮', leaked);
+    ok(tl.indexOf('data-act="course-add"') < 0, '★★ J1 「＋ 疗程」已不在时间轴卡（迁至管理区）');
+    /* 浏览态按钮必须保留 */
+    ok(tl.indexOf('data-act="timeline-dir"') >= 0, '★ J1 保留正/倒序切换');
+    ok(tl.indexOf('data-act="timeline-fold"') >= 0, '★ J1 保留折叠展开（浏览用）');
+    /* 管理区卡则必须齐备，且承载「＋ 疗程」 */
+    const mgr = String(courseManageCard(p));
+    ok(mgr.indexOf('data-act="course-add"') >= 0, '★ J1 管理区卡承载「＋ 疗程」');
+    ok(mgr.indexOf('data-act="mg-fold"') >= 0, '★ J1 管理区卡承载周期折叠');
   }
 
   /* J2. ★★ 管理区含齐四类的操作入口（放疗备注 / 化疗 / 其他 / 手术） */
@@ -1172,38 +1193,41 @@ group('J. 操作上移：管理区承载全部按钮 / 时间轴纯浏览（v0.1
     ok(m.indexOf('第 1 其他治疗周期') >= 0, '★★ J5 其他治疗周期标题用「其他治疗」');
   }
 
-  /* J6. ★★ 管理区展开键（mg 前缀）与时间轴折叠键互不干扰 */
+  /* J6. ★★ 管理区展开键（mg 前缀）与时间轴折叠键互不干扰
+     ★ v0.14.2：管理区与时间轴已是两张独立的卡，故「互不干扰」是更强的结论 ——
+     连卡片本身都不同，折叠键混用也不会有跨卡串扰。 */
   {
     const p = jPatient();
     view.pid = p.id; view.tlDesc = false;
     /* 只展开时间轴的化疗周期，不展开管理区 */
     view.tlOpen = { jcy1: 1 };
-    const m1 = String(courseSummaryHtml(p));
+    const m1 = String(courseManageCard(p));
     ok(m1.indexOf('tls-cyc') < 0, '★★ J6 时间轴展开周期不影响管理区（管理区仍收起）');
     /* 只展开管理区，不展开时间轴 */
     view.tlOpen = { mgjc: 1 };
     const h2 = String(timelineHtml(p));
     ok((h2.match(/class="tl-item chemo sub"/g) || []).length === 0, '★★ J6 管理区展开不影响时间轴（给药子行仍收起）');
-    ok(h2.indexOf('tls-cyc') >= 0, '★ J6 管理区自身确实展开了');
+    ok(String(courseManageCard(p)).indexOf('tls-cyc') >= 0, '★ J6 管理区自身确实展开了');
     view.tlOpen = {};
   }
 
-  /* J7. ★★ 管理区在时间轴**之前**（含倒序），且不随时间倒序反转 */
+  /* J7. ★★ 管理区卡在时间轴卡**之前**（含倒序），且不随时间倒序反转
+     ★ v0.14.2：位置关系从「卡内」升格为「卡间」，由页面级渲染验证。 */
   {
     const p = jPatient();
-    view.pid = p.id; view.tlOpen = {};
+    view.page = 'patient'; view.pid = p.id; view.tlOpen = {};
     [false, true].forEach(function (desc) {
-      view.tlDesc = desc;
-      const h = String(timelineHtml(p));
-      const mgrPos = h.indexOf('class="tls"');
-      const tlPos = h.indexOf('class="tl-item');
-      ok(mgrPos >= 0 && tlPos > mgrPos, '★★ J7 ' + (desc ? '倒序' : '正序') + '下管理区仍排在时间轴之前',
+      view.tlDesc = desc; render();
+      const page = String(getEl('view').innerHTML);
+      const mgrPos = page.indexOf('治疗管理与概况');
+      const tlPos = page.indexOf('全程治疗时间轴');
+      ok(mgrPos >= 0 && tlPos > mgrPos, '★★ J7 ' + (desc ? '倒序' : '正序') + '下管理区卡仍排在时间轴卡之前',
         { mgrPos: mgrPos, tlPos: tlPos });
     });
     view.tlDesc = false;
   }
 
-  /* J8. ★★ 无事件疗程不再「死路」：管理区仍给出 ＋周期。
+  /* J8. ★★ 无事件疗程不再「死路」：管理区卡仍给出 ＋周期。
      ★ 注意事项：患者**必须不带放疗**（fractions 为空），否则放疗逐次会自己
        产生大量事件、走不到时间轴空态分支 —— 这条断言就失去意义了。 */
   {
@@ -1212,11 +1236,11 @@ group('J. 操作上移：管理区承载全部按钮 / 时间轴纯浏览（v0.1
       courses: [{ id: 'j8o', kind: 'other', title: '刚建的其他治疗', cycles: [] }]
     });
     view.pid = p.id; view.tlDesc = false; view.tlOpen = {};
-    const h = String(timelineHtml(p));
-    const btn = h.match(/<button[^>]*data-act="cycle-add"[^>]*>/);
+    const btn = String(courseManageCard(p)).match(/<button[^>]*data-act="cycle-add"[^>]*>/);
     ok(!!btn && btn[0].indexOf('data-id="j8o"') >= 0, '★★ J8 无周期无事件的其他治疗仍能加周期', btn && btn[0]);
-    ok(h.indexOf('tl-empty') >= 0, '★ J8 时间轴走空态文案');
-    ok(h.indexOf('tls-row') >= 0, '★ J8 管理区仍在（不随空态消失）');
+    const tl = String(timelineHtml(p));
+    ok(tl.indexOf('tl-empty') >= 0, '★ J8 时间轴走空态文案');
+    ok(String(courseManageCard(p)).indexOf('tls-row') >= 0, '★ J8 管理区仍在（不随空态消失）');
   }
 
   /* J9. ★★ 放疗「备注」按钮：无 radio 疗程时 data-id 为空（由处理器兜底补建） */
@@ -1365,6 +1389,155 @@ group('K. 可读性优化：时间轴瘦身 / 尾部入卡 / 枚举容错（v0.1
     });
     /* 空 / null 不得抛错 */
     ok(normEnum('purpose', '') === '' && normEnum('purpose', null) === '', '★ K5 空值与 null 安全');
+  }
+}
+
+/* ================================================================ */
+group('N. 卡片拆分与排序：管理区独立成卡 + 治疗进度前置（v0.14.2）');
+
+{
+  /* 造一个四类齐全的患者，用于页面级顺序断言 */
+  function nPatient() {
+    return mk({
+      name: 'N', startDate: addDays(today, -14), fractions: '10', dosePerFraction: '2', treatDays: [1, 2, 3, 4, 5],
+      courses: [
+        { id: 'ns', kind: 'surgery', title: '根治术', date: addDays(today, -20) },
+        { id: 'nc', kind: 'chemo', title: '第1程化疗', regimen: 'AP方案', cycles: [
+          { id: 'ncy1', n: 1, startDate: addDays(today, -10), doses: [{ id: 'nd1', date: addDays(today, -10), drug: '培美曲塞', dose: '500', unit: 'mg/m2' }] }
+        ]},
+        { id: 'nr', kind: 'radio', title: '原发灶放疗' }
+      ],
+      notes: [{ id: 'nn1', at: '2026-01-01T09:00', content: '交班记录' }]
+    });
+  }
+  /* 从渲染出的整页里，取各卡片标题的出现顺序 */
+  function cardOrder(page) {
+    const titles = ['全程治疗时间轴', '治疗进度', '治疗管理与概况', '副反应追踪', '随访管理', '备注 / 交班记录', '患者状态'];
+    return titles.filter(t => page.indexOf(t) >= 0)
+      .map(t => ({ t: t, i: page.indexOf(t) }))
+      .sort((a, b) => a.i - b.i).map(x => x.t);
+  }
+
+  /* N1. ★★★ A 组核心：管理区与时间轴是**两张独立的卡**（各自有 .card 包裹）。
+     拆之前管理区只是 timelineHtml 里的一段 HTML，没有自己的 .card。 */
+  {
+    const p = nPatient();
+    view.page = 'patient'; view.pid = p.id; view.tlDesc = false; view.tlOpen = {};
+    render();
+    const page = String(getEl('view').innerHTML);
+    /* 管理区卡：.card 直接紧跟 section-title「治疗管理与概况」 */
+    ok(/<div class="card"><div class="section-title">治疗管理与概况/.test(page),
+      '★★★ N1 管理区已是独立卡片（.card + section-title）',
+      page.slice(page.indexOf('治疗管理与概况') - 60, page.indexOf('治疗管理与概况') + 10));
+    /* 时间轴卡标题里**不再**嵌管理区 */
+    const tlStart = page.indexOf('全程治疗时间轴');
+    const mgrStart = page.indexOf('治疗管理与概况');
+    ok(mgrStart >= 0 && tlStart >= 0 && tlStart !== mgrStart, '★★ N1 「治疗管理与概况」不再是时间轴卡标题的一部分');
+  }
+
+  /* N2. ★★★ A 组核心：时间轴卡内零管理按钮（结构性只读，无需切片） */
+  {
+    const p = nPatient();
+    view.pid = p.id; view.tlDesc = false; view.tlOpen = {};
+    const tl = String(timelineHtml(p));
+    ok(tl.indexOf('tls-row') < 0, '★★★ N2 时间轴卡内无 tls-row（管理区行）', tl.indexOf('tls-row'));
+    ok(tl.indexOf('data-act="mg-fold"') < 0, '★★★ N2 时间轴卡内无 mg-fold');
+    ok(tl.indexOf('data-act="cycle-') < 0, '★★★ N2 时间轴卡内无任何 cycle-* 操作');
+    ok(tl.indexOf('data-act="dose-') < 0, '★★★ N2 时间轴卡内无任何 dose-* 操作');
+    ok(tl.indexOf('data-act="course-edit"') < 0 && tl.indexOf('data-act="course-del"') < 0,
+      '★★★ N2 时间轴卡内无 course-edit / course-del');
+    ok(tl.indexOf('data-act="radio-note"') < 0, '★★★ N2 时间轴卡内无 radio-note');
+    ok(tl.indexOf('data-act="course-add"') < 0, '★★★ N2 时间轴卡内无「＋ 疗程」');
+    /* 反向：管理区卡**必须**含这些 */
+    const mgr = String(courseManageCard(p));
+    ok(mgr.indexOf('tls-row') >= 0 && mgr.indexOf('data-act="course-add"') >= 0, '★★ N2 管理区卡承载操作');
+  }
+
+  /* N3. ★★★ B 组核心：卡片顺序为「基本信息 → 治疗进度 → 管理区 → 时间轴 → …」 */
+  {
+    const p = nPatient();
+    view.page = 'patient'; view.pid = p.id; view.tlDesc = false; view.tlOpen = {};
+    render();
+    const page = String(getEl('view').innerHTML);
+    const order = cardOrder(page);
+    ok(order[0] === '治疗进度', '★★★ N3 治疗进度排在管理区之前（每日高频内容前置）', order);
+    ok(order.indexOf('治疗进度') < order.indexOf('治疗管理与概况'),
+      '★★★ N3 治疗进度 < 治疗管理与概况', order);
+    ok(order.indexOf('治疗管理与概况') < order.indexOf('全程治疗时间轴'),
+      '★★★ N3 管理区 < 时间轴（空态文案指向「上方」才成立）', order);
+    ok(order.indexOf('全程治疗时间轴') < order.indexOf('副反应追踪'), '★★ N3 时间轴 < 副反应', order);
+    ok(order.indexOf('副反应追踪') < order.indexOf('随访管理'), '★★ N3 副反应 < 随访', order);
+    ok(order.indexOf('随访管理') < order.indexOf('备注 / 交班记录'), '★ N3 随访 < 备注', order);
+    ok(order.indexOf('备注 / 交班记录') < order.indexOf('患者状态'), '★ N3 备注 < 患者状态', order);
+  }
+
+  /* N4. ★★ 顺序在倒序下不变（排序只影响时间轴内部，不该动卡片顺序） */
+  {
+    const p = nPatient();
+    view.page = 'patient'; view.pid = p.id; view.tlOpen = {};
+    let prev = null;
+    [false, true].forEach(function (desc) {
+      view.tlDesc = desc; render();
+      const order = cardOrder(String(getEl('view').innerHTML));
+      if (prev) ok(JSON.stringify(order) === JSON.stringify(prev), '★★ N4 倒序下卡片顺序不变', { asc: prev, desc: order });
+      prev = order;
+    });
+    view.tlDesc = false;
+  }
+
+  /* N5. ★★ 渲染出的整页里，管理区按钮**只出现一次**（不因拆卡而重复） */
+  {
+    const p = nPatient();
+    view.page = 'patient'; view.pid = p.id; view.tlDesc = false; view.tlOpen = {};
+    render();
+    const page = String(getEl('view').innerHTML);
+    ['course-add', 'radio-note', 'mg-fold'].forEach(function (a) {
+      const n = (page.match(new RegExp('data-act="' + a + '"', 'g')) || []).length;
+      ok(n === 1, '★★ N5 「' + a + '」在整页恰好出现 1 次', n);
+    });
+  }
+
+  /* N6. ★★ 时间轴折叠键不影响管理区折叠键（拆卡后仍互不干扰，跨卡验证） */
+  {
+    const p = nPatient();
+    view.page = 'patient'; view.pid = p.id; view.tlDesc = false;
+    view.tlOpen = {}; view.tlOpen['ncy1'] = 1;          /* 只展开时间轴化疗周期 */
+    render();
+    const page1 = String(getEl('view').innerHTML);
+    ok(page1.indexOf('tls-cyc') < 0, '★★ N6 只展开时间轴周期 → 管理区仍收起');
+    view.tlOpen = {}; view.tlOpen['mgnc'] = 1;          /* 只展开管理区 */
+    render();
+    const page2 = String(getEl('view').innerHTML);
+    ok(page2.indexOf('tls-cyc') >= 0, '★ N6 管理区展开生效');
+    ok((page2.match(/class="tl-item chemo sub"/g) || []).length === 0, '★★ N6 管理区展开不影响时间轴给药子行');
+    view.tlOpen = {};
+  }
+
+  /* N7. ★★ 无放疗患者（分不出进度卡）也要能正常渲染，且管理区卡仍在 */
+  {
+    const p = mk({ name: 'N7', startDate: '', fractions: '',
+      courses: [{ id: 'n7c', kind: 'chemo', title: '化疗', cycles: [] }] });
+    view.page = 'patient'; view.pid = p.id; view.tlDesc = false; view.tlOpen = {};
+    render();
+    const page = String(getEl('view').innerHTML);
+    ok(page.indexOf('治疗日历') >= 0, '★★ N7 无排程 → 渲染「治疗日历」引导卡（替代治疗进度）');
+    ok(page.indexOf('治疗管理与概况') >= 0, '★★ N7 管理区卡仍在');
+    ok(page.indexOf('data-act="cycle-add"') >= 0, '★★ N7 无周期疗程仍有「＋ 周期」入口');
+    /* 引导卡应排在管理区之前 */
+    ok(page.indexOf('治疗日历') < page.indexOf('治疗管理与概况'), '★ N7 引导卡在管理区之前');
+  }
+
+  /* N8. ★★ 「＋ 疗程」只在管理区卡，且能真实打开弹层（端到端） */
+  {
+    const p = nPatient();
+    view.page = 'patient'; view.pid = p.id; view.tlDesc = false; view.tlOpen = {};
+    render();
+    const page = String(getEl('view').innerHTML);
+    const btns = page.match(/<button[^>]*data-act="course-add"[^>]*>/g) || [];
+    ok(btns.length === 1, '★★ N8 整页只有一个「＋ 疗程」按钮', btns.length);
+    fireFromHtml(page, 'course-add');
+    ok(getEl('sheetTitle').textContent.indexOf('疗程') >= 0, '★★ N8 点它确实打开疗程弹层', getEl('sheetTitle').textContent);
+    closeSheet();
   }
 }
 

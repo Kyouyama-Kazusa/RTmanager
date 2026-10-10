@@ -316,7 +316,7 @@ button,input,select,textarea{font:inherit;color:inherit}
 var LS_KEY = 'radiotherapy.v1';
 var SNAP_PREFIX = 'radiotherapy.snap.';
 var SNAP_KEEP = 7;
-var APP_VERSION = '0.14.1';
+var APP_VERSION = '0.14.2';
 
 var SEXES = ['男', '女'];
 var PURPOSES = ['根治性', '术后辅助', '术前新辅助', '姑息性'];
@@ -1955,13 +1955,31 @@ function courseSummaryHtml(p) {
     rows.push(surgeryManageRow(c));
   });
 
-  if (!rows.length) return '<div class="tls tls-empty">暂无治疗记录。点右上角「＋ 疗程」添加手术、化疗、放疗或其他治疗。</div>';
+  if (!rows.length) return '<div class="tls tls-empty">暂无治疗记录。点本卡右上角「＋ 疗程」添加手术、化疗、放疗或其他治疗。</div>';
   return '<div class="tls">' + rows.join('') + '</div>';
+}
+
+/* ★★★ 治疗管理与概况卡片（v0.14.2）：管理区从时间轴卡里**独立出来**。
+   动机：v0.14.0 把操作按钮上移后，「全程治疗时间轴」这张卡里同时塞着
+   「操作台」与「日期流水」两种心智，且它占据首屏 19 个按钮。
+   拆成两张卡后，卡名与内容才名实相符：「治疗管理与概况」= 操作，
+   「全程治疗时间轴」= 浏览。
+   ★「＋ 疗程」属于**新建疗程**这一操作，故归本卡（管理区），不留在时间轴卡。
+   ★ 本卡必须渲染在时间轴卡**之前**（J7 / N 组断言锁定），否则用户会先看到
+     「以下疗程尚无事件，可回上方…」却找不到上方。 */
+function courseManageCard(p) {
+  return '<div class="card"><div class="section-title">治疗管理与概况' +
+    '<span style="display:flex;gap:6px;align-items:center">' +
+    '<button class="btn sm addbtn" data-act="course-add">＋ 疗程</button>' +
+    '</span></div>' + courseSummaryHtml(p) + '</div>';
 }
 
 /* 渲染全程治疗时间轴卡片。
    ★ v0.14.0 起**纯只读**：所有操作按钮（＋周期 / ＋给药 / 编辑 / 删除 / 改日期）
-     全部上移到顶部「治疗管理与概况」区；这里只保留「折叠展开」用于浏览明细。
+     全部上移到「治疗管理与概况」区；这里只保留「折叠展开」用于浏览明细。
+   ★ v0.14.2 起，管理区**不再嵌在本函数内**，而是由 renderPatientPage() 单独成卡调用
+     （见 courseManageCard()）。因此「时间轴卡里不含任何管理类按钮」是**结构性成立**的，
+     不再需要靠切掉管理区子串来验证。
      分层：一条按日期排好的单一流水；放疗逐次按「被非放疗事件打断」切成若干段
      （段头默认折叠）；手术 / 化疗 / 其他治疗各自成行，插入在其实日期所在位置。
    要点（血的教训）：每个按钮都必须自带 data-id/data-n/data-dose，
@@ -1973,11 +1991,7 @@ function timelineHtml(p) {
     '<span class="chip sm">共 ' + ev.length + ' 项</span>' +
     '<button class="btn sm" data-act="timeline-dir" data-dir="' + (view.tlDesc ? 'asc' : 'desc') + '">' +
     (view.tlDesc ? '↑ 正序' : '↓ 倒序') + '</button>' +
-    '<button class="btn sm addbtn" data-act="course-add">＋ 疗程</button>' +
     '</span></div>';
-
-  /* 顶部「治疗管理与概况」：四类一眼看全 + 全部操作入口。 */
-  h += courseSummaryHtml(p);
 
   var courses = p.courses || [];
 
@@ -2455,6 +2469,101 @@ function renderDone() {
 }
 
 /* ================= 渲染：患者详情 ================= */
+
+/* 「治疗进度 + 个人日历」（v0.14.2 从 renderPatientPage 抽出成函数）。
+   抽出的动机有两个：
+     ① B 组要把它**整体**提到时间轴之前 —— 内联在 renderPatientPage 里时，
+        卡片顺序调整会和 200 行日历代码缠在一起，极易漏改或错位；
+     ② 它是「每日高频查看」的内容，值得有独立函数名，便于测试直接驱动。
+   ★ 卡片顺序调整时必须与 courseManageCard / timelineHtml 的相对位置一起考虑（见 N 组）。 */
+function patientProgressCards(p, tot, dn, accDose, end, sched, missY) {
+  var h = '';
+  if (!p.startDate || !tot) {
+    return '<div class="card"><div class="section-title">治疗日历</div>' +
+      '<div class="hint">请先填写「放疗开始日期」与「总次数」，系统将自动排程并生成日历。</div>' +
+      '<div class="btnrow"><button class="btn sm addbtn" data-act="edit-patient">去填写</button></div></div>';
+  }
+  var boost = parseInt(p.boostFractions, 10) || 0;
+  var totAll = totalFractionsOf(p);
+  var planned = plannedCount(p);
+  var stopped = stoppedShortOf(p);
+  var dosePer = parseFloat(p.dosePerFraction) || 0;
+  var planDose = totAll * dosePer;
+  h += '<div class="card"><div class="section-title">治疗进度' +
+    '<span class="chip pri">' + dn + '/' + planned + ' 次 · ' + accDose.toFixed(1) + ' Gy</span></div>' +
+    '<div class="progress' + (dn >= planned * 0.95 ? ' warn' : '') + '"><div class="fill" style="width:' + Math.min(100, planned ? dn / planned * 100 : 0) + '%"></div></div>' +
+    /* 处方构成：原定 + 加量 - 未执行 */
+    '<div class="kv" style="margin-top:6px"><div class="k">处方次数</div><div class="v">' +
+    tot + ' 次' + (boost ? ' ＋ 加量 <b>' + boost + '</b> 次 ＝ 共 <b>' + totAll + '</b> 次' : '') +
+    (dosePer ? '（计划剂量 ' + planDose.toFixed(1) + ' Gy）' : '') + '</div></div>' +
+    (boost ? '<div class="kv"><div class="k">加量</div><div class="v">' + boost + ' 次' + (p.boostNote ? ' · ' + esc(p.boostNote) : '') + '</div></div>' : '') +
+    (p.stopDate ? '<div class="kv"><div class="k">提前终止</div><div class="v"><span class="chip danger sm">已终止</span> 最后治疗日 ' + dateOnly(p.stopDate) +
+      '，未执行 <b>' + stopped + '</b> 次</div></div>' : '') +
+    '<div class="kv"><div class="k">开始日期</div><div class="v">' + dateOnly(p.startDate) + '</div></div>' +
+    '<div class="kv"><div class="k">' + (p.stopDate ? '实际结束' : '预计结束') + '</div><div class="v">' + (end || '—') + (end ? '（' + WEEKDAYS[parseD(end).getDay()] + '）' : '') +
+    (p.stopDate ? ' <span class="chip warn sm">按终止日重算</span>' : '') + (missY.length ? ' <span class="chip warn sm">含未录入年份</span>' : '') + '</div></div>' +
+    (missY.length ? '<div class="hint" style="margin-top:8px;padding:8px 10px;background:var(--warn-soft);border-radius:8px;line-height:1.7">⚠ 排程涉及 <b>' + missY.join('、') + ' 年</b>，暂无该年节假日数据，已按「周一~周五工作日 + 周末休息」估算。补录假期后结束日期会自动重算。</div>' : '') +
+    '<div class="kv"><div class="k">治疗日</div><div class="v">' + (p.treatDays || []).map(function (d) { return WEEKDAYS[d]; }).join('、') + '</div></div>' +
+    '<div class="kv"><div class="k">放疗验证</div><div class="v">' + verifySummaryHtml(p) + '</div></div>' +
+    '<div class="kv"><div class="k">已中断</div><div class="v">' + ((p.pauses || []).length ? (p.pauses || []).map(function (x) { return mdLabel(x.from) + '~' + mdLabel(x.to) + (x.reason ? '(' + esc(x.reason) + ')' : ''); }).join('；') : '无') + '</div></div>' +
+    '<div class="hint" style="margin-top:6px">按日期自动推算：计划日期已过的即计入已完成，无需逐次标记。异常（当天未做）用「本次未做」修正。</div>' +
+    '<div class="btnrow"><button class="btn sm" data-act="add-pause">＋ 中断/调整</button>' +
+    '<button class="btn sm" data-act="add-extra">＋ 加照</button>' +
+    '<button class="btn sm" data-act="add-boost">' + (boost ? '改加量（现有 ' + boost + ' 次）' : '＋ 加量') + '</button>' +
+    (p.stopDate
+      ? '<button class="btn sm" data-act="cancel-stop">取消终止（恢复原计划）</button>'
+      : '<button class="btn sm danger" data-act="add-stop">提前终止</button>') +
+    (p.pauses && p.pauses.length ? '<button class="btn sm" data-act="list-pauses">查看中断（' + p.pauses.length + '）</button>' : '') +
+    (p.extras && p.extras.length ? '<button class="btn sm" data-act="list-extras">查看加照（' + p.extras.length + '）</button>' : '') +
+    '</div></div>';
+
+  /* 个人日历 */
+  var y = view.calY, m = view.calM;
+  var byDate = {};
+  sched.forEach(function (x) { byDate[x.date] = x; });
+  var cells = {};
+  var firstDay = sched.length ? sched[0].date : '';
+  var lastDay = sched.length ? sched[sched.length - 1].date : '';
+  Object.keys(byDate).forEach(function (ds) {
+    var x = byDate[ds];
+    var cls = x.extra ? 'extra' : (x.boost ? 'boost' : (x.done ? 'done' : ''));
+    var mark = (ds === firstDay ? '<span class="statrow"><span class="b-start">始</span></span>' : '') +
+      (ds === lastDay && lastDay !== firstDay ? '<span class="statrow"><span class="b-end">终</span></span>' : '');
+    cells[ds] = '<div class="tagline ' + cls + '">第' + x.fraction + '次' + (x.done ? '✓' : '') + (x.boost ? '＋' : '') + '</div>' + mark;
+  });
+  /* 中断区间：按天标记（中断日本就不排治疗，故不能要求 byDate[ds] 存在 —— BUG-12） */
+  (p.pauses || []).forEach(function (pa) {
+    var a = parseD(pa.from), b = parseD(pa.to);
+    if (!a || !b || b < a) return;
+    var monthPre = y + '-' + pad2(m);
+    /* 裁剪到本月，避免长区间做无谓循环 */
+    var start = dstr(a).slice(0, 7) < monthPre ? new Date(y, m - 1, 1) : new Date(a);
+    var lday = new Date(y, m, 0);
+    var endP = dstr(b).slice(0, 7) > monthPre ? lday : new Date(b);
+    for (var d = new Date(start); d <= endP; d.setDate(d.getDate() + 1)) {
+      var ds = dstr(d);
+      if (ds.slice(0, 7) !== monthPre) continue;
+      /* 已排治疗日不覆盖（正常不会出现），其余标为「停」 */
+      cells[ds] = '<div class="tagline pause">停</div>';
+    }
+  });
+  var monthPre2 = y + '-' + pad2(m) + '-';
+  var mStart = 0, mEnd = 0;
+  Object.keys(cells).forEach(function (ds) {
+    if (ds.slice(0, 7) !== monthPre2.slice(0, 7)) return;
+    if (ds === firstDay) mStart = 1;
+    if (ds === lastDay && lastDay !== firstDay) mEnd = 1;
+  });
+  h += '<div class="cal-wrap">' + calHeader(y, m) + calDowRow() + calBody(y, m, cells) +
+    (mStart ? '<div class="hint s-start" style="margin-top:6px;padding:6px 9px;border-radius:8px;background:#e3f0fd;color:#1d5fa8">▶ 本月 <b>' + mdLabel(firstDay) + '</b> 开始放疗（' + WEEKDAYS[parseD(firstDay).getDay()] + '）</div>' : '') +
+    (mEnd ? '<div class="hint s-end" style="margin-top:6px;padding:6px 9px;border-radius:8px;background:#fde8e4;color:#b3261e">■ 本月 <b>' + mdLabel(lastDay) + '</b> 放疗结束（' + WEEKDAYS[parseD(lastDay).getDay()] + '）</div>' : '') +
+    '<div class="cal-legend"><span><i style="background:#e5f3f1"></i>待治疗</span><span><i style="background:#e5f3f1;opacity:.6"></i>已完成</span>' +
+    '<span><i style="background:#fdf0e0"></i>加照</span><span><i style="background:#EEEDFE"></i>加量</span><span><i style="background:#eef1f5"></i>中断</span>' +
+    '<span><i style="background:#e3f0fd"></i>始＝开始放疗</span><span><i style="background:#fde8e4"></i>终＝放疗结束</span></div>' +
+    '<div class="hint" style="margin-top:6px">点日历上的治疗日可登记「本次未做」或加照</div></div>';
+  return h;
+}
+
 function renderPatientPage() {
   var p = getPatient(view.pid);
   if (!p) { view.page = 'tab'; render(); return; }
@@ -2480,95 +2589,22 @@ function renderPatientPage() {
     (p.simDate ? '<div class="kv"><div class="k">定位日期</div><div class="v">' + dateOnly(p.simDate) + (p.position ? ' · ' + esc(p.position) : '') + '</div></div>' : '') +
     '</div>';
 
-  /* 全程治疗时间轴（手术 / 化疗 / 放疗） */
+  /* ★★ 卡片顺序（v0.14.2，B 组）：把「每天都要看」的放到前面。
+     ① 基本信息（患者是谁、诊断、处方）
+     ② 治疗进度 + 个人日历 —— 今天做到第几次、还剩几次（每日高频）
+     ③ 治疗管理与概况 —— 全部录入与修改入口
+     ④ 全程治疗时间轴 —— 病历式回顾（浏览）
+     ⑤ 副反应追踪 → ⑥ 随访管理 → ⑦ 备注 → ⑧ 患者状态
+     ★ ③ 必须在 ④ 之前：时间轴空态文案写的是「可回上方『治疗管理与概况』继续录入」，
+       顺序反了这句话就指向错误方向（N 组断言锁定）。
+     治疗进度与个人日历合并渲染，故顺序调整时二者必须一起移动。 */
+  h += patientProgressCards(p, tot, dn, accDose, end, sched, missY);
+
+  /* 治疗管理与概况（全部操作入口；必须在时间轴之前） */
+  h += courseManageCard(p);
+
+  /* 全程治疗时间轴（纯浏览） */
   h += timelineHtml(p);
-
-  /* 治疗进度 + 个人日历 */
-  if (!p.startDate || !tot) {
-    h += '<div class="card"><div class="section-title">治疗日历</div>' +
-      '<div class="hint">请先填写「放疗开始日期」与「总次数」，系统将自动排程并生成日历。</div>' +
-      '<div class="btnrow"><button class="btn sm addbtn" data-act="edit-patient">去填写</button></div></div>';
-  } else {
-    var boost = parseInt(p.boostFractions, 10) || 0;
-    var totAll = totalFractionsOf(p);
-    var planned = plannedCount(p);
-    var stopped = stoppedShortOf(p);
-    var dosePer = parseFloat(p.dosePerFraction) || 0;
-    var planDose = totAll * dosePer;
-    h += '<div class="card"><div class="section-title">治疗进度' +
-      '<span class="chip pri">' + dn + '/' + planned + ' 次 · ' + accDose.toFixed(1) + ' Gy</span></div>' +
-      '<div class="progress' + (dn >= planned * 0.95 ? ' warn' : '') + '"><div class="fill" style="width:' + Math.min(100, planned ? dn / planned * 100 : 0) + '%"></div></div>' +
-      /* 处方构成：原定 + 加量 - 未执行 */
-      '<div class="kv" style="margin-top:6px"><div class="k">处方次数</div><div class="v">' +
-      tot + ' 次' + (boost ? ' ＋ 加量 <b>' + boost + '</b> 次 ＝ 共 <b>' + totAll + '</b> 次' : '') +
-      (dosePer ? '（计划剂量 ' + planDose.toFixed(1) + ' Gy）' : '') + '</div></div>' +
-      (boost ? '<div class="kv"><div class="k">加量</div><div class="v">' + boost + ' 次' + (p.boostNote ? ' · ' + esc(p.boostNote) : '') + '</div></div>' : '') +
-      (p.stopDate ? '<div class="kv"><div class="k">提前终止</div><div class="v"><span class="chip danger sm">已终止</span> 最后治疗日 ' + dateOnly(p.stopDate) +
-        '，未执行 <b>' + stopped + '</b> 次</div></div>' : '') +
-      '<div class="kv"><div class="k">开始日期</div><div class="v">' + dateOnly(p.startDate) + '</div></div>' +
-      '<div class="kv"><div class="k">' + (p.stopDate ? '实际结束' : '预计结束') + '</div><div class="v">' + (end || '—') + (end ? '（' + WEEKDAYS[parseD(end).getDay()] + '）' : '') +
-      (p.stopDate ? ' <span class="chip warn sm">按终止日重算</span>' : '') + (missY.length ? ' <span class="chip warn sm">含未录入年份</span>' : '') + '</div></div>' +
-      (missY.length ? '<div class="hint" style="margin-top:8px;padding:8px 10px;background:var(--warn-soft);border-radius:8px;line-height:1.7">⚠ 排程涉及 <b>' + missY.join('、') + ' 年</b>，暂无该年节假日数据，已按「周一~周五工作日 + 周末休息」估算。补录假期后结束日期会自动重算。</div>' : '') +
-      '<div class="kv"><div class="k">治疗日</div><div class="v">' + (p.treatDays || []).map(function (d) { return WEEKDAYS[d]; }).join('、') + '</div></div>' +
-      '<div class="kv"><div class="k">放疗验证</div><div class="v">' + verifySummaryHtml(p) + '</div></div>' +
-      '<div class="kv"><div class="k">已中断</div><div class="v">' + ((p.pauses || []).length ? (p.pauses || []).map(function (x) { return mdLabel(x.from) + '~' + mdLabel(x.to) + (x.reason ? '(' + esc(x.reason) + ')' : ''); }).join('；') : '无') + '</div></div>' +
-      '<div class="hint" style="margin-top:6px">按日期自动推算：计划日期已过的即计入已完成，无需逐次标记。异常（当天未做）用「本次未做」修正。</div>' +
-      '<div class="btnrow"><button class="btn sm" data-act="add-pause">＋ 中断/调整</button>' +
-      '<button class="btn sm" data-act="add-extra">＋ 加照</button>' +
-      '<button class="btn sm" data-act="add-boost">' + (boost ? '改加量（现有 ' + boost + ' 次）' : '＋ 加量') + '</button>' +
-      (p.stopDate
-        ? '<button class="btn sm" data-act="cancel-stop">取消终止（恢复原计划）</button>'
-        : '<button class="btn sm danger" data-act="add-stop">提前终止</button>') +
-      (p.pauses && p.pauses.length ? '<button class="btn sm" data-act="list-pauses">查看中断（' + p.pauses.length + '）</button>' : '') +
-      (p.extras && p.extras.length ? '<button class="btn sm" data-act="list-extras">查看加照（' + p.extras.length + '）</button>' : '') +
-      '</div></div>';
-
-    /* 个人日历 */
-    var y = view.calY, m = view.calM;
-    var byDate = {};
-    sched.forEach(function (x) { byDate[x.date] = x; });
-    var cells = {};
-    var firstDay = sched.length ? sched[0].date : '';
-    var lastDay = sched.length ? sched[sched.length - 1].date : '';
-    Object.keys(byDate).forEach(function (ds) {
-      var x = byDate[ds];
-      var cls = x.extra ? 'extra' : (x.boost ? 'boost' : (x.done ? 'done' : ''));
-      var mark = (ds === firstDay ? '<span class="statrow"><span class="b-start">始</span></span>' : '') +
-        (ds === lastDay && lastDay !== firstDay ? '<span class="statrow"><span class="b-end">终</span></span>' : '');
-      cells[ds] = '<div class="tagline ' + cls + '">第' + x.fraction + '次' + (x.done ? '✓' : '') + (x.boost ? '＋' : '') + '</div>' + mark;
-    });
-    /* 中断区间：按天标记（中断日本就不排治疗，故不能要求 byDate[ds] 存在 —— BUG-12） */
-    (p.pauses || []).forEach(function (pa) {
-      var a = parseD(pa.from), b = parseD(pa.to);
-      if (!a || !b || b < a) return;
-      var monthPre = y + '-' + pad2(m);
-      /* 裁剪到本月，避免长区间做无谓循环 */
-      var start = dstr(a).slice(0, 7) < monthPre ? new Date(y, m - 1, 1) : new Date(a);
-      var lastDay = new Date(y, m, 0);
-      var end = dstr(b).slice(0, 7) > monthPre ? lastDay : new Date(b);
-      for (var d = new Date(start); d <= end; d.setDate(d.getDate() + 1)) {
-        var ds = dstr(d);
-        if (ds.slice(0, 7) !== monthPre) continue;
-        /* 已排治疗日不覆盖（正常不会出现），其余标为「停」 */
-        cells[ds] = '<div class="tagline pause">停</div>';
-      }
-    });
-    var monthPre2 = y + '-' + pad2(m) + '-';
-    var mTreat = 0, mStart = 0, mEnd = 0;
-    Object.keys(cells).forEach(function (ds) {
-      if (ds.slice(0, 7) !== monthPre2.slice(0, 7)) return;
-      if (byDate[ds]) mTreat++;
-      if (ds === firstDay) mStart = 1;
-      if (ds === lastDay && lastDay !== firstDay) mEnd = 1;
-    });
-    h += '<div class="cal-wrap">' + calHeader(y, m) + calDowRow() + calBody(y, m, cells) +
-      (mStart ? '<div class="hint s-start" style="margin-top:6px;padding:6px 9px;border-radius:8px;background:#e3f0fd;color:#1d5fa8">▶ 本月 <b>' + mdLabel(firstDay) + '</b> 开始放疗（' + WEEKDAYS[parseD(firstDay).getDay()] + '）</div>' : '') +
-      (mEnd ? '<div class="hint s-end" style="margin-top:6px;padding:6px 9px;border-radius:8px;background:#fde8e4;color:#b3261e">■ 本月 <b>' + mdLabel(lastDay) + '</b> 放疗结束（' + WEEKDAYS[parseD(lastDay).getDay()] + '）</div>' : '') +
-      '<div class="cal-legend"><span><i style="background:#e5f3f1"></i>待治疗</span><span><i style="background:#e5f3f1;opacity:.6"></i>已完成</span>' +
-      '<span><i style="background:#fdf0e0"></i>加照</span><span><i style="background:#EEEDFE"></i>加量</span><span><i style="background:#eef1f5"></i>中断</span>' +
-      '<span><i style="background:#e3f0fd"></i>始＝开始放疗</span><span><i style="background:#fde8e4"></i>终＝放疗结束</span></div>' +
-      '<div class="hint" style="margin-top:6px">点日历上的治疗日可登记「本次未做」或加照</div></div>';
-  }
 
   /* 副反应 */
   h += '<div class="card"><div class="section-title">副反应追踪 ' +
