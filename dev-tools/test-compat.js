@@ -160,8 +160,9 @@ group('契约 4 · 未知的未来字段必须原样保留');
   ok(p.futureCourses && p.futureCourses[0].cycles[0].doses[0].drug === '未来药',
     '★ courses 里的未知字段原样保留');
 
-  /* 已知字段的完整性：v0.9 的全部业务字段都要在 */
-  const must = ['id', 'mrn', 'name', 'sex', 'age', 'physician', 'diagnosis', 'purpose', 'technique',
+  /* 已知字段的完整性：v0.9 的全部业务字段都要在（新增字段须同步加进来，
+     否则 normalize 里漏声明一个字段，这道门禁不会报错） */
+  const must = ['id', 'mrn', 'name', 'sex', 'age', 'physician', 'ward', 'bedNo', 'diagnosis', 'purpose', 'technique',
     'simDate', 'position', 'planStatus', 'totalDose', 'fractions', 'dosePerFraction', 'startDate',
     'treatDays', 'pauses', 'extras', 'boostFractions', 'boostNote', 'stopDate', 'doneDates',
     'reactions', 'followupPlans', 'status', 'completedAt', 'notes', 'courses'];
