@@ -175,7 +175,7 @@ button,input,select,textarea{font:inherit;color:inherit}
 .cal-cell.clickable{cursor:pointer}
 .cal-cell.clickable:active{background:#e9eef4}
 .cal-legend{display:flex;gap:10px;flex-wrap:wrap;font-size:11px;color:var(--sub);margin-top:9px;padding:0 2px}
-.cal-legend i{display:inline-block;width:9px;height:9px;border-radius:3px;margin-right:4px;vertical-align:middle}
+.cal-legend i,.cal-legend i.bg{display:inline-block;width:9px;height:9px;border-radius:3px;margin-right:4px;vertical-align:middle}
 .cal-wrap .month-stat{display:flex;gap:12px;flex-wrap:wrap;font-size:11px;color:var(--sub);margin-top:9px;padding:7px 9px;background:#f7f9fb;border-radius:8px}
 .cal-wrap .month-stat .ms-i{display:inline-flex;align-items:center}
 .cal-wrap .month-stat i{display:inline-block;width:9px;height:9px;border-radius:3px;margin-right:4px}
@@ -340,7 +340,7 @@ button,input,select,textarea{font:inherit;color:inherit}
 var LS_KEY = 'radiotherapy.v1';
 var SNAP_PREFIX = 'radiotherapy.snap.';
 var SNAP_KEEP = 7;
-var APP_VERSION = '0.16.0';
+var APP_VERSION = '0.16.1';
 
 var SEXES = ['男', '女'];
 var PURPOSES = ['根治性', '术后辅助', '术前新辅助', '姑息性'];
@@ -1457,9 +1457,15 @@ function verifyDueToday(p, date) {
 
 /* ================= 日历：当日人数统计 =================
    在日历上标注每天的三类人数，点击可看名单：
-     treating 治疗中 —— 当天排了治疗的患者（与总日历原有「N 人」同一口径）
+     treating 治疗中 —— 当天排了治疗的患者（扫描范围见 calStatScope）
      starting 开始放疗 —— 排程第一天落在当天
      ending   今日结束 —— 排程最后一天落在当天
+
+   ★ 「治疗中」的口径（v0.16.0 明确）：本函数只回答「这天排了几个人」，
+     不看状态 —— 因为 ending 必须能被看到（见下）。所以 treating 里
+     可能混入已归档（治疗完成/失访）的患者。若某处要的是**仍在治**的人数
+     （例如日详情弹层的概览条「N 治疗中」），必须自己再 filter 状态，
+     不能直接取 st.treating.length。
 
    关键：ending 必须能被看到。患者疗程结束当天往往已归档为「治疗完成」，
    就不在 inTreat() 里了 —— 若只扫在治患者，「今日结束」永远是 0，功能形同虚设。
@@ -2521,8 +2527,16 @@ function wardCardHtml(p) {
 function renderOverallCal() {
   var y = view.calY, m = view.calM;
   var list = inTreat();
+  /* ★ v0.16.0：byDate 的取数范围必须与 dayStat 一致，都走 calStatScope()。
+     原先这里用 inTreat()（仅「在治」），于是刚归档（治疗完成/失访）的患者
+     在统计里还留着 —— 格子里「治疗 1」、月汇总「本月 N」都还有他，
+     点进去的日详情也能看到 —— 但「未来 14 天日程」按 inTreat() 已经把他
+     剔掉。同一个页面上同一件事出现三种名单，是典型的「同值不同命」。
+     统一成 calStatScope() 后，「已归档但排程末日仍在 90 天回看窗口内」
+     的患者在统计/日历/详情里口径一致。 */
+  var scope = calStatScope();
   var byDate = {};
-  list.forEach(function (p) {
+  scope.forEach(function (p) {
     computeSchedule(p).forEach(function (it) {
       (byDate[it.date] = byDate[it.date] || []).push({ p: p, it: it });
     });
@@ -2569,22 +2583,30 @@ function renderOverallCal() {
         '<span class="ms-i"><i class="b-end"></i>本月结束 ' + monthStat.ending + ' 人</span>' +
         '<span class="ms-i"><i class="b-treat"></i>本月治疗 ' + monthStat.treating + ' 人次</span></div>'
       : '') +
+    /* ★ v0.16.0：图例首项原为「有治疗安排」（含糊），改为「应治疗」——
+       与格内 calStatBadges 的「治疗 N」同指：当天应做治疗的人数（含已完成）。
+       与紧随其后的「已完成」并列，正好构成用户要求保留的那两项统计口径。
+       ★ 加 .bg 修饰类是为了让测试能精确匹配色块，而不误伤格内文案。 */
     '<div class="cal-legend">' +
-    '<span><i style="background:#e5f3f1"></i>有治疗安排</span>' +
-    '<span><i style="background:#fdecea"></i>法定节假日</span>' +
-    '<span><i style="background:#fdf0e0"></i>调休上班</span>' +
-    '<span><i style="background:#fff;border:1px solid #0f766e"></i>今天</span>' +
-    '<span><i style="background:#e3f0fd"></i>始＝开始放疗</span>' +
-    '<span><i style="background:#fde8e4"></i>终＝放疗结束</span></div>' +
+    '<span><i class="bg" style="background:#e5f3f1"></i>应治疗</span>' +
+    '<span><i class="bg" style="background:#e5f3f1;opacity:.6"></i>已完成</span>' +
+    '<span><i class="bg" style="background:#fdecea"></i>法定节假日</span>' +
+    '<span><i class="bg" style="background:#fdf0e0"></i>调休上班</span>' +
+    '<span><i class="bg" style="background:#fff;border:1px solid #0f766e"></i>今天</span>' +
+    '<span><i class="bg" style="background:#e3f0fd"></i>始＝开始放疗</span>' +
+    '<span><i class="bg" style="background:#fde8e4"></i>终＝放疗结束</span></div>' +
     '<div class="hint" style="margin-top:6px">点日期看当天名单与「开始 / 结束」详情</div>' +
     '</div>';
   if (!list.length) h += '<div class="empty"><span class="big">📅</span>暂无在治患者</div>';
 
-  /* 近期日程速览 */
+  /* ★ v0.16.0：近期日程速览只服务**在治**患者（upcoming 原为 byDate 的切片，
+     v0.16.0 把 byDate 扩到 calStatScope() 后，必须在此按在治过滤，否则刚归档
+     的患者会同时出现在「未来 14 天日程」里 —— 一个还在排治疗、实为历史数据的
+     人混在待做名单里，是会误导交班的。 */
   var upcoming = [];
   Object.keys(byDate).sort().forEach(function (ds) {
     if (ds >= todayStr() && daysBetween(todayStr(), ds) <= 14) {
-      byDate[ds].forEach(function (a) { upcoming.push({ date: ds, p: a.p, it: a.it }); });
+      byDate[ds].forEach(function (a) { if (isActive(a.p)) upcoming.push({ date: ds, p: a.p, it: a.it }); });
     }
   });
   if (upcoming.length) {
@@ -2597,7 +2619,14 @@ function renderOverallCal() {
         g[ds].map(function (u) {
           return '<div class="cal-day-list"><div class="row"><span class="nm"><b>' + esc(u.p.name) + '</b>' +
             '<span class="sub2"> 第 ' + u.it.fraction + ' 次' + (u.it.extra ? ' · 加照' : '') + '</span></span>' +
-            (u.it.done ? '<span class="chip ok sm">已完成</span>' : '<span class="chip sm">待治疗</span>') + '</div></div>';
+            /* ★ v0.16.0：归档（治疗完成 / 失访）患者本次已不可能再做，
+               标「待治疗」是错报 —— 他早就不在治疗流程里了。
+               ★ 不要臆造「暂停」这个状态：PATIENT_STATUSES 只有
+               ['在治','治疗完成','失访'] 三值，中断由 pauses 区间表达。 */
+            (u.it.done ? '<span class="chip ok sm">已完成</span>'
+              : (u.p.status === '在治'
+                ? '<span class="chip sm">待治疗</span>'
+                : '<span class="chip sm">' + esc(u.p.status) + '</span>')) + '</div></div>';
         }).join('') + '</div>';
     });
   }
@@ -2715,7 +2744,7 @@ function patientProgressCards(p, tot, dn, accDose, end, sched, missY) {
   h += '<div class="cal-wrap">' + calHeader(y, m) + calDowRow() + calBody(y, m, cells) +
     (mStart ? '<div class="hint s-start" style="margin-top:6px;padding:6px 9px;border-radius:8px;background:#e3f0fd;color:#1d5fa8">▶ 本月 <b>' + mdLabel(firstDay) + '</b> 开始放疗（' + WEEKDAYS[parseD(firstDay).getDay()] + '）</div>' : '') +
     (mEnd ? '<div class="hint s-end" style="margin-top:6px;padding:6px 9px;border-radius:8px;background:#fde8e4;color:#b3261e">■ 本月 <b>' + mdLabel(lastDay) + '</b> 放疗结束（' + WEEKDAYS[parseD(lastDay).getDay()] + '）</div>' : '') +
-    '<div class="cal-legend"><span><i style="background:#e5f3f1"></i>待治疗</span><span><i style="background:#e5f3f1;opacity:.6"></i>已完成</span>' +
+    '<div class="cal-legend"><span><i style="background:#e5f3f1"></i>应治疗</span><span><i style="background:#e5f3f1;opacity:.6"></i>已完成</span>' +
     '<span><i style="background:#fdf0e0"></i>加照</span><span><i style="background:#EEEDFE"></i>加量</span><span><i style="background:#eef1f5"></i>中断</span>' +
     '<span><i style="background:#e3f0fd"></i>始＝开始放疗</span><span><i style="background:#fde8e4"></i>终＝放疗结束</span></div>' +
     '<div class="hint" style="margin-top:6px">点日历上的治疗日可登记「本次未做」或加照</div></div>';
@@ -4356,7 +4385,11 @@ function delNote(pid, nid) {
 function sheetDayOverall(date) {
   if (!date) return;
   var arr = [];
-  inTreat().forEach(function (p) {
+  /* ★ v0.16.0：与 renderOverallCal 的 byDate、dayStat 保持同一取数范围。
+     原先用 inTreat()，导致「点日期看到的名单」漏掉刚归档（治疗完成/失访）
+     但末日仍在 90 天窗口内的患者 —— 而日历格子上明明画着「治疗 1 / 终 1」，
+     点进去却是空的。这正是「同值不同命」的又一次翻版。 */
+  calStatScope().forEach(function (p) {
     var it = scheduleOn(p, date);
     if (it) arr.push({ p: p, it: it });
   });
@@ -4375,7 +4408,7 @@ function sheetDayOverall(date) {
   /* 概览条：始终显示三类计数，让「0」也可见（用户明确要求标注在日期上） */
   var ov = '<div class="day-ov">' +
     '<span class="ov-i ov-start"><b>' + st.starting.length + '</b> 开始放疗</span>' +
-    '<span class="ov-i ov-treat"><b>' + st.treating.length + '</b> 治疗中</span>' +
+    '<span class="ov-i ov-treat"><b>' + st.treating.filter(function (a) { return a.p.status === '在治'; }).length + '</b> 治疗中</span>' +
     '<span class="ov-i ov-end"><b>' + st.ending.length + '</b> 今日结束</span>' +
     '</div>';
 
@@ -4402,7 +4435,11 @@ function sheetDayOverall(date) {
       (arr.length ? '<div class="day-sec-t t-all">全部治疗安排（' + arr.length + ' 人）</div>' + arr.map(function (a) {
         return '<div class="event"><div class="head"><span class="chip pri">第 ' + a.it.fraction + ' 次</span>' +
           (a.it.extra ? '<span class="chip warn sm">加照</span>' : '') +
-          (a.it.done ? '<span class="chip ok sm">已完成</span>' : '<span class="chip sm">待治疗</span>') + '</div>' +
+          /* ★ v0.16.0：归档（治疗完成 / 失访）患者本次已不可能再做，
+             标「待治疗」是错报。状态取值只有这三值，不臆造「暂停」。 */
+          (a.it.done ? '<span class="chip ok sm">已完成</span>'
+            : (a.p.status === '在治' ? '<span class="chip sm">待治疗</span>'
+              : '<span class="chip sm">' + esc(a.p.status) + '</span>')) + '</div>' +
           '<div class="content">' + esc(a.p.name) + ' <span class="hint">' + esc(a.p.diagnosis || '') + '</span></div>' +
           '<div class="acts">' +
           (a.it.done || isToday
@@ -4420,7 +4457,8 @@ function sheetDayPatient(p, date) {
   var isPause = !!pa;
   var body = '<div style="margin-bottom:8px">';
   if (it) body += '<span class="chip pri">第 ' + it.fraction + ' 次</span>' + (it.extra ? '<span class="chip warn sm">加照</span>' : '') +
-    (it.done ? '<span class="chip ok sm">已完成</span>' : '<span class="chip sm">待治疗</span>');
+    (it.done ? '<span class="chip ok sm">已完成</span>'
+      : (p.status === '在治' ? '<span class="chip sm">待治疗</span>' : '<span class="chip sm">' + esc(p.status) + '</span>'));
   else if (isPause) body += '<span class="chip warn">中断中</span>';
   else body += '<span class="chip sm">非治疗日</span>';
   body += '</div>';
@@ -6368,4 +6406,4 @@ init();
 </script>
 </body>
 </html>
-<!-- release: v0.16.0 病区/床号 + 在治页搜索排序 -->
+<!-- release: v0.16.1 日历每日统计口径（应治疗/已完成）+ 状态误报修正 -->

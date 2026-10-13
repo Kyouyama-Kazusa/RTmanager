@@ -120,6 +120,43 @@ function mkMany(list) {
 }
 function inTreatCount() { return inTreat().length; }
 
+/* 整页 HTML 切片：把「日历网格」「日历图例」从整页里切出来。
+   动机见 J 组注释 —— 整页别处也有合法出现的「待治疗」，断言必须收窄范围，
+   否则会把「月汇总卡片/日详情弹层」的合法状态徽章误判为回归。 */
+function calGridHtml(h) {
+  const a = h.indexOf('<div class="cal-grid">');
+  if (a < 0) return '';
+  const b = h.indexOf('</div>', h.indexOf('<div class="month-stat"', a) >= 0
+    ? h.indexOf('<div class="month-stat"', a)
+    : a);
+  /* 网格结束 = 下一个 month-stat / cal-legend / cal-wrap 结束标记，取最早的 */
+  const stops = [
+    h.indexOf('<div class="month-stat"', a),
+    h.indexOf('<div class="cal-legend"', a),
+    h.indexOf('<div class="cal-wrap"', a + 1)
+  ].filter(function (x) { return x > a; });
+  return h.slice(a, stops.length ? Math.min.apply(null, stops) : (b > a ? b : h.length));
+}
+function calLegendHtml(h) {
+  const a = h.indexOf('<div class="cal-legend">');
+  if (a < 0) return '';
+  const b = h.indexOf('</div>', a);
+  return b > a ? h.slice(a, b) : h.slice(a);
+}
+/* 从日历网格片段里取出某一天的格子完整 HTML。
+   ★ 不能用 `[\s\S]*?` + `</div></div>` 的懒惰匹配：格子内部
+   `<div class="statrow">…</div></div>` 的收尾恰好也是 `</div></div>`，
+   懒惰匹配会在那里停下，截出来的片段缺掉后半段（「已完成 N」全丢）。
+   正确边界是「下一个 .cal-cell 的开始」或网格结尾。 */
+function sliceCalendarCell(gridHtml, ds) {
+  const key = 'data-date="' + ds + '">';
+  const a = gridHtml.indexOf(key);
+  if (a < 0) return '';
+  const start = gridHtml.lastIndexOf('<div class="cal-cell', a);
+  const next = gridHtml.indexOf('<div class="cal-cell', a + key.length);
+  return gridHtml.slice(start < 0 ? a : start, next < 0 ? gridHtml.length : next);
+}
+
 (async function () {
   console.log('========== 日历人数统计 / 待办收窄 / 放疗验证 ==========');
 
@@ -415,6 +452,230 @@ function inTreatCount() { return inTreat().length; }
   }
 
   /* ================================================================ */
+  group('J2. ★ 统计取数范围一致性 + 状态徽章不得错报（v0.16.0）');
+  {
+    const y = view.calY, m = view.calM;
+    /* 场景：一位在治患者，疗程末日落在此前某天（已在 90 天回看窗口内），
+       把它归档为「治疗完成」—— 这是病房里最常见的动作（做完就标完成）。
+       要求：归档之后，日历格 / 月汇总 / 未来 14 天日程 三处名单必须一致。 */
+    state = normalize({ version: 2, updatedAt: '', patients: [] });
+    const endDate = addDays(today, -3);
+    const startDate = addDays(endDate, -30);
+    const pArc = mk({ name: '归档甲', startDate: startDate, fractions: '20' });
+    const schedArc = computeSchedule(pArc);
+    const realEnd = schedArc[schedArc.length - 1].date;
+
+    /* 归档前：在治，应被纳入统计 */
+    ok(inTreatCount() === 1, '① 归档前该患者在治名单里', inTreatCount());
+    ok(calStatScope().some(function (q) { return q.id === pArc.id; }), '① 在治患者必入统计范围');
+
+    /* 归档后：状态改成「治疗完成」 */
+    pArc.status = '治疗完成';
+    ok(inTreatCount() === 0, '② 归档后不在在治名单里', inTreatCount());
+    ok(calStatScope().some(function (q) { return q.id === pArc.id; }),
+      '★★ 排程末日仍在 90 天窗口内的归档患者，仍应纳入统计范围（否则前后口径断裂）',
+      '末次=' + realEnd);
+    const stEnd = dayStat(realEnd);
+    ok(stEnd.treating.length === 1 && stEnd.ending.length === 1,
+      '★★ dayStat 仍认得该归档患者的末日（治疗 1 + 终 1）',
+      { 治疗: stEnd.treating.length, 终: stEnd.ending.length });
+
+    /* ★ 核心断言：渲染出来的日历，网格统计与 byDate 派生量口径一致 */
+    view.tab = 'cal'; view.page = 'tab';
+    view.calY = +realEnd.slice(0, 4); view.calM = +realEnd.slice(5, 7);
+    render();
+    const hArc = getEl('view').innerHTML;
+    const gridArc = calGridHtml(hArc);
+    /* 该日格子应带「治疗 1」与「已完成 1」（末日已过 → done 为真）
+       ★ 取格子不能用懒惰匹配 `/\/div\/div>/` —— 格子内容里第一个 `</div></div>`
+       是 .statrow 的收尾，不是格子的收尾，会把断言内容截断成空串（本人踩过两次）。
+       正确做法：从 `data-date="<ds>"` 起截到**下一个** `.cal-cell` 之前。 */
+    const cellArc = sliceCalendarCell(gridArc, realEnd);
+    ok(cellArc.length > 0, '★ 取到该日格子（切片锚点存在）', cellArc.length);
+    ok(cellArc.indexOf('治疗 1') >= 0, '★★ 归档患者末日格子仍有「治疗 1」（byDate 未漏）', cellArc.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim());
+    ok(cellArc.indexOf('已完成 1') >= 0, '★ 归档患者末日格子显示「已完成 1」');
+
+    /* ★ 未来 14 天日程用的是 inTreat()，归档患者不在其中 —— 但日历格用的是
+       calStatScope()。断言两者**不会**对同一位归档患者给出矛盾结论：
+       该患者末日（过去）不应出现在未来 14 天窗口里，所以不构成矛盾。 */
+    const upSec = hArc.indexOf('未来 14 天日程');
+    /* 「未来 14 天日程」是 inTreat() 建的 upcoming，只含在治患者；
+       这里患者已归档且末日是**过去**，所以连区块都不该出现。 */
+    ok(upSec < 0 || hArc.slice(upSec).indexOf('归档甲') < 0,
+      '★★ 归档患者不出现在「未来 14 天日程」（该区只服务在治患者）',
+      'upSec=' + upSec);
+
+    /* ③ 状态徽章不得把归档患者标成「待治疗」 */
+    /* 直接渲染未来 14 天日程所需的场景：把患者改成「未完成」的未来日次 */
+    state = normalize({ version: 2, updatedAt: '', patients: [] });
+    const pFut = mk({ name: '在治乙', startDate: addDays(today, 0), fractions: '20' });
+    pFut.status = '在治';
+    view.calY = +today.slice(0, 4); view.calM = +today.slice(5, 7);
+    render();
+    const hLive = getEl('view').innerHTML;
+    const upLive = hLive.slice(hLive.indexOf('未来 14 天日程'));
+    ok(upLive.indexOf('待治疗') >= 0, '★ 在治患者的未来日次标「待治疗」（合法用法保留）', true);
+
+    /* ★★ 这段必须**读真实渲染结果**。
+       曾经写成 `const badge = (pArch.status === '在治' ? '待治疗' : pArch.status);`
+       再断言 badge !== '待治疗' —— 那是把产品逻辑在测试里复述一遍，等于自我印证：
+       我把产品改回「无条件待治疗」做故障注入，套件竟然全绿。断言必须打 HTML。 */
+    state = normalize({ version: 2, updatedAt: '', patients: [] });
+    const pArch = mk({ name: '归档丙', startDate: today, fractions: '20' });
+    pArch.status = '治疗完成';
+    view.tab = 'cal'; view.page = 'tab';
+    view.calY = +today.slice(0, 4); view.calM = +today.slice(5, 7);
+    render();
+    const hArch = getEl('view').innerHTML;
+    const upArch = hArch.indexOf('未来 14 天日程') >= 0
+      ? hArch.slice(hArch.indexOf('未来 14 天日程')) : '';
+    /* 归档患者根本不该进这个区块 */
+    ok(upArch.indexOf('归档丙') < 0,
+      '★★ 归档患者不进「未来 14 天日程」（渲染层实测，不靠复述逻辑）',
+      upArch.slice(0, 160).replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim());
+
+    /* ★★ 徽章分支的真正靶子：归档患者**仍有未来未完成日次**。
+       前一段的「归档丙」从今天开始排 20 次，但未来日次在窗口内 —— 然而
+       归档后就不该进 upcoming，所以看不到徽章。要验证徽章分支，必须绕过
+       upcoming 的在治过滤，直接渲染「归档 + 未来未完成」的那条行 HTML。
+       做法：临时把「在治」判定放宽来构造场景是不行的（会污染被测逻辑），
+       改为直接调用渲染路径不可行 —— 故采用**可观察的等价验证**：
+       造一位「在治」患者（保证进 upcoming），再把它改成归档，
+       断言同一页面里该患者从 upcoming 消失（覆盖 upcoming 过滤），
+       并单独断言 esc(a.p.status) 分支在源码中存在（覆盖徽章分支）。 */
+    state = normalize({ version: 2, updatedAt: '', patients: [] });
+    const pLive = mk({ name: '在治丁', startDate: today, fractions: '20' });
+    pLive.status = '在治';
+    view.calY = +today.slice(0, 4); view.calM = +today.slice(5, 7);
+    render();
+    const hLive2 = getEl('view').innerHTML;
+    const upLive2 = hLive2.indexOf('未来 14 天日程') >= 0
+      ? hLive2.slice(hLive2.indexOf('未来 14 天日程')) : '';
+    ok(upLive2.indexOf('待治疗') >= 0, '★ 在治患者的未来未完成日次仍标「待治疗」');
+    ok(upLive2.indexOf('在治丁') >= 0, '★ 在治患者出现在「未来 14 天日程」');
+
+    /* 把同一位患者改成「失访」—— 它仍有未来未完成日次，但已归档。
+       upcoming 必须把它剔掉（这是用户可见的正确行为）。 */
+    pLive.status = '失访';
+    render();
+    const hLost = getEl('view').innerHTML;
+    const upLost = hLost.indexOf('未来 14 天日程') >= 0
+      ? hLost.slice(hLost.indexOf('未来 14 天日程')) : '';
+    ok(upLost.indexOf('在治丁') < 0,
+      '★★ 失访后的患者从「未来 14 天日程」消失（渲染层实测）',
+      upLost.slice(0, 140).replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim());
+
+    /* ★★ 状态徽章分支必须**真的被驱动到**，而且断言要有牙齿。
+       踩过的两个坑（都是本套件真实发生过的）：
+         ① 把逻辑在测试里复述一遍（`x==='在治'?…:x` 再断言 —— 自我印证）；
+         ② 调用签名搞错：sheetDayOverall 收的是**日期字符串**，我传了患者对象，
+            参数变成 '[object Object]'，parseD 返回 null 直接抛异常；而异常被
+            包在 `if (未完成)` 的 else 分支里，测试反而报「跳过」→ 全绿假象。
+       因此这里：用真实日期字符串驱动，并显式断言弹层 body 非空。 */
+    state = normalize({ version: 2, updatedAt: '', patients: [] });
+    /* ★ 「未完成」只能出现在**未来**日次：computeSchedule 的 done 是
+       `ds <= today` 推导出来的，过去日期必然 done=true（见 1695 行）。
+       靶场景 = 未来某次治疗，done=false，徽章走「待治疗 / 状态」分支。
+
+       ★★ 但不能简单取「明天」：明天可能是周末或法定节假日，那样根本排不出
+       治疗日 —— 跨日期扫描会立刻抓到这个脆弱性（本套件已被抓到过）。
+       改成「从 today 起向后找第一个真正排上治疗的日子」。 */
+    const scout = mk({ name: '__scout__', startDate: today, fractions: '30' });
+    scout.status = '在治';
+    const futDate = (computeSchedule(scout).find(function (x) { return x.date > today; }) || {}).date;
+    ok(typeof futDate === 'string' && futDate > today,
+      '★ 在 today 之后找到第一个真实治疗日（跨日期安全）', futDate);
+    state = normalize({ version: 2, updatedAt: '', patients: [] });
+    const pSheet = mk({ name: '弹层戊', startDate: today, fractions: '30' });
+    pSheet.status = '在治';
+    const itPast = computeSchedule(pSheet).find(function (x) { return x.date === futDate; });
+    ok(!!itPast && itPast.done === false,
+      '★ 造出「未来、未完成」的一次安排',
+      (itPast && itPast.date) + ' done=' + (itPast && itPast.done));
+    const pastDate = futDate;
+    if (itPast) {
+      /* 先看「在治 + 过去未完成」→ 必须出现「待治疗」 */
+      sheetDayOverall(pastDate);
+      const bodyLive = getEl('sheetBody').innerHTML;
+      ok(bodyLive.length > 0, '★★ 弹层被真正驱动（body 非空）', bodyLive.length);
+      ok(bodyLive.indexOf('待治疗') >= 0,
+        '★ 弹层：在治患者的未完成日次标「待治疗」',
+        bodyLive.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 200));
+
+      /* 同一天、同一次，把患者改成「失访」→ 不得再标「待治疗」 */
+      pSheet.status = '失访';
+      sheetDayOverall(pastDate);
+      const bodyLost = getEl('sheetBody').innerHTML;
+      ok(bodyLost.length > 0, '★★ 归档场景下弹层也被真正驱动（body 非空）', bodyLost.length);
+      ok(bodyLost.indexOf('待治疗') < 0,
+        '★★ 弹层：失访患者的未完成日次不得标「待治疗」（错报）',
+        bodyLost.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 200));
+      ok(bodyLost.indexOf('失访') >= 0,
+        '★★ 弹层：归档后该患者显示真实状态「失访」',
+        bodyLost.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 200));
+
+      /* ★ 范围一致性：归档后（末日仍在 90 天窗口内）该日名单不得为空 */
+      pSheet.status = '治疗完成';
+      sheetDayOverall(pastDate);
+      const bodyArc = getEl('sheetBody').innerHTML;
+      ok(bodyArc.indexOf('弹层戊') >= 0,
+        '★★ 归档（治疗完成）患者仍在日详情名单里（与日历格子口径一致）',
+        bodyArc.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 200));
+      ok(bodyArc.indexOf('治疗完成') >= 0,
+        '★ 归档患者显示真实状态「治疗完成」',
+        bodyArc.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 200));
+
+      /* ★★ 靶向「sheetDayOverall 的范围」这一条：
+         造一位**在治**患者，取它某个未来治疗日 D。
+         · 在治时：D 能在弹层里看到该患者；
+         · 把它改成「治疗完成」，并把 startDate 挪到 200 天前
+           （使末日落在 90 天回看窗口之外）——此时 inTreat() 空、
+           calStatScope() 也不再纳入，两种实现都看不到 → 无法区分。
+         所以真正的区分场景是：**在治 → 归档** 且末日**仍在窗口内**。
+         pSheet 满足这一点（futDate 是明天），所以上面的断言已覆盖；
+         这里再补一条「同一患者、同一日期，改状态前后弹层名单的差集」显式断言。 */
+      state = normalize({ version: 2, updatedAt: '', patients: [] });
+      const pKeep = mk({ name: '范围庚', startDate: today, fractions: '30' });
+      pKeep.status = '在治';
+      sheetDayOverall(futDate);
+      /* ★ 取患者名不能用 `/<b>([^<]+)<\/b>/g` —— 概览条的计数也是 <b>0</b>，
+         会把数字一起捞进来。日详情弹层里患者名在
+         `<div class="content">姓名 <span class="hint">…</span></div>`。 */
+      const nameRe = /<div class="content">([^<\s]+)/g;
+      const namesIn = function (html) {
+        const out = []; let m;
+        while ((m = nameRe.exec(html)) !== null) out.push(m[1]);
+        nameRe.lastIndex = 0; return out.join('|');
+      };
+      const beforeNames = namesIn(getEl('sheetBody').innerHTML);
+      ok(beforeNames.indexOf('范围庚') >= 0, '★★ 弹层（在治）名单含该患者', beforeNames);
+      pKeep.status = '治疗完成';
+      sheetDayOverall(futDate);
+      const afterNames = namesIn(getEl('sheetBody').innerHTML);
+      ok(afterNames.indexOf('范围庚') >= 0,
+        '★★ 弹层（归档、末日仍在 90 天窗口内）名单**仍**含该患者 —— 与日历格子口径一致',
+        afterNames);
+      /* ★ 弹层里「名单」与「概览条」是两套口径，且**有意不同**：
+         名单（arr）走 calStatScope()，把归档但末日仍在窗口内的患者列出来，
+           目的是让日历格子上画着的「终 1」点得开、看得到人；
+         概览条（st = dayStat）的「治疗中」只算仍在治疗流程里的人，
+           归档即不计入 —— 这是「在治人数」的正确口径，不应为了对齐而改。
+         所以断言应是「名单含、概览不含」，而不是强行要求两者相等。 */
+      const sheetBodyArc = getEl('sheetBody').innerHTML;
+      ok(sheetBodyArc.indexOf('全部治疗安排') >= 0 && sheetBodyArc.indexOf('范围庚') >= 0,
+        '★★ 弹层「全部治疗安排」名单含归档患者（可点开查看）', true);
+      /* 概览条的 DOM 是 `<span class="ov-i ov-treat"><b>0</b> 治疗中</span>`，
+         直接被标签隔开，不能搜「治疗中 0」。按结构与数值两段判。 */
+      const ovTreat = (sheetBodyArc.match(/ov-treat"><b>(\d+)<\/b>\s*治疗中/) || [])[1];
+      ok(ovTreat === '0',
+        '★★ 弹层概览条「治疗中」为 0 —— 归档不计入在治人数（有意不同口径）',
+        'ov-treat=' + ovTreat);
+    } else {
+      ok(false, '★★ 场景构造失败：3 天前应有治疗安排', pastDate);
+    }
+  }
+
+  /* ================================================================ */
   group('J. 界面渲染（总日历 / 待办 / 详情页）');
   {
     const y = view.calY, m = view.calM;
@@ -427,6 +688,57 @@ function inTreatCount() { return inTreat().length; }
     ok(calHtml.indexOf('b-start') >= 0, '★ 出现「始」标注样式', true);
     ok(calHtml.indexOf('month-stat') >= 0, '★ 出现月度汇总', true);
     ok(calHtml.indexOf('始＝开始放疗') >= 0 && calHtml.indexOf('终＝放疗结束') >= 0, '图例含「始/终」说明', true);
+
+    /* ★ v0.16.0：日历格「每日统计」只保留两项 —— 应治疗人数 + 已完成人数。
+       原先「一次都没完成」的日子会写一条「待治疗」定性文字：占位却零信息
+       （「治疗 3」已说明当天有人要做），且与计数并列时口径不齐。
+
+       ★ 断言必须**限定在日历网格 + 图例**范围内。整页 HTML 里还有别的面也写
+         「待治疗」，且都合法：
+           · 月度汇总卡片「未来 14 天日程」的行末状态徽章；
+           · 点日期后的日详情弹层；
+           · sheetDayPatient 的「第 N 次」徽章。
+       这三处讲的都是**某一次治疗做没做**，是状态而非「当日人数统计」，
+       与用户要求删掉的那句定性文案不是一回事。所以用 calGridHtml()/
+       calLegendHtml() 两个切片函数先把范围收窄，再断言。 */
+    const gridHtml = calGridHtml(calHtml);
+    const legendHtml = calLegendHtml(calHtml);
+    ok(gridHtml.length > 0, '★ 取到日历网格片段（切片锚点存在）', gridHtml.length);
+    ok(legendHtml.length > 0, '★ 取到日历图例片段（切片锚点存在）', legendHtml.length);
+
+    /* ① 网格里不得再出现「待治疗」定性文字 */
+    ok(gridHtml.indexOf('待治疗') < 0, '★★ 日历格内已无「待治疗」文字');
+    /* ② 网格里必须出现「已完成 N」（当日有完成时） */
+    ok(/class="tagline done">已完成 \d+</.test(gridHtml), '★ 已有当日完成的格子显示「已完成 N」',
+      (gridHtml.match(/class="tagline done">已完成 \d+</) || [])[0]);
+    /* ③ 图例只留「应治疗」+「已完成」两项人数口径，不再有「待治疗」/「有治疗安排」 */
+    ok(legendHtml.indexOf('</i>应治疗</span>') >= 0, '★ 图例首项改为「应治疗」（与格内「治疗 N」同指）');
+    ok(legendHtml.indexOf('</i>待治疗</span>') < 0, '★★ 图例不再出现「待治疗」条目（避免与格内文案不一致）');
+    ok(legendHtml.indexOf('有治疗安排') < 0, '★ 图例不再出现含糊的「有治疗安排」文案');
+    /* ④ 图例的前两项恰好是「应治疗」「已完成」，顺序与格内「治疗 N → 已完成 N」一致 */
+    {
+      const seq = [];
+      const re = /<\/i>([^<]+)<\/span>/g;
+      let mm;
+      while ((mm = re.exec(legendHtml)) !== null) seq.push(mm[1]);
+      ok(seq[0] === '应治疗' && seq[1] === '已完成', '★★ 图例前两项为「应治疗 / 已完成」',
+        seq.slice(0, 2).join(' / ') + ' （共 ' + seq.length + ' 项）');
+    }
+
+    /* 两项统计的数值得对得上：同一天里「治疗 N」= dayStat.treating.length，
+       「已完成 M」= 该日排程中 done 为真的条数，且 M ≤ N */
+    {
+      const dsToday = today;
+      const stToday = dayStat(dsToday);
+      if (stToday.treating.length) {
+        const M = stToday.treating.filter(function (a) { return a.it.done; }).length;
+        ok(M <= stToday.treating.length, '★★ 当日「已完成」不得超过「应治疗」', { 已完成: M, 应治疗: stToday.treating.length });
+        ok(M > 0, '★ 今天（治疗日）应有已完成计数', M);
+      } else {
+        ok(true, '★ 今天非治疗日，跳过两项数值校验');
+        ok(true, '★ 今天非治疗日，跳过已完成计数校验');
+      }
+    }
 
     /* 待办渲染：未开始患者应出现，并带摘要条 */
     state = normalize({ version: 2, updatedAt: '', patients: [] });
