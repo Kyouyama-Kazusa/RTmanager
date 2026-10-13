@@ -76,7 +76,16 @@ button,input,select,textarea{font:inherit;color:inherit}
 .chip.ok{background:var(--ok-soft);color:var(--ok)}
 .chip.info{background:var(--info-soft);color:var(--info)}
 .chip.sm{font-size:11px;line-height:16px;padding:0 6px}
+/* v0.16.0：病区/床号徽标 —— 用 info 色系与性别/年龄等中性标签区分开 */
+.chip.bed{background:var(--info-soft);color:var(--info);font-weight:600}
 .count{display:inline-block;min-width:20px;height:20px;padding:0 6px;border-radius:10px;background:var(--danger);color:#fff;font-size:12px;line-height:20px;text-align:center;font-weight:600}
+
+/* v0.16.0：在治页搜索/排序条 */
+.wardbar{display:flex;gap:8px;align-items:center;margin:0 0 10px}
+.wardbar .wsearch{flex:1;min-width:0}
+.wardbar .wsearch input{width:100%;padding:8px 12px;border:1px solid var(--line);border-radius:10px;font-size:14px;background:var(--card);box-sizing:border-box}
+.wardbar .wsearch input:focus{outline:none;border-color:var(--pri)}
+.wardbar .btn.on{background:var(--pri);color:#fff;border-color:var(--pri)}
 
 .todocard{display:flex;gap:12px;align-items:flex-start;cursor:pointer}
 .todocard:active{background:#fafbfc}
@@ -331,7 +340,7 @@ button,input,select,textarea{font:inherit;color:inherit}
 var LS_KEY = 'radiotherapy.v1';
 var SNAP_PREFIX = 'radiotherapy.snap.';
 var SNAP_KEEP = 7;
-var APP_VERSION = '0.15.0';
+var APP_VERSION = '0.16.0';
 
 var SEXES = ['男', '女'];
 var PURPOSES = ['根治性', '术后辅助', '术前新辅助', '姑息性'];
@@ -585,6 +594,9 @@ function normalize(d) {
          与 AI 通道口径一致，避免「同值不同命」。
          normalize() 每次开机、每次导入、每次快照恢复都会走，是数据的唯一关口。 */
       physician: p.physician || '', diagnosis: p.diagnosis || '',
+      /* v0.16.0：所在病区 / 床号。纯字符串、可选，无枚举约束。
+         ★ 老数据没有这两个字段 → 补空串，不报错、不丢其它字段（向后兼容）。 */
+      ward: p.ward || '', bedNo: p.bedNo || '',
       purpose: matchEnum(p.purpose, PURPOSES, 'purpose'),
       technique: matchEnum(p.technique, TECHNIQUES, 'technique'),
       simDate: p.simDate || '', position: p.position || '', planStatus: matchEnum(p.planStatus, PLAN_STATUSES, 'planStatus'),
@@ -777,6 +789,27 @@ var AI_PROVIDERS = [
 
 var AI_FIELDS = ['name', 'mrn', 'sex', 'age', 'diagnosis', 'purpose', 'technique', 'physician', 'planStatus', 'totalDose', 'fractions', 'dosePerFraction', 'simDate', 'startDate', 'position'];
 
+/* ★ 附加的「非临床」标识字段（v0.16.0）：所在病区 / 床号。
+   ★ 为什么不塞进 AI_FIELDS：
+     ① AI_FIELDS 是「参与缺失提示」的字段表 —— 病区/床号是**可选定位信息**，
+        缺了不影响导入也不影响排程，塞进去会让每条识别结果都被标记「待补」（噪音）。
+     ② test-ai.js 对 AI_FIELDS.length 有**硬编码断言**，扩表要连带动多处。
+     ③ 它们是纯字符串、无需枚举映射与数值清洗，处理路径与 AI_FIELDS 不同。
+   ★ 但必须**同时**出现在三处搬运点（normalizeAiPatients / addAiBlankRow / commitAiDraft），
+     否则会出现「AI 识别到了但导入后丢了」—— 这正是 v0.15.0 修的那类 bug 的形态。
+     故下面提供 aiExtraOf() 统一取值，避免三个地方各写一遍。 */
+var AI_EXTRA_FIELDS = ['ward', 'bedNo'];
+var AI_EXTRA_LABEL = { ward: '所在病区', bedNo: '床号' };
+
+/* 从一条 AI 原始记录里取出「附加字段」的值，统一清洗成字符串。
+   ★ 单独抽成函数，是为了让 normalizeAiPatients / addAiBlankRow / commitAiDraft
+     三处**不会各写一遍**而漏掉某一处（漏一处就是「识别到了但导入后丢了」）。 */
+function aiExtraOf(r) {
+  var o = {};
+  AI_EXTRA_FIELDS.forEach(function (k) { o[k] = (r && r[k] != null) ? String(r[k]).trim() : ''; });
+  return o;
+}
+
 /* 字段中文名（用于缺失提示） */
 var AI_FIELD_LABEL = {
   name: '姓名', mrn: '住院号', sex: '性别', age: '年龄', diagnosis: '诊断',
@@ -836,6 +869,7 @@ function defaultAiPrompt() {
     '4. 同一位患者的信息若分散在多处，合并成一条记录\n' +
     '5. 字段说明（无法确定的填空字符串 ""，不要编造，不要猜测）：\n' +
     '   name 姓名；mrn 住院号/病案号；sex 性别（只能是「男」或「女」）；age 年龄（只要数字）\n' +
+    '   ward 所在病区（如「放疗科一病区」；材料没写填 ""）；bedNo 床号（如「12」或「12-3」；材料没写填 ""）\n' +
     '   diagnosis 诊断（含部位/病理/分期）；physician 主管医生；position 体位/固定装置\n' +
     '   purpose 放疗目的（只能从 ' + PURPOSES.join('/') + ' 中选）\n' +
     '   technique 放疗技术（只能从 ' + TECHNIQUES.join('/') + ' 中选）\n' +
@@ -1038,6 +1072,9 @@ function normalizeAiPatients(raw) {
        且 test-ai.js 对 AI_FIELDS.length 有硬编码断言。
        故在两处（此处与 syncAiDraftFromSheet/commitAiDraft）单独搬运。 */
     o.otherTreatments = normalizeAiOtherList(r.otherTreatments);
+    /* 附加字段（病区/床号）同走独立通道，理由同上（不进 AI_FIELDS，不参与缺失提示） */
+    var ex = aiExtraOf(r);
+    AI_EXTRA_FIELDS.forEach(function (k) { o[k] = ex[k]; });
   });
   return out;
 }
@@ -2223,7 +2260,73 @@ function buildTodo() {
 }
 
 /* ================= 渲染：框架 ================= */
-var view = { page: 'tab', tab: 'ward', pid: null, calY: 0, calM: 0, tlDesc: false, tlOpen: {} };
+var view = { page: 'tab', tab: 'ward', pid: null, calY: 0, calM: 0, tlDesc: false, tlOpen: {}, wardKw: '', wardSort: 'default' };
+
+/* ================= 在治页：搜索与排序（v0.16.0）=================
+   ★ 为什么搜索/排序状态放在 view 而不落库：
+     它是**临时视图状态**（找床、交班时随手筛一下），刷新后回到默认更符合直觉；
+     落库会让「明天打开发现只显示了 3 个患者」变成惊悚时刻。
+   ★ 排序只提供两条**临床上真的会用到**的路径：
+     ① 默认（录入顺序）：保持既有行为不变，零风险；
+     ② 按床位（病区 → 床号）：交班/找床的主力场景。
+     不做「按姓名/进度」等花哨排序 —— 在治人数通常十几到几十，排序维度越多越难选。 */
+function wardMatch(p, kw) {
+  if (!kw) return true;
+  var k = kw.toLowerCase();
+  return [p.ward, p.bedNo].some(function (v) { return String(v || '').toLowerCase().indexOf(k) >= 0; });
+}
+/* 床号自然序：纯数字按数值，混合串（如 12-3）先比主号再比副号，空值恒排最后。
+   ★ 不能直接字符串比较：「12-3」< 「2」会得到错误顺序。 */
+function bedKey(bedNo) {
+  var s = String(bedNo || '').trim();
+  if (!s) return null;
+  var m = s.match(/^(\d+)(?:\D+(\d+))?/);
+  if (!m) return { main: Infinity, sub: Infinity, raw: s };
+  return { main: parseInt(m[1], 10), sub: m[2] ? parseInt(m[2], 10) : 0, raw: s };
+}
+/* 病区排序键：把「一/二/三…」「1/2/3」都归一成数字，实现「一病区 → 二病区 → 十病区」的自然序。
+   ★ 为什么不用 localeCompare('zh')：它按拼音排序，「二」在「一」之前 —— 交班时看
+     「二病区」排在「一病区」上面是反直觉的。病区名本质是**序号**，按数字排才对。 */
+var WARD_CN_NUM = { '一': 1, '二': 2, '三': 3, '四': 4, '五': 5, '六': 6, '七': 7, '八': 8, '九': 9, '十': 10 };
+function wardKey(name) {
+  var s = String(name || '').trim();
+  if (!s) return { num: Infinity, raw: '' };
+  /* 先找阿拉伯数字（含「10病区」「病区3」等写法） */
+  var am = s.match(/(\d+)/);
+  if (am) return { num: parseInt(am[1], 10), raw: s };
+  /* 再看中文数字：取第一个出现的「一…十」 */
+  for (var i = 0; i < s.length; i++) {
+    if (WARD_CN_NUM[s[i]] != null) return { num: WARD_CN_NUM[s[i]], raw: s };
+  }
+  return { num: Infinity, raw: s };   /* 无序号（如「东区」「ICU」）排在同号之后，按名字排 */
+}
+function wardSorted(list, sort) {
+  if (sort !== 'bed') return list;
+  return list.slice().sort(function (a, b) {
+    var wa = String(a.ward || '').trim(), wb = String(b.ward || '').trim();
+    /* 有病区的排前面；病区按「序号自然序」，序号相同的再按名字、最后按床号 */
+    if (!!wa !== !!wb) return wa ? -1 : 1;
+    if (wa !== wb) {
+      var ka2 = wardKey(wa), kb2 = wardKey(wb);
+      if (ka2.num !== kb2.num) return ka2.num - kb2.num;
+      return ka2.raw.localeCompare(kb2.raw, 'zh-Hans-CN');
+    }
+    var ka = bedKey(a.bedNo), kb = bedKey(b.bedNo);
+    if (!!ka !== !!kb) return ka ? -1 : 1;
+    if (ka && kb) {
+      if (ka.main !== kb.main) return ka.main - kb.main;
+      if (ka.sub !== kb.sub) return ka.sub - kb.sub;
+      return ka.raw.localeCompare(kb.raw);
+    }
+    return String(a.name || '').localeCompare(String(b.name || ''), 'zh-Hans-CN');
+  });
+}
+/* 患者卡上的「病区 · 床号」徽标 —— 排序时更要显眼，否则用户看不出排序依据 */
+function bedChipHtml(p) {
+  var w = String(p.ward || '').trim(), b = String(p.bedNo || '').trim();
+  if (!w && !b) return '';
+  return '<span class="chip sm bed">' + esc(w ? (b ? w + ' · ' + b + '床' : w) : b + ' 床') + '</span>';
+}
 (function () { var t = new Date(); view.calY = t.getFullYear(); view.calM = t.getMonth() + 1; })();
 
 /* 顶部「返回/数据」按钮与底部标签栏的显隐，**只在这里维护**。
@@ -2347,40 +2450,71 @@ function renderTodo() {
 
 /* ================= 渲染：在治 ================= */
 function renderWard() {
-  var list = inTreat();
-  var h = '<div class="section-title">在治患者 · ' + list.length + ' 位' +
+  var all = inTreat();
+  var kw = view.wardKw || '';
+  var list = wardSorted(all.filter(function (p) { return wardMatch(p, kw); }), view.wardSort);
+  var h = '<div class="section-title">在治患者 · <span id="wardCount">' +
+    (kw ? list.length + '/' + all.length : list.length) + '</span> 位' +
     '<span style="display:flex;gap:6px">' +
     '<button class="btn sm" data-act="ai-import">✨ AI 导入</button>' +
     '<button class="btn sm addbtn" data-act="add-patient">＋ 添加</button></span></div>';
-  if (!list.length) h += '<div class="empty"><span class="big">🏥</span>暂无在治患者<br>点右上角「添加患者」开始</div>';
-  list.forEach(function (p) {
-    var un = unreadReactions(p).length;
-    /* 分母统一用 plannedCount（实际排出的次数，含加量），与患者详情页口径一致（BUG-06） */
-    var tot = plannedCount(p);
-    var boost = parseInt(p.boostFractions, 10) || 0;
-    var dn = doneCount(p);
-    var prog = tot ? Math.round(dn / tot * 100) : 0;
-    var end = scheduleEnd(p);
-    var pa = inPause(p, todayStr()) ? pauseOn(p, todayStr()) : null;
-    h += '<div class="card pcard" data-act="open-patient" data-id="' + p.id + '">' +
-      '<div class="badgebox"><div class="b">' + esc(p.name ? p.name.slice(0, 2) : '—') + '</div><div class="t">' + esc(p.mrn || '') + '</div></div>' +
-      '<div class="pbody"><div class="line1"><span class="pname">' + esc(p.name) + '</span>' +
-      (p.sex ? '<span class="chip sm">' + esc(p.sex) + '</span>' : '') +
-      (p.age ? '<span class="chip sm">' + esc(p.age) + '岁</span>' : '') +
-      (pa ? '<span class="chip warn sm">中断中</span>' : '') +
-      (p.stopDate ? '<span class="chip danger sm">已终止</span>' : '') +
-      (boost ? '<span class="chip sm">＋加量' + boost + '</span>' : '') +
-      (un ? '<span class="count">' + un + '</span>' : '') + '</div>' +
-      '<div class="pdiag">' + esc(p.diagnosis || '') + '</div>' +
-      (p.planStatus && p.planStatus !== '已通过' ? '<div class="pmeta">流程：<b>' + esc(p.planStatus) + '</b></div>' :
-        (tot ? '<div class="pmeta">治疗 <b>' + dn + '/' + tot + '</b> 次 · 累计 <b>' + accumulatedDose(p).toFixed(1) + '</b> Gy' +
-          (end ? ' · ' + (p.stopDate ? '已止于 ' : '预计 ') + '<b>' + mdLabel(end) + '</b>' + (p.stopDate ? '' : ' 结束') : '') +
-          '<div class="progress' + (prog >= 95 ? ' warn' : '') + '"><div class="fill" style="width:' + Math.min(100, prog) + '%"></div></div></div>'
-          : '<div class="pmeta">' + (p.startDate ? '未填总次数' : '未排程（缺开始日期）') + '</div>')) +
-      (pa ? '<div class="pmeta" style="color:var(--warn)">中断：' + esc(pa.reason || '') + '（至 ' + mdLabel(pa.to) + '）</div>' : '') +
-      '</div></div>';
-  });
+
+  /* 搜索 + 排序条：无患者时不渲染，避免空列表上堆一排无效控件 */
+  if (all.length) {
+    h += '<div class="wardbar">' +
+      '<div class="wsearch"><input data-act="ward-kw" id="wardKw" value="' + esc(kw) + '" ' +
+      'placeholder="搜病区 / 床号" inputmode="search" autocomplete="off"></div>' +
+      '<button class="btn sm" data-act="ward-kw-clear" id="wardClear"' + (kw ? '' : ' hidden') + '>✕</button>' +
+      '<button class="btn sm' + (view.wardSort === 'bed' ? ' on' : '') + '" data-act="ward-sort">' +
+      (view.wardSort === 'bed' ? '床位序' : '默认序') + '</button>' +
+      '</div>';
+  }
+
+  /* ★ 列表单独装进 #wardList：输入时就地只换这一块，搜索框不失焦 */
+  h += '<div id="wardList">' + wardCardsHtml(list) + '</div>';
   $('view').innerHTML = h + '<div style="height:60px"></div>';
+}
+
+/* 卡片列表 HTML（renderWard 与 wardSearchLive 共用，避免两处各写一遍而漂移） */
+function wardCardsHtml(list) {
+  if (!list.length) {
+    var kw = view.wardKw || '';
+    return kw
+      ? '<div class="empty"><span class="big">🔍</span>没有匹配「' + esc(kw) + '」的在治患者<br>' +
+        '<button class="btn sm" data-act="ward-kw-clear" style="margin-top:8px">清空搜索</button></div>'
+      : '<div class="empty"><span class="big">🏥</span>暂无在治患者<br>点右上角「添加患者」开始</div>';
+  }
+  return list.map(wardCardHtml).join('');
+}
+
+function wardCardHtml(p) {
+  var un = unreadReactions(p).length;
+  /* 分母统一用 plannedCount（实际排出的次数，含加量），与患者详情页口径一致（BUG-06） */
+  var tot = plannedCount(p);
+  var boost = parseInt(p.boostFractions, 10) || 0;
+  var dn = doneCount(p);
+  var prog = tot ? Math.round(dn / tot * 100) : 0;
+  var end = scheduleEnd(p);
+  var pa = inPause(p, todayStr()) ? pauseOn(p, todayStr()) : null;
+  return '<div class="card pcard" data-act="open-patient" data-id="' + p.id + '">' +
+    '<div class="badgebox"><div class="b">' + esc(p.name ? p.name.slice(0, 2) : '—') + '</div><div class="t">' + esc(p.mrn || '') + '</div></div>' +
+    '<div class="pbody"><div class="line1"><span class="pname">' + esc(p.name) + '</span>' +
+    (p.sex ? '<span class="chip sm">' + esc(p.sex) + '</span>' : '') +
+    (p.age ? '<span class="chip sm">' + esc(p.age) + '岁</span>' : '') +
+    /* v0.16.0：病区/床号徽标前置到身份行 —— 排序换成床位序时，一眼能核对顺序 */
+    bedChipHtml(p) +
+    (pa ? '<span class="chip warn sm">中断中</span>' : '') +
+    (p.stopDate ? '<span class="chip danger sm">已终止</span>' : '') +
+    (boost ? '<span class="chip sm">＋加量' + boost + '</span>' : '') +
+    (un ? '<span class="count">' + un + '</span>' : '') + '</div>' +
+    '<div class="pdiag">' + esc(p.diagnosis || '') + '</div>' +
+    (p.planStatus && p.planStatus !== '已通过' ? '<div class="pmeta">流程：<b>' + esc(p.planStatus) + '</b></div>' :
+      (tot ? '<div class="pmeta">治疗 <b>' + dn + '/' + tot + '</b> 次 · 累计 <b>' + accumulatedDose(p).toFixed(1) + '</b> Gy' +
+        (end ? ' · ' + (p.stopDate ? '已止于 ' : '预计 ') + '<b>' + mdLabel(end) + '</b>' + (p.stopDate ? '' : ' 结束') : '') +
+        '<div class="progress' + (prog >= 95 ? ' warn' : '') + '"><div class="fill" style="width:' + Math.min(100, prog) + '%"></div></div></div>'
+        : '<div class="pmeta">' + (p.startDate ? '未填总次数' : '未排程（缺开始日期）') + '</div>')) +
+    (pa ? '<div class="pmeta" style="color:var(--warn)">中断：' + esc(pa.reason || '') + '（至 ' + mdLabel(pa.to) + '）</div>' : '') +
+    '</div></div>';
 }
 
 /* ================= 渲染：总体日历 ================= */
@@ -2398,8 +2532,17 @@ function renderOverallCal() {
     var arr = byDate[ds];
     var dn = arr.filter(function (a) { return a.it.done; }).length;
     var st = dayStat(ds);
-    cells[ds] = calStatBadges(st) +
-      (dn ? '<div class="tagline done">已完成 ' + dn + '</div>' : '<div class="tagline">待治疗</div>');
+    /* ★ v0.16.0：去掉「待治疗」文字。
+       日历格子里只需要两个**人数**口径：
+         · calStatBadges 已给出「治疗 N」= 当日应治疗人数
+         · 这里再补「已完成 N」= 当日已完成次数
+       原先「一次都没完成」的日子会写「待治疗」，是一条**没有数字的定性文案**：
+       它占位却零信息（「治疗 3」已经说明当天有人要做），且与「已完成」并列时
+       一边是计数、一边是状态词，口径不齐。
+       现在未完成当天只显示「治疗 N」，靠 calStatBadges 的计数即可读懂：
+       治疗数 − 已完成数 = 当日待完成数，无需再写文字。
+       ★ 图例同步删掉「待治疗」一项（见 renderOverallCal 的 cal-legend）。 */
+    cells[ds] = calStatBadges(st) + (dn ? '<div class="tagline done">已完成 ' + dn + '</div>' : '');
   });
   /* 有「开始/结束」但没有当天治疗的日期（例如疗程首日恰逢休息日、或已归档患者的末日），
      也要可点击查看名单 —— 否则标注画得出来却点不开 */
@@ -3078,6 +3221,11 @@ function syncAiDraftFromSheet() {
       else { p.otherErr = r.err; }        /* 保留原文与错误信息，导入时再拦一次 */
       p.otherText = String(ov == null ? '' : ov);
     }
+    /* 附加字段（病区/床号）：从复核界面收回，键名走 aiDraftKey 同一套 */
+    AI_EXTRA_FIELDS.forEach(function (k) {
+      var ev = vals[aiDraftKey(i, k)];
+      if (ev !== undefined) p[k] = String(ev == null ? '' : ev).trim();
+    });
   });
 }
 /* 解析复核界面里「其他治疗」文本框的内容。
@@ -3128,6 +3276,7 @@ function addAiBlankRow() {
   if (sheetCtx) syncAiDraftFromSheet();
   var o = {};
   AI_FIELDS.forEach(function (k) { o[k] = ''; });
+  AI_EXTRA_FIELDS.forEach(function (k) { o[k] = ''; });   /* 病区/床号：与其余条目同形 */
   o.otherTreatments = [];     /* 与其他条目保持同形，避免复核界面取 undefined */
   o.otherText = '';
   o.otherErr = '';
@@ -3191,6 +3340,10 @@ function openAiReview() {
       '<div class="field2" style="margin-top:8px">' +
       '<div class="field" style="margin-bottom:8px"><label>' + aiLabelHtml(p, 'name', '姓名') + ' *</label>' + textInput(aiDraftKey(i, 'name'), p.name, '必填') + '</div>' +
       '<div class="field" style="margin-bottom:8px"><label>' + aiLabelHtml(p, 'mrn') + '</label>' + textInput(aiDraftKey(i, 'mrn'), p.mrn) + '</div></div>' +
+      /* v0.16.0：病区 / 床号（可选定位信息，不参与缺失提示） */
+      '<div class="field2">' +
+      '<div class="field" style="margin-bottom:8px"><label>' + AI_EXTRA_LABEL.ward + '<span class="chip sm">选填</span></label>' + textInput(aiDraftKey(i, 'ward'), p.ward) + '</div>' +
+      '<div class="field" style="margin-bottom:8px"><label>' + AI_EXTRA_LABEL.bedNo + '<span class="chip sm">选填</span></label>' + textInput(aiDraftKey(i, 'bedNo'), p.bedNo) + '</div></div>' +
       '<div class="field2">' +
       '<div class="field" style="margin-bottom:8px"><label>' + aiLabelHtml(p, 'sex') + '</label>' + aiSelect(aiDraftKey(i, 'sex'), p.sex, SEXES) + '</div>' +
       '<div class="field" style="margin-bottom:8px"><label>' + aiLabelHtml(p, 'age') + '</label>' + textInput(aiDraftKey(i, 'age'), p.age) + '</div></div>' +
@@ -3262,6 +3415,11 @@ function commitAiDraft() {
     } else {
       o.otherTreatments = p.otherTreatments || [];
     }
+    /* 附加字段：以界面上的当前值为准（用户可能改过），未渲染则回落到草稿 */
+    AI_EXTRA_FIELDS.forEach(function (k) {
+      var ev = vals[aiDraftKey(i, k)];
+      o[k] = (ev !== undefined) ? String(ev == null ? '' : ev).trim() : String(p[k] == null ? '' : p[k]);
+    });
     return o;
   });
   if (badOther.length) {
@@ -3341,7 +3499,10 @@ function sheetPatient(p) {
     '<div class="field2"><div class="field"><label>姓名 *</label>' + textInput('name', d.name, '如 张三') + '</div>' +
     '<div class="field"><label>住院号</label>' + textInput('mrn', d.mrn, '可留空') + '</div></div>' +
     '<div class="field2"><div class="field"><label>性别</label>' + selectInput('sex', d.sex || '男', SEXES) + '</div>' +
-    '<div class="field"><label>年龄</label>' + textInput('age', d.age, '如 56') + '</div></div>';
+    '<div class="field"><label>年龄</label>' + textInput('age', d.age, '如 56') + '</div></div>' +
+    /* v0.16.0：所在病区 / 床号 —— 用于在治页搜索与排序（找床、交班） */
+    '<div class="field2"><div class="field"><label>所在病区</label>' + textInput('ward', d.ward, '如 放疗科一病区') + '</div>' +
+    '<div class="field"><label>床号</label>' + textInput('bedNo', d.bedNo, '如 12 或 12-3') + '</div></div>';
 
   /* ② 诊断与方案 */
   var gPlan =
@@ -3401,7 +3562,12 @@ function sheetPatient(p) {
         state.patients.push(np);
         toast(v.startDate && v.fractions ? '已添加，日历已生成' : '已添加');
       } else {
-        ['mrn', 'name', 'sex', 'age', 'physician', 'diagnosis', 'purpose', 'technique', 'simDate', 'position', 'planStatus', 'totalDose', 'fractions', 'dosePerFraction', 'startDate'].forEach(function (k) { p[k] = v[k] || ''; });
+        /* ★ 编辑分支的字段白名单 —— 新增字段必须同步加进来！
+           isNew 分支走 Object.assign({}, v, …) 会自动带上新字段，
+           而这个白名单是**手工维护**的：漏一个就会出现「新增能存、编辑存不上」
+           的不对称（与 v0.15.0 修的 verifyAt 缺陷同源）。
+           v0.16.0 的 ward / bedNo 已加入；16h 断言锁死两分支一致。 */
+        ['mrn', 'name', 'sex', 'age', 'physician', 'diagnosis', 'purpose', 'technique', 'simDate', 'position', 'planStatus', 'totalDose', 'fractions', 'dosePerFraction', 'startDate', 'ward', 'bedNo'].forEach(function (k) { p[k] = v[k] || ''; });
         /* 验证配置单独处理：次数变化时，把不再存在的次数的完成标记一并清掉，
            避免「改成 15 后第 10 次仍显示已完成」这种脏数据 */
         p.verifyAt = buildVerifyAt(verifyCfgOf(p).done);
@@ -4340,13 +4506,14 @@ function downloadBlob(blob, filename) {
 function csvCell(s) { s = String(s == null ? '' : s); return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s; }
 function exportCsv() {
   var lines = [];
-  var rows1 = [['住院号', '姓名', '性别', '年龄', '诊断', '目的', '技术', '主管医生', '处方', '加量', '开始日期', '预计结束', '已治', '累计剂量(Gy)', '未执行', '未闭环副反应', '今日待办', '中断']];
+  /* v0.16.0：交班摘要新增「病区 / 床号」两列（插在住院号之后，便于按床位交接） */
+  var rows1 = [['住院号', '病区', '床号', '姓名', '性别', '年龄', '诊断', '目的', '技术', '主管医生', '处方', '加量', '开始日期', '预计结束', '已治', '累计剂量(Gy)', '未执行', '未闭环副反应', '今日待办', '中断']];
   var todoMap = {};
   buildTodo().forEach(function (it) { todoMap[it.p.id] = it.reasons.join('；'); });
   inTreat().forEach(function (p) {
     var boost = parseInt(p.boostFractions, 10) || 0;
     rows1.push([
-      p.mrn || '', p.name || '', p.sex || '', p.age || '', p.diagnosis || '', p.purpose || '', p.technique || '', p.physician || '',
+      p.mrn || '', p.ward || '', p.bedNo || '', p.name || '', p.sex || '', p.age || '', p.diagnosis || '', p.purpose || '', p.technique || '', p.physician || '',
       (p.totalDose ? p.totalDose + 'Gy/' + p.fractions + '次' : ''), (boost ? boost + '次' + (p.boostNote ? '(' + p.boostNote + ')' : '') : ''),
       dateOnly(p.startDate), scheduleEnd(p),
       doneCount(p) + '/' + plannedCount(p), accumulatedDose(p).toFixed(1),
@@ -5072,6 +5239,12 @@ function bind() {
 
   var acts = {
     'open-patient': function (el) { var p = getPatient(el.dataset.id); closeSheet(); view.page = 'patient'; view.pid = el.dataset.id; if (p && p.startDate) { var d = parseD(p.startDate); if (d) { view.calY = d.getFullYear(); view.calM = d.getMonth() + 1; } } render(); },
+    /* 在治页搜索/排序（v0.16.0）：
+       ★ 排序按钮是「切换」语义（默认序 ⇄ 床位序），顺序变了必须整页重建。 */
+    'ward-kw-clear': function () { view.wardKw = ''; render(); },
+    'ward-sort': function () { view.wardSort = (view.wardSort === 'bed' ? 'default' : 'bed'); render(); },
+    /* 点击搜索框本身不做动作（input 事件另行委托），显式登记以免冒泡到卡片区 */
+    'ward-kw': function () { },
     'add-patient': function () { sheetPatient(null); },
     /* 验证相关动作：
        - 「已完成」用切换语义（verifyToggleDone），与界面文案「点按钮切换」一致；
@@ -5327,6 +5500,32 @@ function bind() {
     var hit = findAct(e.target, acts);
     if (hit) hit.fn(hit.el);
   });
+
+  /* 在治页搜索框（v0.16.0）—— 走 input 事件而非 click：
+     ★ 为什么不直接 render()：每次按键都整页重建会让 <input> 失焦，
+       手机上一打字键盘就收起，完全没法用。
+     ★ 做法：「数据先行 + 就地刷新列表」——
+       ① 更新 view.wardKw；
+       ② 只重画卡片列表容器（#wardList），搜索框与排序按钮原地不动，
+          焦点、光标位置、输入法候选全部保持。
+     ★ 计数文案在标题里，故标题单独就地更新。 */
+  document.addEventListener('input', function (e) {
+    var t = e.target;
+    if (t && t.dataset && t.dataset.act === 'ward-kw') wardSearchLive(t.value);
+  });
+}
+
+/* 搜索框输入的就地刷新：不动搜索框本身，只换列表与计数 */
+function wardSearchLive(kw) {
+  view.wardKw = String(kw == null ? '' : kw);
+  var all = inTreat();
+  var list = wardSorted(all.filter(function (p) { return wardMatch(p, view.wardKw); }), view.wardSort);
+  var listEl = $('wardList');
+  if (listEl) listEl.innerHTML = wardCardsHtml(list);
+  var cntEl = $('wardCount');
+  if (cntEl) cntEl.textContent = view.wardKw ? list.length + '/' + all.length : String(list.length);
+  var clrEl = $('wardClear');
+  if (clrEl) clrEl.hidden = !view.wardKw;
 }
 
 /* ================= 云同步（加密后存到 GitHub Gist） =================

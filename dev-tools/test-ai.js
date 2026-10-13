@@ -341,6 +341,70 @@ function withFetch(plan, fn) {
     ok(bad.ok === false && !!bad.err, '★★ 非法 JSON 明确报错（不静默清空用户输入）', bad.err);
   }
 
+  group('14. 附加字段（所在病区 / 床号）AI 通道（v0.16.0）');
+
+  /* 14a 契约：附加字段不得混入 AI_FIELDS（AI_FIELDS 参与「缺失提示」，且被硬编码断言锁死） */
+  {
+    ok(AI_FIELDS.indexOf('ward') < 0 && AI_FIELDS.indexOf('bedNo') < 0,
+      '★ ward/bedNo 未混入 AI_FIELDS（不参与缺失提示、不破坏 15 项断言）');
+    ok(AI_FIELDS.length === 15, 'AI_FIELDS 仍为 15 项');
+    ok(AI_EXTRA_FIELDS.length === 2 && AI_EXTRA_FIELDS.indexOf('ward') >= 0 && AI_EXTRA_FIELDS.indexOf('bedNo') >= 0,
+      '★ 附加字段表恰好含 ward/bedNo', AI_EXTRA_FIELDS);
+    ok(!!AI_EXTRA_LABEL.ward && !!AI_EXTRA_LABEL.bedNo, '附加字段有中文标签', AI_EXTRA_LABEL);
+  }
+
+  /* 14b 清洗：模型返回缺字段 / 数字床号 / 带空白，一律清洗成字符串 */
+  {
+    const list = normalizeAiPatients({ patients: [
+      { name: '甲', ward: '  放疗科一病区  ', bedNo: 12 },
+      { name: '乙' }
+    ] });
+    ok(list.length === 2, '★ 附加字段缺失不影响条目保留（仍 2 条）', list.length);
+    ok(list[0].ward === '放疗科一病区', '★ 病区首尾空白被清洗', JSON.stringify(list[0].ward));
+    ok(list[0].bedNo === '12', '★ 数字床号被规整为字符串（不崩、不丢）', JSON.stringify(list[0].bedNo));
+    ok(list[1].ward === '' && list[1].bedNo === '', '★ 未提供时补空串（与其余字段同形，复核界面取值不 undefined）',
+      [list[1].ward, list[1].bedNo]);
+  }
+
+  /* 14c 缺失提示不受污染：病区/床号全空也不该出现任何「待补」噪音 */
+  {
+    const miss = aiMissingOf({ name: '甲', mrn: 'A1' });
+    ok(miss.all.indexOf('所在病区') < 0 && miss.all.indexOf('床号') < 0,
+      '★★ 病区/床号不进入缺失提示（可选定位信息，不制造噪音）', miss.all.join('/'));
+  }
+
+  /* 14d ★ 三处搬运点一致性：normalize → 界面取值 → commit 预览，任一环漏搬即丢数据 */
+  {
+    const src = [{ name: '王五', mrn: 'B9', ward: '放疗科二病区', bedNo: '7-2', startDate: '2026-10-09', fractions: '20' }];
+    aiDraft = { images: [], patients: normalizeAiPatients({ patients: src }) };
+    openAiReview();
+    const rev = getEl('sheetBody').innerHTML;
+    ok(rev.indexOf('ai_0_ward') >= 0 && rev.indexOf('ai_0_bedNo') >= 0,
+      '★ 复核界面渲染出病区/床号输入框（漏渲染 = 用户看不到、改不了）');
+    ok(rev.indexOf('放疗科二病区') >= 0 && rev.indexOf('7-2') >= 0, '★ 识别到的值已填入复核界面');
+
+    /* 用户复核时改掉病区，commit 必须以界面当前值为准 */
+    buildSheetInputs(rev, { ai_0_ward: '放疗科三病区' });
+    state = normalize({ version: 2, updatedAt: '', patients: [] });
+    fire('ai-commit');
+    ok(state.patients.length === 1, '确认导入 1 位', state.patients.length);
+    const p = state.patients[0];
+    ok(p.ward === '放疗科三病区', '★★ 导入的是人工修改后的病区（commit 未回落到旧草稿）', p.ward);
+    ok(p.bedNo === '7-2', '★★ 床号从识别结果一路带到落库（三处搬运点无遗漏）', p.bedNo);
+    ok(p.startDate === '2026-10-09' && computeSchedule(p).length === 20,
+      '附加字段的加入不影响既有排程链路', computeSchedule(p).length);
+  }
+
+  /* 14e 手动补录空条：附加字段必须有键（与其余条目同形） */
+  {
+    aiDraft = { images: [], patients: [] };
+    openAiReview();
+    fire('ai-add-row');
+    const o = aiDraft.patients[0];
+    ok(!!o && o.ward === '' && o.bedNo === '', '★ 手动补录的空条也带 ward/bedNo 键',
+      o ? [o.ward, o.bedNo] : null);
+  }
+
   console.log('');
   console.log('========================================');
   console.log('通过 ' + pass + ' 项，失败 ' + fail + ' 项');

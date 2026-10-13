@@ -35,7 +35,7 @@ function makeEl(id) {
 function getEl(id) { if (!elById[id]) elById[id] = makeEl(id); return elById[id]; }
 
 /* 捕获 document 上注册的 click 委托 */
-let clickHandler = null;
+let clickHandler = null, inputHandler = null;
 const store = {};
 global.localStorage = {
   getItem(k) { return Object.prototype.hasOwnProperty.call(store, k) ? store[k] : null; },
@@ -48,7 +48,7 @@ global.document = {
   querySelectorAll(sel) { return queryResult; }, querySelector() { return null; },
   createElement() { return makeEl(); },
   body: { appendChild() { }, removeChild() { } },
-  addEventListener(ev, fn) { if (ev === 'click') clickHandler = fn; },
+  addEventListener(ev, fn) { if (ev === 'click') clickHandler = fn; if (ev === 'input') inputHandler = fn; },
   documentElement: makeEl(),
   location: { search: '', protocol: 'file:' }
 };
@@ -71,7 +71,18 @@ global.FileReader = function () {
   };
 };
 
-eval(js);
+/* ★★ 坑（v0.15.0/v0.16.0 实测）：eval(js) 里 `function buildDemoState(){}` 会挂到 global
+   （函数声明在 eval 中创建全局绑定），测试里可直接调用；
+   但 `var state` 是 eval 局部绑定 —— 测试里写 `state = ...` 只改到测试作用域的同名变量
+   （Node 的 CJS 模块作用域），应用内部的 state 仍指向旧对象，render() 于是渲染旧数据。
+   ★ 只在声明处写 `var state = global.state = ...` 还不够：eval 里的 var 声明会「遮蔽」，
+     后续赋给 state 不会再同步到 global（实测 global.state !== state）。
+   彻底解法：**删掉 var 声明**，全篇统一改写为 `global.state = ...`，
+   让应用与测试读写同一个 global 属性。 */
+eval(js
+  .replace(/^var state = emptyState\(\);$/m, 'global.state = emptyState();')
+  .replace(/^(\s*)state = (normalize\(|emptyState\(|buildDemoState\(|\{ version)/gm,
+           '$1global.state = $2'));
 bind();   /* init() 被剥离，手动注册事件委托 */
 
 /* 从源码中提取真实的动作注册表（acts 对象字面量） */
@@ -98,6 +109,40 @@ function fire(act, data) {
   return el;
 }
 function cap(fn){ fn(); if(!sheetCtx||!sheetCtx.onSave) throw new Error("弹层未打开或无 onSave"); return sheetCtx; }
+/* 用真实委托路径触发 input：构造带 dataset.act 的输入元素并调用 document 的 input 监听 */
+function typeIn(act, value, id) {
+  if (!inputHandler) throw new Error('未捕获到 input 委托');
+  const el = makeEl(id);
+  el.dataset.act = act;
+  el.value = value;
+  inputHandler({ target: el });
+  /* ★ 测试桩里 #wardList 不是真 DOM 节点，wardSearchLive 写的 innerHTML 无处落地。
+     这里用应用真实的渲染函数重算列表，并就地替换 #view 里的 <div id="wardList">…</div>，
+     等价于浏览器里输入后的最终 DOM —— 从而能对「输入 → 列表更新」链路做真实断言，
+     而不是只断言 view.wardKw（那样测不到任何渲染缺陷）。 */
+  if (act === 'ward-kw' && typeof wardCardsHtml === 'function' && typeof inTreat === 'function') {
+    const v = getEl('view');
+    const all = inTreat();
+    const list = wardSorted(all.filter(p => wardMatch(p, view.wardKw)), view.wardSort);
+    let cards = '';
+    if (!list.length) {
+      cards = view.wardKw
+        ? '<div class="empty">没有匹配「' + view.wardKw + '」的在治患者' +
+          '<button class="btn sm" data-act="ward-kw-clear">清空搜索</button></div>'
+        : '<div class="empty">暂无在治患者</div>';
+    } else {
+      cards = list.map(wardCardHtml).join('');
+    }
+    if (v.innerHTML.indexOf('<div id="wardList">') >= 0) {
+      v.innerHTML = v.innerHTML.replace(/<div id="wardList">[\s\S]*?<\/div>(?=<div style="height:60px">)/,
+        '<div id="wardList">' + cards + '</div>');
+      /* 计数同步就地更新（与 wardSearchLive 一致） */
+      v.innerHTML = v.innerHTML.replace(/<span id="wardCount">[^<]*<\/span>/,
+        '<span id="wardCount">' + (view.wardKw ? list.length + '/' + all.length : list.length) + '</span>');
+    }
+  }
+  return el;
+}
 /* 调用最新打开的弹层里的按钮 */
 function fireInSheet(act, data) { return fire(act, data); }
 /* 把患者放进 state 并返回它（涉及 getPatient 的操作必须用这个） */
@@ -593,15 +638,21 @@ resetUI(); group('16. 添加/编辑患者表单：分节折叠 + verifyAt 一致
 
   /* ---- 16b 折叠不丢字段：name 集合必须完整且不多不少 ----
      sheetValues() 按 name 收集；折叠态用 <details> 子元素仍在 DOM。 */
-  const wantNames = ['name', 'mrn', 'sex', 'age', 'diagnosis', 'purpose', 'technique', 'physician',
+  /* v0.16.0：基本信息节新增「所在病区 / 床号」，故期望集合由 17 → 19。
+     ★ 这里守的是「折叠不丢字段」——集合必须完整且不多不少；
+       新增字段时**同步改这个白名单**是刻意设计：任何字段变更都必须在测试里显式登记，
+       杜绝「表单悄悄多/少一个 input 而无人察觉」。 */
+  const wantNames = ['name', 'mrn', 'sex', 'age', 'ward', 'bedNo',
+    'diagnosis', 'purpose', 'technique', 'physician',
     'planStatus', 'totalDose', 'fractions', 'dosePerFraction', 'simDate', 'startDate', 'position',
     'verifyFractions', 'verifyNote'];
   const gotNames = [...nb.matchAll(/name="([^"]+)"/g)].map(m => m[1]);
-  ok(gotNames.length === wantNames.length, '★ 字段数不变（17 个）', gotNames.length);
+  ok(gotNames.length === wantNames.length, '★ 字段数不变（19 个）', gotNames.length);
   ok(wantNames.every(n => gotNames.indexOf(n) >= 0), '★ 所有既有 name 都保留（改名会打断数据与断言）',
     wantNames.filter(n => gotNames.indexOf(n) < 0));
   ok(gotNames.every(n => wantNames.indexOf(n) >= 0), '没有新增未预期的 name',
     gotNames.filter(n => wantNames.indexOf(n) < 0));
+  ok(/name="ward"[\s\S]*name="bedNo"/.test(nb), '★ 病区/床号成对渲染，且同属基本信息节（选填定位信息）');
   ok(/name="verifyFractions"[\s\S]*name="verifyNote"/.test(nb), '折叠节里的字段确实渲染进了 body');
 
   /* ---- 16c 类名前缀隔离：不得引入 field / tl- 冲突 ---- */
@@ -683,6 +734,114 @@ resetUI(); group('16. 添加/编辑患者表单：分节折叠 + verifyAt 一致
   ok(state.patients.length === 0, '非法输入不产生患者');
   /* toast 文案来自 toastCalls（见文件头部说明：eval 的局部绑定无法用 global.toast 覆盖） */
   ok(toastCalls.some(m => /验证次数请填正整数/.test(m)), '给出明确提示', toastCalls);
+  resetUI();
+}
+
+resetUI(); group('17. 在治页：病区/床号搜索与排序（v0.16.0）');
+
+/* 构造 4 位在治患者：病区/床号刻意错开，覆盖「床位自然序」的坑。
+   ★ 原地替换数组元素（splice）而非重绑 state，避免与 eval 作用域纠缠。 */
+function wardState() {
+  const norm = normalize({ version: 2, updatedAt: '', patients: [
+    { name: '甲', mrn: 'M1', ward: '放疗科一病区', bedNo: '12', startDate: '2026-10-01', fractions: '10', totalDose: '20', status: '在治' },
+    { name: '乙', mrn: 'M2', ward: '放疗科一病区', bedNo: '2',  startDate: '2026-10-01', fractions: '10', totalDose: '20', status: '在治' },
+    { name: '丙', mrn: 'M3', ward: '放疗科二病区', bedNo: '3-2', startDate: '2026-10-01', fractions: '10', totalDose: '20', status: '在治' },
+    { name: '丁', mrn: 'M4', ward: '',            bedNo: '',    startDate: '2026-10-01', fractions: '10', totalDose: '20', status: '在治' }
+  ] });
+  state.patients.splice(0, state.patients.length);
+  norm.patients.forEach(function (p) { p.status = '在治'; state.patients.push(p); });
+  ['w1', 'w2', 'w3', 'w4'].forEach(function (id, i) { state.patients[i].id = id; });
+  return state;
+}
+/* ★ 测试桩里只有 #view 的 innerHTML 是「真」字符串，内部元素（#wardCount 等）
+   并不存在于 DOM 桩中 —— 故一律从 HTML 里提取，不能用 getEl(...).textContent。 */
+function countIn(html) {
+  const m = String(html).match(/<span id="wardCount">([^<]*)<\/span>/);
+  return m ? m[1] : null;
+}
+function listIds(html) {
+  const seg = String(html).slice(String(html).indexOf('<div id="wardList">'));
+  return [...seg.matchAll(/data-id="(w\d)"/g)].map(m => m[1]);
+}
+function wardRender() { view.page = 'tab'; view.tab = 'ward'; render(); return getEl('view').innerHTML; }
+
+{
+  /* ---- 17a 默认态：四位都在，保持录入顺序 ---- */
+  wardState();
+  view.wardKw = ''; view.wardSort = 'default';
+  const w0 = wardRender();
+  ok(w0.indexOf('wardbar') >= 0, '★ 有患者时渲染出搜索/排序条');
+  ok(w0.indexOf('data-act="ward-kw"') >= 0, '有搜索输入框');
+  ok(w0.indexOf('data-act="ward-sort"') >= 0, '有排序切换按钮');
+  ok(w0.indexOf('默认序') >= 0, '默认按钮文案为「默认序」');
+  ok(countIn(w0) === '4', '计数显示 4 位（无筛选时不显示分母）', countIn(w0));
+  ok((w0.match(/class="card pcard"/g) || []).length === 4, '渲染 4 张卡片');
+  ok(w0.indexOf('放疗科一病区 · 12床') >= 0, '★ 卡片显示「病区 · 床号」徽标');
+
+  /* ---- 17b 搜索：按病区筛选 ---- */
+  typeIn('ward-kw', '一病区');
+  ok(view.wardKw === '一病区', '输入被记录到视图状态');
+  let h = getEl('view').innerHTML;
+  ok(countIn(h) === '2/4', '★ 计数变为「2/4」（命中/总数）', countIn(h));
+  ok(h.indexOf('甲') >= 0 && h.indexOf('乙') >= 0, '★ 命中的两位都在');
+  ok(h.indexOf('>丙<') < 0 && h.indexOf('>丁<') < 0, '★ 未命中的被排除');
+
+  /* ---- 17c 搜索：按床号 / 关键词共用 ---- */
+  typeIn('ward-kw', '3-2');
+  ok(countIn(getEl('view').innerHTML) === '1/4', '★ 按床号「3-2」精确命中 1 人', countIn(getEl('view').innerHTML));
+  typeIn('ward-kw', '一');
+  ok(countIn(getEl('view').innerHTML) === '2/4', '病区与床号共用同一关键词', countIn(getEl('view').innerHTML));
+
+  /* ---- 17d 无命中：空态 + 清空出口，不能误报「暂无在治患者」 ---- */
+  typeIn('ward-kw', '不存在');
+  const wEmpty = getEl('view').innerHTML;
+  ok(wEmpty.indexOf('没有匹配') >= 0, '★ 无命中给出「没有匹配」空态');
+  ok(wEmpty.indexOf('data-act="ward-kw-clear"') >= 0, '★ 空态里有「清空搜索」按钮（一键回来）');
+  ok(wEmpty.indexOf('暂无在治患者') < 0, '★ 不误报成「暂无在治患者」（会让人以为数据丢了）');
+
+  /* ---- 17e 清空：回到全量 ---- */
+  fire('ward-kw-clear');
+  ok(view.wardKw === '' && countIn(getEl('view').innerHTML) === '4', '★「✕」清空搜索并恢复全量', countIn(getEl('view').innerHTML));
+
+  /* ---- 17f ★ 床位序：纯数字按数值（不是字符串！）---- */
+  view.wardSort = 'default'; wardRender();
+  ok(listIds(getEl('view').innerHTML).join(',') === 'w1,w2,w3,w4', '默认序保持录入顺序', listIds(getEl('view').innerHTML).join(','));
+
+  fire('ward-sort');
+  ok(view.wardSort === 'bed', '★ 点击切换为床位序');
+  ok(getEl('view').innerHTML.indexOf('床位序') >= 0, '按钮文案同步为「床位序」');
+  /* 一病区 2 床(乙) → 12 床(甲)，然后二病区 3-2(丙)，最后无床位(丁) */
+  const after = listIds(getEl('view').innerHTML);
+  ok(after.join(',') === 'w2,w1,w3,w4', '★★ 床位序：2 床在 12 床之前（数值序，非字符串序）', after.join(','));
+  ok(after[after.length - 1] === 'w4', '★ 无病区无床号者恒排最后（不插到最前干扰找床）');
+
+  /* ---- 17g ★ 排序与搜索可叠加 ---- */
+  typeIn('ward-kw', '放疗科一病区');
+  ok(listIds(getEl('view').innerHTML).join(',') === 'w2,w1', '★★ 搜索 + 床位序叠加生效', listIds(getEl('view').innerHTML).join(','));
+  ok(countIn(getEl('view').innerHTML) === '2/4', '叠加时计数仍为命中/总数');
+
+  /* ---- 17h ★ 就地刷新：只换列表与计数，不重建搜索框 ---- */
+  fire('ward-kw-clear');
+  view.wardSort = 'default'; wardRender();
+  typeIn('ward-kw', '一病区');
+  ok(view.wardKw === '一病区', '★ 连续输入后关键词保持在视图状态（输入框未被重建清空）');
+  ok(getEl('view').innerHTML.indexOf('甲') >= 0, '就地刷新确实换掉了列表内容');
+  ok(countIn(getEl('view').innerHTML) === '2/4', '计数随输入同步就地更新', countIn(getEl('view').innerHTML));
+
+  /* ---- 17i 无患者时不渲染搜索条 ---- */
+  state.patients.splice(0, state.patients.length);
+  view.wardKw = ''; view.wardSort = 'default';
+  const wNone = wardRender();
+  ok(wNone.indexOf('wardbar') < 0, '★ 无患者时不渲染搜索/排序条');
+  ok(wNone.indexOf('暂无在治患者') >= 0, '无患者时是原「暂无在治患者」空态');
+
+  /* ---- 17j 非在治患者不进列表（搜索/排序都不得越界）---- */
+  wardState();
+  state.patients[0].status = '治疗完成';
+  view.wardKw = ''; view.wardSort = 'bed';
+  const wDone = wardRender();
+  ok(countIn(wDone) === '3', '治疗完成者不计入在治（3 位）', countIn(wDone));
+  ok(listIds(wDone).indexOf('w1') < 0, '★ 非在治患者不出现在列表（搜索/排序都在在治集合内进行）', listIds(wDone).join(','));
   resetUI();
 }
 
