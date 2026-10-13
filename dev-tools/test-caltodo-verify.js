@@ -493,7 +493,9 @@ function sliceCalendarCell(gridHtml, ds) {
     const cellArc = sliceCalendarCell(gridArc, realEnd);
     ok(cellArc.length > 0, '★ 取到该日格子（切片锚点存在）', cellArc.length);
     ok(cellArc.indexOf('治疗 1') >= 0, '★★ 归档患者末日格子仍有「治疗 1」（byDate 未漏）', cellArc.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim());
-    ok(cellArc.indexOf('已完成 1') >= 0, '★ 归档患者末日格子显示「已完成 1」');
+    /* v0.16.1 起格子不再画「已完成 N」；这条改为反向红线，保证改动不回流 */
+    ok(cellArc.indexOf('已完成') < 0, '★★ 归档患者末日格子不画「已完成 N」（v0.16.1 去掉）',
+      cellArc.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim());
 
     /* ★ 未来 14 天日程用的是 inTreat()，归档患者不在其中 —— 但日历格用的是
        calStatScope()。断言两者**不会**对同一位归档患者给出矛盾结论：
@@ -689,55 +691,80 @@ function sliceCalendarCell(gridHtml, ds) {
     ok(calHtml.indexOf('month-stat') >= 0, '★ 出现月度汇总', true);
     ok(calHtml.indexOf('始＝开始放疗') >= 0 && calHtml.indexOf('终＝放疗结束') >= 0, '图例含「始/终」说明', true);
 
-    /* ★ v0.16.0：日历格「每日统计」只保留两项 —— 应治疗人数 + 已完成人数。
-       原先「一次都没完成」的日子会写一条「待治疗」定性文字：占位却零信息
-       （「治疗 3」已说明当天有人要做），且与计数并列时口径不齐。
+    /* ★ v0.16.1：日历格「每日统计」收敛为**一项** ——「治疗 N」= 当日应治疗人数。
+       演进史（每次都是用户在减负）：
+         · 更早：无完成时写一条定性文字「待治疗」→ 零信息、口径不齐
+         · v0.16.0：删「待治疗」，补「已完成 N」
+         · v0.16.1：连「已完成 N」也去掉（格子小，两行数字反而挤；
+           「已完成」是派生量，点日期看弹层更完整）
 
-       ★ 断言必须**限定在日历网格 + 图例**范围内。整页 HTML 里还有别的面也写
-         「待治疗」，且都合法：
+       ★ 断言必须**限定在日历网格 / 图例**范围内。整页 HTML 里别的面也写
+         「待治疗」「已完成」，且都合法：
            · 月度汇总卡片「未来 14 天日程」的行末状态徽章；
-           · 点日期后的日详情弹层；
-           · sheetDayPatient 的「第 N 次」徽章。
-       这三处讲的都是**某一次治疗做没做**，是状态而非「当日人数统计」，
-       与用户要求删掉的那句定性文案不是一回事。所以用 calGridHtml()/
-       calLegendHtml() 两个切片函数先把范围收窄，再断言。 */
+           · 点日期后的日详情弹层（逐条名单里的「已完成 / 待治疗」）；
+           · 患者详情页格子的 `tagline done`（「第 N 次✓」）。
+       那些讲的都是**某一次治疗做没做**，是状态而非「当日人数统计」。
+       所以用 calGridHtml() / calLegendHtml() 两个切片函数先把范围收窄再断言。 */
     const gridHtml = calGridHtml(calHtml);
     const legendHtml = calLegendHtml(calHtml);
     ok(gridHtml.length > 0, '★ 取到日历网格片段（切片锚点存在）', gridHtml.length);
     ok(legendHtml.length > 0, '★ 取到日历图例片段（切片锚点存在）', legendHtml.length);
 
-    /* ① 网格里不得再出现「待治疗」定性文字 */
-    ok(gridHtml.indexOf('待治疗') < 0, '★★ 日历格内已无「待治疗」文字');
-    /* ② 网格里必须出现「已完成 N」（当日有完成时） */
-    ok(/class="tagline done">已完成 \d+</.test(gridHtml), '★ 已有当日完成的格子显示「已完成 N」',
-      (gridHtml.match(/class="tagline done">已完成 \d+</) || [])[0]);
-    /* ③ 图例只留「应治疗」+「已完成」两项人数口径，不再有「待治疗」/「有治疗安排」 */
-    ok(legendHtml.indexOf('</i>应治疗</span>') >= 0, '★ 图例首项改为「应治疗」（与格内「治疗 N」同指）');
-    ok(legendHtml.indexOf('</i>待治疗</span>') < 0, '★★ 图例不再出现「待治疗」条目（避免与格内文案不一致）');
-    ok(legendHtml.indexOf('有治疗安排') < 0, '★ 图例不再出现含糊的「有治疗安排」文案');
-    /* ④ 图例的前两项恰好是「应治疗」「已完成」，顺序与格内「治疗 N → 已完成 N」一致 */
+    /* ① 网格里不得出现「待治疗」定性文字 */
+    ok(gridHtml.indexOf('待治疗') < 0, '★★ 日历格内无「待治疗」文字');
+    /* ② ★ 网格里也不得出现「已完成 N」—— v0.16.1 新红线 */
+    ok(gridHtml.indexOf('已完成') < 0, '★★ 日历格内无「已完成 N」标注（v0.16.1 去掉）',
+      (gridHtml.match(/已完成[^<]*/) || ['(无)'])[0]);
+    ok(gridHtml.indexOf('tagline done') < 0, '★★ 日历格内无 tagline done 元素',
+      (gridHtml.match(/tagline done[^>]*>/) || ['(无)'])[0]);
+    /* ③ 网格里必须有「治疗 N」—— 这是唯一保留的格内统计 */
+    ok(/<div class="cnt">治疗 \d+<\/div>/.test(gridHtml), '★★ 日历格保留「治疗 N」（唯一格内统计）',
+      (gridHtml.match(/<div class="cnt">治疗 \d+<\/div>/) || [''])[0]);
+    /* ④ 图例首项「应治疗」（与格内「治疗 N」同指），且不再有「已完成」色块 */
+    ok(legendHtml.indexOf('</i>应治疗</span>') >= 0, '★ 图例首项为「应治疗」（与格内「治疗 N」同指）');
+    ok(legendHtml.indexOf('</i>已完成</span>') < 0,
+      '★★ 图例不再有「已完成」色块（格内已无对应物，留则误导）');
+    ok(legendHtml.indexOf('</i>待治疗</span>') < 0, '★★ 图例无「待治疗」条目');
+    ok(legendHtml.indexOf('有治疗安排') < 0, '★ 图例无含糊的「有治疗安排」文案');
+    /* ⑤ 图例首项恰好是「应治疗」 */
     {
       const seq = [];
       const re = /<\/i>([^<]+)<\/span>/g;
       let mm;
       while ((mm = re.exec(legendHtml)) !== null) seq.push(mm[1]);
-      ok(seq[0] === '应治疗' && seq[1] === '已完成', '★★ 图例前两项为「应治疗 / 已完成」',
+      ok(seq[0] === '应治疗', '★★ 图例首项为「应治疗」',
         seq.slice(0, 2).join(' / ') + ' （共 ' + seq.length + ' 项）');
+      ok(seq.indexOf('已完成') < 0, '★★ 图例各项中无「已完成」',
+        seq.join(' / '));
     }
 
-    /* 两项统计的数值得对得上：同一天里「治疗 N」= dayStat.treating.length，
-       「已完成 M」= 该日排程中 done 为真的条数，且 M ≤ N */
+    /* 「已完成」仍是页面别处（弹层名单）的合法状态词 —— 界定清楚，避免下次误删 */
+    ok(calHtml.indexOf('已完成') >= 0, '★ 「已完成」作为状态词仍存在于页面其他区域', true);
+    /* ★ v0.16.1：格内只剩一项统计，原先「两项数值互校」已失去对象。
+       保留的是一条**语义不变式**：格内「治疗 N」的 N 必须等于当日应治疗人数，
+       不能因为拿掉「已完成」而连口径都松掉（比如误改成排程条数、
+       或把归档患者漏掉）。逐格核对，不是抽查。
+       ★ 每格单独一条断言会让计数暴涨，这里汇总成一条：任一格不符就报出第一处。 */
     {
       const dsToday = today;
       const stToday = dayStat(dsToday);
-      if (stToday.treating.length) {
-        const M = stToday.treating.filter(function (a) { return a.it.done; }).length;
-        ok(M <= stToday.treating.length, '★★ 当日「已完成」不得超过「应治疗」', { 已完成: M, 应治疗: stToday.treating.length });
-        ok(M > 0, '★ 今天（治疗日）应有已完成计数', M);
-      } else {
-        ok(true, '★ 今天非治疗日，跳过两项数值校验');
-        ok(true, '★ 今天非治疗日，跳过已完成计数校验');
-      }
+      /* ★ 逐格切片的可靠做法：用 split 按 `<div class="cal-cell` 断开，
+         每段即一格（含 data-date）。不要用正则 lookahead —— 贪婪/懒惰与
+         前瞻范围混用时极易只匹配到第一格（已踩过一次：checked 恒为 0/1）。 */
+      const segs = gridHtml.split('<div class="cal-cell').slice(1);
+      let bad = null, checked = 0;
+      segs.forEach(function (c) {
+        const dd = (c.match(/data-date="(\d{4}-\d{2}-\d{2})"/) || [])[1];
+        if (!dd) return;
+        const shown = (c.match(/<div class="cnt">治疗 (\d+)<\/div>/) || [])[1];
+        const want = dayStat(dd).treating.length;
+        if (want === 0) return;                       /* 无治疗日不画 cnt */
+        checked++;
+        if (String(want) !== String(shown) && bad === null) bad = { date: dd, 格内显示: shown, 应为: want };
+      });
+      ok(checked > 0, '★★ 网格里至少有一格带「治疗 N」（有对象可校）', checked);
+      ok(bad === null, '★★ 每格「治疗 N」都等于当日应治疗人数（口径未松）', bad || '全部一致');
+      ok(stToday.treating.length >= 0, '★ 当日应治疗人数可读（口径锚点）', stToday.treating.length);
     }
 
     /* 待办渲染：未开始患者应出现，并带摘要条 */

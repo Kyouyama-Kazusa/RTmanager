@@ -340,7 +340,7 @@ button,input,select,textarea{font:inherit;color:inherit}
 var LS_KEY = 'radiotherapy.v1';
 var SNAP_PREFIX = 'radiotherapy.snap.';
 var SNAP_KEEP = 7;
-var APP_VERSION = '0.16.1';
+var APP_VERSION = '0.16.2';
 
 var SEXES = ['男', '女'];
 var PURPOSES = ['根治性', '术后辅助', '术前新辅助', '姑息性'];
@@ -2543,20 +2543,21 @@ function renderOverallCal() {
   });
   var cells = {};
   Object.keys(byDate).forEach(function (ds) {
-    var arr = byDate[ds];
-    var dn = arr.filter(function (a) { return a.it.done; }).length;
     var st = dayStat(ds);
-    /* ★ v0.16.0：去掉「待治疗」文字。
-       日历格子里只需要两个**人数**口径：
-         · calStatBadges 已给出「治疗 N」= 当日应治疗人数
-         · 这里再补「已完成 N」= 当日已完成次数
-       原先「一次都没完成」的日子会写「待治疗」，是一条**没有数字的定性文案**：
-       它占位却零信息（「治疗 3」已经说明当天有人要做），且与「已完成」并列时
-       一边是计数、一边是状态词，口径不齐。
-       现在未完成当天只显示「治疗 N」，靠 calStatBadges 的计数即可读懂：
-       治疗数 − 已完成数 = 当日待完成数，无需再写文字。
-       ★ 图例同步删掉「待治疗」一项（见 renderOverallCal 的 cal-legend）。 */
-    cells[ds] = calStatBadges(st) + (dn ? '<div class="tagline done">已完成 ' + dn + '</div>' : '');
+    /* ★ v0.16.1：日历格里只留**一项**人数 ——「治疗 N」= 当日应治疗人数。
+       曾经的演进：
+         · 更早：无完成时写一条定性文字「待治疗」→ 零信息、与计数口径不齐
+         · v0.16.0：删「待治疗」，补一条「已完成 N」
+         · v0.16.1：连「已完成 N」也去掉（用户：这两项统计没必要）
+       去掉的理由：格子是小方块，塞两行数字反而挤；而「已完成 N」本就是
+       **派生量** —— 未完成的日子只显示「治疗 N」，读者数一下即可，
+       真正要逐日核对完成情况时，点日期看日详情弹层更完整。
+       保留的仍是那两项**人数**口径的入口（日历格 = 应治疗人数；
+       日详情弹层 = 应治疗 / 已完成 逐条名单）。
+
+       ★ 注意：`dn` 变量一并删除。它只为这一行存在，留着会是个死变量。
+       但 `monthDone` 仍在用（页头「本月 N/M」），那是另一处、保留。 */
+    cells[ds] = calStatBadges(st);
   });
   /* 有「开始/结束」但没有当天治疗的日期（例如疗程首日恰逢休息日、或已归档患者的末日），
      也要可点击查看名单 —— 否则标注画得出来却点不开 */
@@ -2583,13 +2584,13 @@ function renderOverallCal() {
         '<span class="ms-i"><i class="b-end"></i>本月结束 ' + monthStat.ending + ' 人</span>' +
         '<span class="ms-i"><i class="b-treat"></i>本月治疗 ' + monthStat.treating + ' 人次</span></div>'
       : '') +
-    /* ★ v0.16.0：图例首项原为「有治疗安排」（含糊），改为「应治疗」——
-       与格内 calStatBadges 的「治疗 N」同指：当天应做治疗的人数（含已完成）。
-       与紧随其后的「已完成」并列，正好构成用户要求保留的那两项统计口径。
+    /* ★ v0.16.1：图例首项「应治疗」保留（与格内「治疗 N」同指）。
+       ★ 「已完成」色块**删掉** —— 它在本页已无对应物：格子只画「治疗 N」，
+         日详情弹层里的「已完成」是带文字的 chip，不靠颜色区分。
+         图例里留一个永远指不到东西的色块，比不写更容易误导。
        ★ 加 .bg 修饰类是为了让测试能精确匹配色块，而不误伤格内文案。 */
     '<div class="cal-legend">' +
     '<span><i class="bg" style="background:#e5f3f1"></i>应治疗</span>' +
-    '<span><i class="bg" style="background:#e5f3f1;opacity:.6"></i>已完成</span>' +
     '<span><i class="bg" style="background:#fdecea"></i>法定节假日</span>' +
     '<span><i class="bg" style="background:#fdf0e0"></i>调休上班</span>' +
     '<span><i class="bg" style="background:#fff;border:1px solid #0f766e"></i>今天</span>' +
@@ -6406,4 +6407,4 @@ init();
 </script>
 </body>
 </html>
-<!-- release: v0.16.1 日历每日统计口径（应治疗/已完成）+ 状态误报修正 -->
+<!-- release: v0.16.2 日历格只留「治疗 N」一项统计，图例同步删「已完成」色块 -->
