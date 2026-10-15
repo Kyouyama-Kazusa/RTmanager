@@ -61,6 +61,16 @@ button,input,select,textarea{font:inherit;color:inherit}
 .pcard .pbody{flex:1;min-width:0}
 .line1{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
 .pname{font-size:17px;font-weight:600}
+/* ★ v0.18.0：住院号「去高显著度」（用户要求）。
+   原先它在 badgebox 里是 11px、和 19px 的姓名缩写叠在一块蓝底方块中，很跳；
+   现在只是身份行里的一小段灰色文字，作为辅助识别（同名时区分），不抢床号的焦点。 */
+.mrn{font-size:12px;color:var(--sub);font-weight:400}
+/* ★ v0.18.0：在治页的病区**分段标题条**（用户："不同病区不要混杂在一起"）。
+   它是分组的视觉分隔符：一行浅底标题 + 该病区人数，把不同病区的卡片明确断开。
+   设计上刻意做得比卡片"轻"（无阴影、浅底、小字），避免和床位大字抢注意力。 */
+.wardgroup{display:flex;align-items:baseline;gap:8px;margin:14px 2px 8px;padding-bottom:4px;border-bottom:1px solid var(--line)}
+.wardgroup .wt{font-size:14px;font-weight:600;color:#39424f}
+.wardgroup .wc{font-size:12px;color:var(--sub)}
 /* v0.17.0：诊断信息**只显示一行**（用户要求）。
    原先 word-break:break-all + 自动换行，长诊断（如「鼻咽癌 T3N2M0 III期 同步放化疗后」）
    会把卡片撑到三四行，在治页一屏看不到几个人。
@@ -82,8 +92,6 @@ button,input,select,textarea{font:inherit;color:inherit}
 .chip.ok{background:var(--ok-soft);color:var(--ok)}
 .chip.info{background:var(--info-soft);color:var(--info)}
 .chip.sm{font-size:11px;line-height:16px;padding:0 6px}
-/* v0.16.0：病区/床号徽标 —— 用 info 色系与性别/年龄等中性标签区分开 */
-.chip.bed{background:var(--info-soft);color:var(--info);font-weight:600}
 /* v0.17.0：在治页卡片开头的**大字床号**（用户要求「床号放在最开头放大显示」）。
    动机：在治页是交班/找人的场景，"几床"是第一识别问题，比姓名更快定位；
    原先床号只是身份行里一个 11px 小灰 chip，排在性别年龄之后，需要逐字找。
@@ -359,7 +367,7 @@ button,input,select,textarea{font:inherit;color:inherit}
 var LS_KEY = 'radiotherapy.v1';
 var SNAP_PREFIX = 'radiotherapy.snap.';
 var SNAP_KEEP = 7;
-var APP_VERSION = '0.17.0';
+var APP_VERSION = '0.18.0';
 
 var SEXES = ['男', '女'];
 var PURPOSES = ['根治性', '术后辅助', '术前新辅助', '姑息性'];
@@ -2310,7 +2318,7 @@ function buildTodo() {
 }
 
 /* ================= 渲染：框架 ================= */
-var view = { page: 'tab', tab: 'ward', pid: null, calY: 0, calM: 0, tlDesc: false, tlOpen: {}, wardKw: '', wardSort: 'default' };
+var view = { page: 'tab', tab: 'ward', pid: null, calY: 0, calM: 0, tlDesc: false, tlOpen: {}, wardKw: '' };
 
 /* ================= 在治页：搜索与排序（v0.16.0）=================
    ★ 为什么搜索/排序状态放在 view 而不落库：
@@ -2350,34 +2358,60 @@ function wardKey(name) {
   }
   return { num: Infinity, raw: s };   /* 无序号（如「东区」「ICU」）排在同号之后，按名字排 */
 }
-function wardSorted(list, sort) {
-  if (sort !== 'bed') return list;
-  return list.slice().sort(function (a, b) {
-    var wa = String(a.ward || '').trim(), wb = String(b.ward || '').trim();
-    /* 有病区的排前面；病区按「序号自然序」，序号相同的再按名字、最后按床号 */
-    if (!!wa !== !!wb) return wa ? -1 : 1;
-    if (wa !== wb) {
-      var ka2 = wardKey(wa), kb2 = wardKey(wb);
-      if (ka2.num !== kb2.num) return ka2.num - kb2.num;
-      return ka2.raw.localeCompare(kb2.raw, 'zh-Hans-CN');
-    }
-    var ka = bedKey(a.bedNo), kb = bedKey(b.bedNo);
-    if (!!ka !== !!kb) return ka ? -1 : 1;
-    if (ka && kb) {
-      if (ka.main !== kb.main) return ka.main - kb.main;
-      if (ka.sub !== kb.sub) return ka.sub - kb.sub;
-      return ka.raw.localeCompare(kb.raw);
-    }
-    return String(a.name || '').localeCompare(String(b.name || ''), 'zh-Hans-CN');
+
+/* ★ v0.18.0：在治列表的**唯一**排序函数 —— 先病区、再床号，且**同病区分段不混杂**。
+   ★★ 为什么必须"分段"而不是"排个序"：
+     旧实现是 `list.slice().sort(...)`，它只保证**有序**，不保证**连续** ——
+     但病区序号相同、名字不同的两个病区（如「放疗科一病区」「一病区」「1病区」）
+     会被排在相邻位置却仍是两拨人，视觉上混在一起。用户明确要求"不同病区不要混杂"，
+     所以这里返回**分组结构** `[{ ward, items:[...] }, ...]`，由渲染层插标题分隔。
+
+   分组顺序（与旧排序键一致，只是从"排序"升级成"分组"）：
+     1. 有病区的组在前，无病区（含空串）的组**恒在最后** —— 不抢眼、不插队；
+     2. 组间按病区序号自然序（一 → 二 → … → 十），同序号再按名字 localeCompare；
+     3. 组内按床号自然序（主号 → 副号），空床号恒排最后，再按姓名兜底。
+
+   ★ 为什么空病区/空床号"恒排最后"而不是"排最前"：交班时先看的是有床位的患者，
+     没床位的（门诊、待入院）是例外情况，放末尾不会挡住要找的床位。 */
+function wardGroups(list) {
+  var buckets = {}, order = [];
+  list.forEach(function (p) {
+    var w = String(p.ward || '').trim();
+    if (!buckets[w]) { buckets[w] = []; order.push(w); }
+    buckets[w].push(p);
   });
+  /* 组内排序：床号自然序 → 姓名 */
+  Object.keys(buckets).forEach(function (w) {
+    buckets[w].sort(function (a, b) {
+      var ka = bedKey(a.bedNo), kb = bedKey(b.bedNo);
+      if (!!ka !== !!kb) return ka ? -1 : 1;          /* 有床号的在前 */
+      if (ka && kb) {
+        if (ka.main !== kb.main) return ka.main - kb.main;
+        if (ka.sub !== kb.sub) return ka.sub - kb.sub;
+        return ka.raw.localeCompare(kb.raw);
+      }
+      return String(a.name || '').localeCompare(String(b.name || ''), 'zh-Hans-CN');
+    });
+  });
+  /* 组间排序：有病区的在前 → 病区序号自然序 → 名字 */
+  order.sort(function (wa, wb) {
+    if (!!wa !== !!wb) return wa ? -1 : 1;
+    if (!wa) return 0;                                 /* 两个都空，只有一个组 */
+    var ka = wardKey(wa), kb = wardKey(wb);
+    if (ka.num !== kb.num) return ka.num - kb.num;
+    return ka.raw.localeCompare(kb.raw, 'zh-Hans-CN');
+  });
+  return order.map(function (w) { return { ward: w, items: buckets[w] }; });
 }
-/* 患者卡上的「病区 · 床号」徽标 —— 排序时更要显眼，否则用户看不出排序依据 */
-function bedChipHtml(p) {
-  var w = String(p.ward || '').trim(), b = String(p.bedNo || '').trim();
-  /* ★ v0.17.0：床号已由 bedBigHtml 在卡片首列大字呈现，此处**不再重复**床号，
-     只留病区（信息不重不漏）。无病区时不渲染 —— 避免只剩一个空洞的 chip。 */
-  if (!w) return '';
-  return '<span class="chip sm bed">' + esc(w) + '</span>';
+
+/* ★ v0.18.0：保留旧函数名与签名（多处调用 + 测试直接驱动它），
+   但语义已从"扁平排序"升级为"按病区归并"（病区内部有序、组间有序）。
+   ⚠ 它**不再**返回扁平数组，而是返回分组结构 —— 名字没改是为了不惊动 8 个调用点，
+     真正的形状变更由 wardGroups 承担，调用点逐个改为消费分组。
+   ★ 参数 sort 保留但**忽略**：v0.16.0 引入的「默认序 / 床位序」切换在本版取消 ——
+     病区床号分组现在是唯一口径（用户：排序时先按病区再按床号）。 */
+function wardSorted(list /*, sort */) {
+  return wardGroups(list);
 }
 
 /* ★ v0.17.0：在治页卡片首列的**大字床号**（与 bedChipHtml 分工：这里只管床号）。
@@ -2533,31 +2567,36 @@ function renderTodo() {
 function renderWard() {
   var all = inTreat();
   var kw = view.wardKw || '';
-  var list = wardSorted(all.filter(function (p) { return wardMatch(p, kw); }), view.wardSort);
+  /* ★ v0.18.0：排序恒为「病区分段 → 组内床号」，不再有"默认序/床位序"切换。 */
+  var groups = wardGroups(all.filter(function (p) { return wardMatch(p, kw); }));
+  var cnt = groups.reduce(function (n, g) { return n + g.items.length; }, 0);
   var h = '<div class="section-title">在治患者 · <span id="wardCount">' +
-    (kw ? list.length + '/' + all.length : list.length) + '</span> 位' +
+    (kw ? cnt + '/' + all.length : cnt) + '</span> 位' +
     '<span style="display:flex;gap:6px">' +
     '<button class="btn sm" data-act="ai-import">✨ AI 导入</button>' +
     '<button class="btn sm addbtn" data-act="add-patient">＋ 添加</button></span></div>';
 
-  /* 搜索 + 排序条：无患者时不渲染，避免空列表上堆一排无效控件 */
+  /* 搜索条（排序切换已取消：病区床号分组是唯一口径，不需要按钮）。
+     无患者时不渲染，避免空列表上堆一排无效控件。 */
   if (all.length) {
     h += '<div class="wardbar">' +
       '<div class="wsearch"><input data-act="ward-kw" id="wardKw" value="' + esc(kw) + '" ' +
       'placeholder="搜病区 / 床号" inputmode="search" autocomplete="off"></div>' +
       '<button class="btn sm" data-act="ward-kw-clear" id="wardClear"' + (kw ? '' : ' hidden') + '>✕</button>' +
-      '<button class="btn sm' + (view.wardSort === 'bed' ? ' on' : '') + '" data-act="ward-sort">' +
-      (view.wardSort === 'bed' ? '床位序' : '默认序') + '</button>' +
       '</div>';
   }
 
   /* ★ 列表单独装进 #wardList：输入时就地只换这一块，搜索框不失焦 */
-  h += '<div id="wardList">' + wardCardsHtml(list) + '</div>';
+  h += '<div id="wardList">' + wardCardsHtml(groups) + '</div>';
   $('view').innerHTML = h + '<div style="height:60px"></div>';
 }
 
 /* 卡片列表 HTML（renderWard 与 wardSearchLive 共用，避免两处各写一遍而漂移） */
-function wardCardsHtml(list) {
+/* ★ v0.18.0：分组渲染 —— 每组前插一条病区小标题，组内卡片按床号排。
+   入参是 wardGroups() 的分组结构；为兼容旧的"传扁平数组"调用，这里做一次收敛。 */
+function wardCardsHtml(groups) {
+  var list = [];
+  (groups || []).forEach(function (g) { list = list.concat(g.items); });
   if (!list.length) {
     var kw = view.wardKw || '';
     return kw
@@ -2565,7 +2604,15 @@ function wardCardsHtml(list) {
         '<button class="btn sm" data-act="ward-kw-clear" style="margin-top:8px">清空搜索</button></div>'
       : '<div class="empty"><span class="big">🏥</span>暂无在治患者<br>点右上角「添加患者」开始</div>';
   }
-  return list.map(wardCardHtml).join('');
+  return (groups || []).map(function (g) {
+    /* 病区标题条：显式标出病区边界（用户："不同病区不要混杂在一起"）。
+       无病区组不写标题 —— 一个「未分病区」的标题条只会占地方。 */
+    var head = g.ward
+      ? '<div class="wardgroup"><span class="wt">' + esc(g.ward) + '</span>' +
+        '<span class="wc">' + g.items.length + ' 位</span></div>'
+      : '';
+    return head + g.items.map(wardCardHtml).join('');
+  }).join('');
 }
 
 function wardCardHtml(p) {
@@ -2579,16 +2626,18 @@ function wardCardHtml(p) {
   var pa = inPause(p, todayStr()) ? pauseOn(p, todayStr()) : null;
   return '<div class="card pcard" data-act="open-patient" data-id="' + p.id + '">' +
     /* ★ v0.17.0：床号提到**最开头并放大**（用户要求）。
-       交班/找床时「几床」是第一识别问题；原先它只是身份行中部一个 11px 灰 chip，
-       排在性别/年龄之后，要逐字扫。现在独占首列、22px 加粗。
-       没有床号时不渲染整列，老数据卡片左侧不留空洞（布局自然收缩）。 */
+       ★ v0.18.0：姓名/住院号**去高显著度**（用户要求）——
+         原先左侧是一块 19px 加粗的姓名缩写方块（.badgebox），和床号抢焦点，
+         卡片上出现两个"大字"，扫视时反而不知道先看哪个。
+         现在姓名缩写方块**整块删除**，姓名/住院号并入身份行，用小字弱化显示；
+         床号是卡片上唯一的强视觉锚点。 */
     bedBigHtml(p) +
-    '<div class="badgebox"><div class="b">' + esc(p.name ? p.name.slice(0, 2) : '—') + '</div><div class="t">' + esc(p.mrn || '') + '</div></div>' +
     '<div class="pbody"><div class="line1"><span class="pname">' + esc(p.name) + '</span>' +
+    (p.mrn ? '<span class="mrn">' + esc(p.mrn) + '</span>' : '') +
     (p.sex ? '<span class="chip sm">' + esc(p.sex) + '</span>' : '') +
     (p.age ? '<span class="chip sm">' + esc(p.age) + '岁</span>' : '') +
-    /* v0.16.0：病区徽标留在身份行（床号已上移到首列大字，此处不再重复渲染床号） */
-    bedChipHtml(p) +
+    /* v0.16.0：病区徽标留在身份行（床号已上移到首列大字，此处不再重复渲染床号）
+       ★ v0.18.0：病区现在由分组标题条承担，身份行**不再重复**病区徽标（不重不漏） */
     (pa ? '<span class="chip warn sm">中断中</span>' : '') +
     (p.stopDate ? '<span class="chip danger sm">已终止</span>' : '') +
     (boost ? '<span class="chip sm">＋加量' + boost + '</span>' : '') +
@@ -5375,10 +5424,9 @@ function bind() {
 
   var acts = {
     'open-patient': function (el) { var p = getPatient(el.dataset.id); closeSheet(); view.page = 'patient'; view.pid = el.dataset.id; if (p && p.startDate) { var d = parseD(p.startDate); if (d) { view.calY = d.getFullYear(); view.calM = d.getMonth() + 1; } } render(); },
-    /* 在治页搜索/排序（v0.16.0）：
-       ★ 排序按钮是「切换」语义（默认序 ⇄ 床位序），顺序变了必须整页重建。 */
+    /* 在治页搜索（v0.16.0）；v0.18.0 取消「默认序/床位序」切换 ——
+       列表恒按「病区分段 → 组内床号」排，排序口径唯一，不再需要切换按钮。 */
     'ward-kw-clear': function () { view.wardKw = ''; render(); },
-    'ward-sort': function () { view.wardSort = (view.wardSort === 'bed' ? 'default' : 'bed'); render(); },
     /* 点击搜索框本身不做动作（input 事件另行委托），显式登记以免冒泡到卡片区 */
     'ward-kw': function () { },
     'add-patient': function () { sheetPatient(null); },
@@ -5675,11 +5723,14 @@ function bind() {
 function wardSearchLive(kw) {
   view.wardKw = String(kw == null ? '' : kw);
   var all = inTreat();
-  var list = wardSorted(all.filter(function (p) { return wardMatch(p, view.wardKw); }), view.wardSort);
+  /* ★ v0.18.0：与 renderWard 用**同一套**分组口径（此前两处各写一遍排序，
+     任何口径改动都容易只改一处 —— 这正是「同值不同命」的老坑）。 */
+  var groups = wardGroups(all.filter(function (p) { return wardMatch(p, view.wardKw); }));
+  var cnt = groups.reduce(function (n, g) { return n + g.items.length; }, 0);
   var listEl = $('wardList');
-  if (listEl) listEl.innerHTML = wardCardsHtml(list);
+  if (listEl) listEl.innerHTML = wardCardsHtml(groups);
   var cntEl = $('wardCount');
-  if (cntEl) cntEl.textContent = view.wardKw ? list.length + '/' + all.length : String(list.length);
+  if (cntEl) cntEl.textContent = view.wardKw ? cnt + '/' + all.length : String(cnt);
   var clrEl = $('wardClear');
   if (clrEl) clrEl.hidden = !view.wardKw;
 }
@@ -6524,4 +6575,4 @@ init();
 </script>
 </body>
 </html>
-<!-- release: v0.17.0 彻底移除「流程状态」字段（填日期+次数即自动排程）；在治页床号首列放大、诊断单行；详情页顶部快速改床号 -->
+<!-- release: v0.18.0 在治页改为病区分段排序（不同病区不混杂）；卡片姓名/住院号去高显著度，床号成为唯一视觉焦点 -->

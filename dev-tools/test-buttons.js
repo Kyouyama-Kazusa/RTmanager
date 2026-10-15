@@ -119,26 +119,21 @@ function typeIn(act, value, id) {
   /* ★ 测试桩里 #wardList 不是真 DOM 节点，wardSearchLive 写的 innerHTML 无处落地。
      这里用应用真实的渲染函数重算列表，并就地替换 #view 里的 <div id="wardList">…</div>，
      等价于浏览器里输入后的最终 DOM —— 从而能对「输入 → 列表更新」链路做真实断言，
-     而不是只断言 view.wardKw（那样测不到任何渲染缺陷）。 */
+     而不是只断言 view.wardKw（那样测不到任何渲染缺陷）。
+     ★ v0.18.0：与 renderWard 一样走 wardGroups + wardCardsHtml（分组结构），
+       并复用同一个 wardCardsHtml 生成分组标题 —— 桩里不再自己拼卡片，避免与产品漂移。 */
   if (act === 'ward-kw' && typeof wardCardsHtml === 'function' && typeof inTreat === 'function') {
     const v = getEl('view');
     const all = inTreat();
-    const list = wardSorted(all.filter(p => wardMatch(p, view.wardKw)), view.wardSort);
-    let cards = '';
-    if (!list.length) {
-      cards = view.wardKw
-        ? '<div class="empty">没有匹配「' + view.wardKw + '」的在治患者' +
-          '<button class="btn sm" data-act="ward-kw-clear">清空搜索</button></div>'
-        : '<div class="empty">暂无在治患者</div>';
-    } else {
-      cards = list.map(wardCardHtml).join('');
-    }
+    const groups = wardGroups(all.filter(p => wardMatch(p, view.wardKw)));
+    const cnt = groups.reduce((n, g) => n + g.items.length, 0);
+    const cards = wardCardsHtml(groups);
     if (v.innerHTML.indexOf('<div id="wardList">') >= 0) {
       v.innerHTML = v.innerHTML.replace(/<div id="wardList">[\s\S]*?<\/div>(?=<div style="height:60px">)/,
         '<div id="wardList">' + cards + '</div>');
       /* 计数同步就地更新（与 wardSearchLive 一致） */
       v.innerHTML = v.innerHTML.replace(/<span id="wardCount">[^<]*<\/span>/,
-        '<span id="wardCount">' + (view.wardKw ? list.length + '/' + all.length : list.length) + '</span>');
+        '<span id="wardCount">' + (view.wardKw ? cnt + '/' + all.length : cnt) + '</span>');
     }
   }
   return el;
@@ -742,7 +737,7 @@ resetUI(); group('16. 添加/编辑患者表单：分节折叠 + verifyAt 一致
   resetUI();
 }
 
-resetUI(); group('17. 在治页：病区/床号搜索与排序（v0.16.0）');
+resetUI(); group('17. 在治页：病区/床号搜索 + 病区分段排序（v0.16.0 → v0.18.0）');
 
 /* 构造 4 位在治患者：病区/床号刻意错开，覆盖「床位自然序」的坑。
    ★ 原地替换数组元素（splice）而非重绑 state，避免与 eval 作用域纠缠。 */
@@ -764,27 +759,31 @@ function countIn(html) {
   const m = String(html).match(/<span id="wardCount">([^<]*)<\/span>/);
   return m ? m[1] : null;
 }
+/* 列表内患者卡片的 data-id 顺序（只取 #wardList 段） */
 function listIds(html) {
   const seg = String(html).slice(String(html).indexOf('<div id="wardList">'));
   return [...seg.matchAll(/data-id="(w\d)"/g)].map(m => m[1]);
 }
+/* ★ v0.18.0：取出病区分段标题条的文字序列（用于断言"分组标题真的渲染了、且顺序正确"） */
+function groupTitles(html) {
+  const seg = String(html).slice(String(html).indexOf('<div id="wardList">'));
+  return [...seg.matchAll(/<div class="wardgroup"><span class="wt">([^<]*)<\/span>/g)].map(m => m[1]);
+}
 function wardRender() { view.page = 'tab'; view.tab = 'ward'; render(); return getEl('view').innerHTML; }
 
 {
-  /* ---- 17a 默认态：四位都在，保持录入顺序 ---- */
+  /* ---- 17a 默认态：四位都在，搜索条在、排序按钮**已取消** ---- */
   wardState();
-  view.wardKw = ''; view.wardSort = 'default';
+  view.wardKw = '';
   const w0 = wardRender();
-  ok(w0.indexOf('wardbar') >= 0, '★ 有患者时渲染出搜索/排序条');
+  ok(w0.indexOf('wardbar') >= 0, '★ 有患者时渲染出搜索条');
   ok(w0.indexOf('data-act="ward-kw"') >= 0, '有搜索输入框');
-  ok(w0.indexOf('data-act="ward-sort"') >= 0, '有排序切换按钮');
-  ok(w0.indexOf('默认序') >= 0, '默认按钮文案为「默认序」');
+  /* ★ v0.18.0：排序切换按钮取消 —— 病区床号分组是唯一口径，没有"另一种顺序"可切 */
+  ok(w0.indexOf('data-act="ward-sort"') < 0, '★★ 不再有「默认序/床位序」切换按钮');
+  ok(w0.indexOf('默认序') < 0 && w0.indexOf('床位序') < 0, '★★ 两个按钮文案都不再出现');
   ok(countIn(w0) === '4', '计数显示 4 位（无筛选时不显示分母）', countIn(w0));
   ok((w0.match(/class="card pcard"/g) || []).length === 4, '渲染 4 张卡片');
-  /* ★ v0.17.0：床号从「病区 · 床号」小徽标**上移**为卡片首列大字（pbed），
-     病区徽标只留病区名。此处按新结构断言两处都在，且不再重复渲染床号。 */
-  ok(w0.indexOf('放疗科一病区') >= 0, '★ 卡片显示病区徽标');
-  ok(w0.indexOf('放疗科一病区 · 12床') < 0, '★★ 病区徽标不再重复携带床号（床号已在首列大字）');
+  /* ★ v0.17.0：床号从「病区 · 床号」小徽标**上移**为卡片首列大字（pbed） */
   ok(/class="pbed"><div class="n">12<\/div>/.test(w0), '★★ 床号 12 以首列大字渲染（pbed.n）');
 
   /* ---- 17b 搜索：按病区筛选 ---- */
@@ -812,42 +811,58 @@ function wardRender() { view.page = 'tab'; view.tab = 'ward'; render(); return g
   fire('ward-kw-clear');
   ok(view.wardKw === '' && countIn(getEl('view').innerHTML) === '4', '★「✕」清空搜索并恢复全量', countIn(getEl('view').innerHTML));
 
-  /* ---- 17f ★ 床位序：纯数字按数值（不是字符串！）---- */
-  view.wardSort = 'default'; wardRender();
-  ok(listIds(getEl('view').innerHTML).join(',') === 'w1,w2,w3,w4', '默认序保持录入顺序', listIds(getEl('view').innerHTML).join(','));
+  /* ---- 17f ★★ 分组排序：病区为一级、床号为二级，无病区恒最后 ----
+     ★ v0.18.0：不再需要点击切换 —— 列表**恒**按病区分组。 */
+  const g0 = wardRender();
+  const ids0 = listIds(g0);
+  ok(ids0.join(',') === 'w2,w1,w3,w4',
+    '★★ 恒按病区分组：同一病区内 2 床在 12 床之前（数值序，非字符串序）', ids0.join(','));
+  /* 一病区(乙2床, 甲12床) → 二病区(丙3-2) → 无病区(丁) */
+  ok(ids0[ids0.length - 1] === 'w4', '★ 无病区无床号者恒排最后（不插到最前干扰找床）');
 
-  fire('ward-sort');
-  ok(view.wardSort === 'bed', '★ 点击切换为床位序');
-  ok(getEl('view').innerHTML.indexOf('床位序') >= 0, '按钮文案同步为「床位序」');
-  /* 一病区 2 床(乙) → 12 床(甲)，然后二病区 3-2(丙)，最后无床位(丁) */
-  const after = listIds(getEl('view').innerHTML);
-  ok(after.join(',') === 'w2,w1,w3,w4', '★★ 床位序：2 床在 12 床之前（数值序，非字符串序）', after.join(','));
-  ok(after[after.length - 1] === 'w4', '★ 无病区无床号者恒排最后（不插到最前干扰找床）');
+  /* ---- 17g ★★ 病区标题条：显式标出病区边界，"不同病区不混杂" ---- */
+  const titles0 = groupTitles(g0);
+  ok(titles0.join('|') === '放疗科一病区|放疗科二病区',
+    '★★ 按病区序号渲染分段标题条（一病区 → 二病区）', titles0.join('|'));
+  ok(g0.indexOf('<span class="wc">2 位</span>') >= 0, '★ 标题条带该病区人数（2 位）');
+  ok((g0.match(/class="wardgroup"/g) || []).length === 2,
+    '★★ 只对有床区者渲染标题条，无病区组不写标题（不占地方）');
 
-  /* ---- 17g ★ 排序与搜索可叠加 ---- */
+  /* ---- 17h ★★ 防混杂：同病区卡片必须**连续**，中间不能被别的病区插入 ----
+     这是"分段"与"仅排序"的本质区别：只排序时，两个同序号病区会相邻但混在一起。 */
+  {
+    const w = String(getEl('view').innerHTML);
+    const seq = [...w.slice(w.indexOf('<div id="wardList">')).matchAll(/data-id="(w\d)"/g)].map(m => m[1]);
+    const firstWard = seq.slice(0, 2), secondWard = seq.slice(2, 3);
+    ok(firstWard.join(',') === 'w2,w1', '一病区两位连续排列', firstWard.join(','));
+    ok(secondWard.join(',') === 'w3', '二病区紧随其后，不插进一病区中间', secondWard.join(','));
+  }
+
+  /* ---- 17i ★ 搜索与分组叠加 ---- */
   typeIn('ward-kw', '放疗科一病区');
-  ok(listIds(getEl('view').innerHTML).join(',') === 'w2,w1', '★★ 搜索 + 床位序叠加生效', listIds(getEl('view').innerHTML).join(','));
+  ok(listIds(getEl('view').innerHTML).join(',') === 'w2,w1', '★★ 搜索 + 分组叠加生效', listIds(getEl('view').innerHTML).join(','));
   ok(countIn(getEl('view').innerHTML) === '2/4', '叠加时计数仍为命中/总数');
-
-  /* ---- 17h ★ 就地刷新：只换列表与计数，不重建搜索框 ---- */
+  ok(groupTitles(getEl('view').innerHTML).join('|') === '放疗科一病区', '★ 筛选后只渲染命中病区的标题条');
   fire('ward-kw-clear');
-  view.wardSort = 'default'; wardRender();
+
+  /* ---- 17j ★ 就地刷新：只换列表与计数，不重建搜索框 ---- */
+  wardRender();
   typeIn('ward-kw', '一病区');
   ok(view.wardKw === '一病区', '★ 连续输入后关键词保持在视图状态（输入框未被重建清空）');
   ok(getEl('view').innerHTML.indexOf('甲') >= 0, '就地刷新确实换掉了列表内容');
   ok(countIn(getEl('view').innerHTML) === '2/4', '计数随输入同步就地更新', countIn(getEl('view').innerHTML));
 
-  /* ---- 17i 无患者时不渲染搜索条 ---- */
+  /* ---- 17k 无患者时不渲染搜索条 ---- */
   state.patients.splice(0, state.patients.length);
-  view.wardKw = ''; view.wardSort = 'default';
+  view.wardKw = '';
   const wNone = wardRender();
-  ok(wNone.indexOf('wardbar') < 0, '★ 无患者时不渲染搜索/排序条');
+  ok(wNone.indexOf('wardbar') < 0, '★ 无患者时不渲染搜索条');
   ok(wNone.indexOf('暂无在治患者') >= 0, '无患者时是原「暂无在治患者」空态');
 
-  /* ---- 17j 非在治患者不进列表（搜索/排序都不得越界）---- */
+  /* ---- 17l 非在治患者不进列表（搜索/分组都不得越界）---- */
   wardState();
   state.patients[0].status = '治疗完成';
-  view.wardKw = ''; view.wardSort = 'bed';
+  view.wardKw = '';
   const wDone = wardRender();
   ok(countIn(wDone) === '3', '治疗完成者不计入在治（3 位）', countIn(wDone));
   ok(listIds(wDone).indexOf('w1') < 0, '★ 非在治患者不出现在列表（搜索/排序都在在治集合内进行）', listIds(wDone).join(','));
@@ -863,7 +878,7 @@ resetUI(); group('18. 在治页卡片：床号前置放大 + 诊断单行（v0.1
        **空值不留洞（无床号时整列不渲染，布局自然塌陷）**。 */
 
   wardState();
-  view.wardKw = ''; view.wardSort = 'default';
+  view.wardKw = '';
   const w = wardRender();
   const c1 = wardCardHtml(state.patients[0]);        /* 甲：病区一 · 12 床 */
   const c3 = wardCardHtml(state.patients[2]);        /* 丙：床号 3-2（带副号） */
@@ -875,13 +890,16 @@ resetUI(); group('18. 在治页卡片：床号前置放大 + 诊断单行（v0.1
   ok(/class="pbed"><div class="n">12<\/div><div class="u">床<\/div>/.test(c1),
     '★★ 大字下方是单位行「床」（无副号时不带多余分隔符）');
 
-  /* ---- 18b「放在最开头」是位置约束：pbed 必须早于 badgebox ---- */
+  /* ---- 18b「放在最开头」是位置约束：pbed 必须是卡片正文的第一个元素 ---- */
   {
     const iP = c1.indexOf('class="pbed"');
-    const iB = c1.indexOf('class="badgebox"');
-    ok(iP >= 0 && iB >= 0, '前置：卡片同时有 pbed 与 badgebox', iP + '/' + iB);
-    ok(iP >= 0 && iB >= 0 && iP < iB,
-      '★★ 床号列在徽标列**之前**（用户要求"最开头"）', { pbed: iP, badgebox: iB });
+    const iB = c1.indexOf('class="pbody"');
+    ok(iP >= 0 && iB >= 0, '前置：卡片同时有 pbed 与 pbody', iP + '/' + iB);
+    ok(iP >= 0 && iB >= 0 && iP < iB, '★★ 床号列在信息正文**之前**（用户要求"最开头"）', { pbed: iP, pbody: iB });
+    /* 卡片标签之后紧跟的就是床号（不得有任何元素插在它前面） */
+    const afterTag = c1.slice(c1.indexOf('>') + 1);
+    ok(/^<div class="pbed">/.test(afterTag),
+      '★★ 床号是卡片**第一个**渲染元素（紧跟开标签）', afterTag.slice(0, 60));
   }
 
   /* ---- 18c 自由文本床号不得被正则吞掉：3-2 → 主 3 / 副 2 ---- */
@@ -889,15 +907,38 @@ resetUI(); group('18. 在治页卡片：床号前置放大 + 诊断单行（v0.1
   ok(/<div class="u">2 · 床<\/div>/.test(c3),
     '★★ 复合床号副号 2 显示在单位行（"2 · 床"），不丢信息');
 
-  /* ---- 18d 无床号 → 整列不渲染（不留空洞），但徽标列仍在 ---- */
+  /* ---- 18d 无床号 → 整列不渲染（不留空洞），但正文仍在 ---- */
   ok(c4.indexOf('class="pbed"') < 0,
     '★★ 无床号时不渲染 .pbed 列（flex 自然塌陷，不留空洞）');
-  ok(c4.indexOf('class="badgebox"') >= 0, '对照：徽标列仍渲染（不能连徽标一起省掉）');
+  ok(c4.indexOf('class="pbody"') >= 0, '对照：正文仍渲染（不能连正文一起省掉）');
 
-  /* ---- 18e 病区徽标不再重复携带床号（分流：大字管床号，徽标管病区）---- */
-  ok(c1.indexOf('放疗科一病区') >= 0, '★ 卡片保留病区徽标');
-  ok(c1.indexOf('放疗科一病区 · 12床') < 0,
-    '★★ 病区徽标**不再**重复携带床号（床号已在首列大字）');
+  /* ---- 18e ★★ 姓名/住院号去高显著度（v0.18.0，用户要求）---- */
+  {
+    /* ① 左侧高对比姓名缩写方块整块删除（不再与床号抢焦点） */
+    ok(c1.indexOf('class="badgebox"') < 0,
+      '★★ 卡片不再渲染 badgebox（姓名缩写方块已删除）');
+    /* ② 姓名/住院号并入身份行、以弱化样式呈现 */
+    ok(/<span class="pname">甲<\/span>/.test(c1), '★ 姓名仍在身份行（可读，只是不再是大方块）');
+    ok(/<span class="mrn">M1<\/span>/.test(c1), '★★ 住院号改为 .mrn 弱化小字（不再高显著）');
+    /* ③ 卡片上只应有一个"大字"锚点 —— 即床号 */
+    ok((c1.match(/class="pbed"/g) || []).length === 1 && (c1.match(/class="badgebox"/g) || []).length === 0,
+      '★★ 卡片上唯一的强视觉锚点是大字床号');
+    /* ④ 病区不再重复出现在身份行（改由分组标题条承担，不重不漏） */
+    ok(c1.indexOf('放疗科一病区') < 0,
+      '★★ 身份行不再重复渲染病区徽标（病区由分段标题条承担）');
+  }
+
+  /* ---- 18f 弱化样式的字号/颜色必须真的"弱"（防止只是删了方块、字号仍大）---- */
+  {
+    const styleBlock = (html.match(/<style>([\s\S]*?)<\/style>/) || ['', ''])[1];
+    const m = styleBlock.match(/\.mrn\s*\{([^}]*)\}/);
+    ok(!!m, '★★ 存在 .mrn 样式');
+    const fs = m ? Number((m[1].match(/font-size\s*:\s*(\d+)/) || [0, 0])[1]) : 0;
+    ok(fs > 0 && fs <= 13, '★★ .mrn 字号 ≤ 13px（弱化，与 17px 姓名区分）', fs + 'px');
+    const pm = styleBlock.match(/\.pbed\s*\.n\s*\{([^}]*)\}/);
+    const pfs = pm ? Number((pm[1].match(/font-size\s*:\s*(\d+)/) || [0, 0])[1]) : 0;
+    ok(fs > 0 && pfs > fs, '★★ 床号字号 > 住院号字号（床号才是视觉焦点）', pfs + ' > ' + fs);
+  }
 
   /* ---- 18f 诊断单行：CSS 三件套（nowrap + hidden + ellipsis）齐备且挂在 .pdiag
      ★ 从 index.html 源码里取 <style> 段断言 —— 单行省略是纯 CSS 行为，
