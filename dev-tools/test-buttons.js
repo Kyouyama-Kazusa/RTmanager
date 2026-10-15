@@ -217,7 +217,7 @@ ok(!!sheetCtx, '「添加患者」打开表单');
 getEl('sheetBody').__vals = { name: '新患者甲', mrn: 'M900', sex: '男', diagnosis: '测试病', purpose: '根治性', technique: 'IMRT', fractions: '10', totalDose: '20', dosePerFraction: '2', startDate: todayStr() };
 /* 直接调用表单保存回调 */
 const pForm = sheetCtx;
-pForm.onSave({ name: '新患者甲', mrn: 'M900', sex: '男', age: '50', diagnosis: '测试病', purpose: '根治性', technique: 'IMRT', physician: '', planStatus: '已通过', totalDose: '20', fractions: '10', dosePerFraction: '2', simDate: '', startDate: todayStr(), position: '' });
+pForm.onSave({ name: '新患者甲', mrn: 'M900', sex: '男', age: '50', diagnosis: '测试病', purpose: '根治性', technique: 'IMRT', physician: '', totalDose: '20', fractions: '10', dosePerFraction: '2', simDate: '', startDate: todayStr(), position: '' });
 ok(state.patients.length === before + 1, '添加患者成功（' + before + ' → ' + state.patients.length + '）', state.patients.length);
 const np = state.patients[state.patients.length - 1];
 ok(np.name === '新患者甲', '患者信息正确写入', np.name);
@@ -226,7 +226,7 @@ ok(computeSchedule(np).length === 10, '★ 自动排程生效（10 次）', comp
 /* 编辑 */
 fire('edit-patient', { id: np.id });
 view.pid = np.id;
-cap(function(){ sheetPatient(np); }).onSave({ name: '新患者乙', mrn: 'M901', sex: '男', age: '51', diagnosis: '测试病2', purpose: '姑息性', technique: 'VMAT', physician: '张医生', planStatus: '已通过', totalDose: '30', fractions: '15', dosePerFraction: '2', simDate: '', startDate: todayStr(), position: '' });
+cap(function(){ sheetPatient(np); }).onSave({ name: '新患者乙', mrn: 'M901', sex: '男', age: '51', diagnosis: '测试病2', purpose: '姑息性', technique: 'VMAT', physician: '张医生', totalDose: '30', fractions: '15', dosePerFraction: '2', simDate: '', startDate: todayStr(), position: '' });
 ok(np.name === '新患者乙' && np.fractions === '15', '编辑患者成功', np.name + '/' + np.fractions);
 ok(computeSchedule(np).length === 15, '改总次数后自动重排（15 次）', computeSchedule(np).length);
 
@@ -639,19 +639,24 @@ resetUI(); group('16. 添加/编辑患者表单：分节折叠 + verifyAt 一致
   /* ---- 16b 折叠不丢字段：name 集合必须完整且不多不少 ----
      sheetValues() 按 name 收集；折叠态用 <details> 子元素仍在 DOM。 */
   /* v0.16.0：基本信息节新增「所在病区 / 床号」，故期望集合由 17 → 19。
+     ★ v0.17.0：移除「流程状态」下拉，集合由 19 → 18。
      ★ 这里守的是「折叠不丢字段」——集合必须完整且不多不少；
        新增字段时**同步改这个白名单**是刻意设计：任何字段变更都必须在测试里显式登记，
        杜绝「表单悄悄多/少一个 input 而无人察觉」。 */
   const wantNames = ['name', 'mrn', 'sex', 'age', 'ward', 'bedNo',
     'diagnosis', 'purpose', 'technique', 'physician',
-    'planStatus', 'totalDose', 'fractions', 'dosePerFraction', 'simDate', 'startDate', 'position',
+    'totalDose', 'fractions', 'dosePerFraction', 'simDate', 'startDate', 'position',
     'verifyFractions', 'verifyNote'];
   const gotNames = [...nb.matchAll(/name="([^"]+)"/g)].map(m => m[1]);
-  ok(gotNames.length === wantNames.length, '★ 字段数不变（19 个）', gotNames.length);
+  ok(gotNames.length === wantNames.length, '★ 字段数不变（18 个，v0.17.0 去掉流程状态）', gotNames.length);
   ok(wantNames.every(n => gotNames.indexOf(n) >= 0), '★ 所有既有 name 都保留（改名会打断数据与断言）',
     wantNames.filter(n => gotNames.indexOf(n) < 0));
   ok(gotNames.every(n => wantNames.indexOf(n) >= 0), '没有新增未预期的 name',
     gotNames.filter(n => wantNames.indexOf(n) < 0));
+  /* ★★ v0.17.0 反向红线：表单里不得再出现「流程状态」下拉（既无 name 也无 label）。 */
+  ok(gotNames.indexOf('planStatus') < 0, '★★ 表单不再渲染 planStatus 输入（v0.17.0 移除）');
+  ok(nb.indexOf('流程状态') < 0, '★★ 表单不再有「流程状态」字样');
+  ok(nb.indexOf('流程') < 0, '★★ 表单内无任何「流程」相关文案');
   ok(/name="ward"[\s\S]*name="bedNo"/.test(nb), '★ 病区/床号成对渲染，且同属基本信息节（选填定位信息）');
   ok(/name="verifyFractions"[\s\S]*name="verifyNote"/.test(nb), '折叠节里的字段确实渲染进了 body');
 
@@ -668,7 +673,7 @@ resetUI(); group('16. 添加/编辑患者表单：分节折叠 + verifyAt 一致
   state = normalize({ version: 2, updatedAt: '', patients: [] });
   cap(function () { sheetPatient(null); }).onSave({
     name: '验证一致性', mrn: '', sex: '男', age: '50', diagnosis: 'd', purpose: '根治性', technique: 'IMRT',
-    physician: '', planStatus: '待定位', totalDose: '60', fractions: '30', dosePerFraction: '2',
+    physician: '', totalDose: '60', fractions: '30', dosePerFraction: '2',
     simDate: '', startDate: '', position: '', verifyFractions: '10,20', verifyNote: '复位+CBCT'
   });
   const npv = state.patients[state.patients.length - 1];
@@ -682,7 +687,7 @@ resetUI(); group('16. 添加/编辑患者表单：分节折叠 + verifyAt 一致
   /* ---- 16e 编辑分支行为不变（反向对照）---- */
   cap(function () { sheetPatient(npv); }).onSave({
     name: npv.name, mrn: npv.mrn, sex: npv.sex, age: npv.age, diagnosis: npv.diagnosis,
-    purpose: npv.purpose, technique: npv.technique, physician: npv.physician, planStatus: npv.planStatus,
+    purpose: npv.purpose, technique: npv.technique, physician: npv.physician,
     totalDose: npv.totalDose, fractions: npv.fractions, dosePerFraction: npv.dosePerFraction,
     simDate: npv.simDate, startDate: npv.startDate, position: npv.position,
     verifyFractions: '10', verifyNote: '复位+CBCT'
@@ -694,7 +699,7 @@ resetUI(); group('16. 添加/编辑患者表单：分节折叠 + verifyAt 一致
   npv.verifyAt = { fractions: '10,20', note: '', done: ['10', '20'] };
   cap(function () { sheetPatient(npv); }).onSave({
     name: npv.name, mrn: npv.mrn, sex: npv.sex, age: npv.age, diagnosis: npv.diagnosis,
-    purpose: npv.purpose, technique: npv.technique, physician: npv.physician, planStatus: npv.planStatus,
+    purpose: npv.purpose, technique: npv.technique, physician: npv.physician,
     totalDose: npv.totalDose, fractions: npv.fractions, dosePerFraction: npv.dosePerFraction,
     simDate: npv.simDate, startDate: npv.startDate, position: npv.position,
     verifyFractions: '10', verifyNote: ''
@@ -727,7 +732,7 @@ resetUI(); group('16. 添加/编辑患者表单：分节折叠 + verifyAt 一致
   toastMsgs = [];
   const r = cap(function () { sheetPatient(null); }).onSave({
     name: '非法验证', mrn: '', sex: '男', age: '', diagnosis: '', purpose: '根治性', technique: 'IMRT',
-    physician: '', planStatus: '待定位', totalDose: '', fractions: '', dosePerFraction: '',
+    physician: '', totalDose: '', fractions: '', dosePerFraction: '',
     simDate: '', startDate: '', position: '', verifyFractions: 'abc', verifyNote: ''
   });
   ok(r === false, '非法验证次数被拦下（onSave 返回 false，弹层不关闭）', r);
@@ -776,7 +781,11 @@ function wardRender() { view.page = 'tab'; view.tab = 'ward'; render(); return g
   ok(w0.indexOf('默认序') >= 0, '默认按钮文案为「默认序」');
   ok(countIn(w0) === '4', '计数显示 4 位（无筛选时不显示分母）', countIn(w0));
   ok((w0.match(/class="card pcard"/g) || []).length === 4, '渲染 4 张卡片');
-  ok(w0.indexOf('放疗科一病区 · 12床') >= 0, '★ 卡片显示「病区 · 床号」徽标');
+  /* ★ v0.17.0：床号从「病区 · 床号」小徽标**上移**为卡片首列大字（pbed），
+     病区徽标只留病区名。此处按新结构断言两处都在，且不再重复渲染床号。 */
+  ok(w0.indexOf('放疗科一病区') >= 0, '★ 卡片显示病区徽标');
+  ok(w0.indexOf('放疗科一病区 · 12床') < 0, '★★ 病区徽标不再重复携带床号（床号已在首列大字）');
+  ok(/class="pbed"><div class="n">12<\/div>/.test(w0), '★★ 床号 12 以首列大字渲染（pbed.n）');
 
   /* ---- 17b 搜索：按病区筛选 ---- */
   typeIn('ward-kw', '一病区');
@@ -843,6 +852,146 @@ function wardRender() { view.page = 'tab'; view.tab = 'ward'; render(); return g
   ok(countIn(wDone) === '3', '治疗完成者不计入在治（3 位）', countIn(wDone));
   ok(listIds(wDone).indexOf('w1') < 0, '★ 非在治患者不出现在列表（搜索/排序都在在治集合内进行）', listIds(wDone).join(','));
   resetUI();
+}
+
+resetUI(); group('18. 在治页卡片：床号前置放大 + 诊断单行（v0.17.0）');
+
+{
+  /* ★ 用户原话：「将床号放在患者卡最开头放大显示」「简要诊断信息仅展示一行，不要全部显示」
+     ★ 这一组的核心不是"有没有床号"，而是：**位置（最开头）**、**字号（放大）**、
+       **不重复（病区徽标不再带床号）**、**不吞输入（自由文本床号必须原样显示）**、
+       **空值不留洞（无床号时整列不渲染，布局自然塌陷）**。 */
+
+  wardState();
+  view.wardKw = ''; view.wardSort = 'default';
+  const w = wardRender();
+  const c1 = wardCardHtml(state.patients[0]);        /* 甲：病区一 · 12 床 */
+  const c3 = wardCardHtml(state.patients[2]);        /* 丙：床号 3-2（带副号） */
+  const c4 = wardCardHtml(state.patients[3]);        /* 丁：无病区无床号 */
+
+  /* ---- 18a 大字床号：主号进 .n，单位行「N 床」进 .u ---- */
+  ok(/class="pbed"><div class="n">12<\/div>/.test(c1),
+    '★★ 床号 12 以首列大字渲染（.pbed > .n）', c1.slice(0, 200));
+  ok(/class="pbed"><div class="n">12<\/div><div class="u">床<\/div>/.test(c1),
+    '★★ 大字下方是单位行「床」（无副号时不带多余分隔符）');
+
+  /* ---- 18b「放在最开头」是位置约束：pbed 必须早于 badgebox ---- */
+  {
+    const iP = c1.indexOf('class="pbed"');
+    const iB = c1.indexOf('class="badgebox"');
+    ok(iP >= 0 && iB >= 0, '前置：卡片同时有 pbed 与 badgebox', iP + '/' + iB);
+    ok(iP >= 0 && iB >= 0 && iP < iB,
+      '★★ 床号列在徽标列**之前**（用户要求"最开头"）', { pbed: iP, badgebox: iB });
+  }
+
+  /* ---- 18c 自由文本床号不得被正则吞掉：3-2 → 主 3 / 副 2 ---- */
+  ok(/class="pbed"><div class="n">3<\/div>/.test(c3), '★★ 复合床号 3-2 主号为 3', c3.slice(0, 200));
+  ok(/<div class="u">2 · 床<\/div>/.test(c3),
+    '★★ 复合床号副号 2 显示在单位行（"2 · 床"），不丢信息');
+
+  /* ---- 18d 无床号 → 整列不渲染（不留空洞），但徽标列仍在 ---- */
+  ok(c4.indexOf('class="pbed"') < 0,
+    '★★ 无床号时不渲染 .pbed 列（flex 自然塌陷，不留空洞）');
+  ok(c4.indexOf('class="badgebox"') >= 0, '对照：徽标列仍渲染（不能连徽标一起省掉）');
+
+  /* ---- 18e 病区徽标不再重复携带床号（分流：大字管床号，徽标管病区）---- */
+  ok(c1.indexOf('放疗科一病区') >= 0, '★ 卡片保留病区徽标');
+  ok(c1.indexOf('放疗科一病区 · 12床') < 0,
+    '★★ 病区徽标**不再**重复携带床号（床号已在首列大字）');
+
+  /* ---- 18f 诊断单行：CSS 三件套（nowrap + hidden + ellipsis）齐备且挂在 .pdiag
+     ★ 从 index.html 源码里取 <style> 段断言 —— 单行省略是纯 CSS 行为，
+       DOM 桩里没有真排版引擎，只有对声明本身下断言才靠谱。 */
+  {
+    const styleBlock = (html.match(/<style>([\s\S]*?)<\/style>/) || ['', ''])[1];
+    ok(/\.pdiag\s*\{[^}]*white-space\s*:\s*nowrap/.test(styleBlock),
+      '★★ .pdiag 有 white-space:nowrap（单行前提）');
+    ok(/\.pdiag\s*\{[^}]*overflow\s*:\s*hidden/.test(styleBlock), '★★ .pdiag 有 overflow:hidden');
+    ok(/\.pdiag\s*\{[^}]*text-overflow\s*:\s*ellipsis/.test(styleBlock),
+      '★★ .pdiag 有 text-overflow:ellipsis（超长打省略号）');
+    ok(/<div class="pdiag">/.test(c1), '诊断信息用 .pdiag 容器渲染');
+  }
+
+  /* ---- 18g 大字床号的样式也在（字号确实"放大"了，而不是只是挪了位置）---- */
+  {
+    const styleBlock = (html.match(/<style>([\s\S]*?)<\/style>/) || ['', ''])[1];
+    const m = styleBlock.match(/\.pbed\s*\.n\s*\{([^}]*)\}/);
+    ok(!!m, '★★ 存在 .pbed .n 样式（大字床号）');
+    const fs = m ? Number((m[1].match(/font-size\s*:\s*(\d+)/) || [0, 0])[1]) : 0;
+    ok(fs >= 20, '★★ 大字床号 font-size ≥ 20px（"放大"是字号约束，非仅位置）', fs + 'px');
+  }
+
+  resetUI();
+}
+
+resetUI(); group('19. 患者详情页：顶部床位快速编辑（v0.17.0）');
+
+{
+  /* ★ 用户原话：「患者信息页面，增加将编辑床号功能提升到顶部，方便快速设置」
+     ★ 断言重点：① 位置在**顶部**（早于诊断行）；② 按钮自带 data-id（详情境铁律）；
+       ③ 空值也渲染入口（"设置"），入口不能时有时无；④ 端到端：点开 → 保存 →
+          只改床位两个字段，**其他字段不被触碰**（轻量弹层的承诺）。 */
+
+  const p = inState({ name: '床位甲', mrn: 'B1', ward: '放疗科一病区', bedNo: '12',
+    diagnosis: '鼻咽癌 III期', physician: '张医生', status: '在治' });
+  view.page = 'patient'; view.pid = p.id; render();
+
+  /* 前置：真的渲染到了详情页（原则 20：不能对着别的页面下判断） */
+  ok(getEl('title').textContent === p.name,
+    '★★ 前置：详情页真的被渲染（title 为患者姓名）', getEl('title').textContent);
+
+  const d = getEl('view').innerHTML;
+  const iBed = d.indexOf('class="kv bedrow"');
+  const iDiag = d.indexOf('>诊断<');
+  ok(iBed >= 0, '★★ 详情页渲染出床位行（.kv.bedrow）');
+  ok(iBed >= 0 && iDiag >= 0 && iBed < iDiag,
+    '★★ 床位行在**诊断行之前**（"提升到顶部"）', { bedrow: iBed, diag: iDiag });
+  ok(d.indexOf('<b>12</b> 床') >= 0, '★ 床位行显示当前床号');
+  ok(/data-act="bed-edit"[^>]*data-id="/.test(d),
+    '★★ 改床号按钮自带 data-id（详情境必须自证身份）');
+
+  /* ---- 19a 端到端：点击 → 弹层 → 保存 → 数据落到正确的字段 ---- */
+  {
+    const tags = String(d).match(/<button[^>]*data-act="bed-edit"[^>]*>/g) || [];
+    ok(tags.length === 1, '★ 详情页有且只有一个改床号入口');
+    const btn = makeEl();
+    (tags[0].match(/data-([a-z-]+)="([^"]*)"/g) || []).forEach(function (a) {
+      const m = a.match(/data-([a-z-]+)="([^"]*)"/);
+      if (m) btn.dataset[m[1].replace(/-(\w)/g, function (_, c) { return c.toUpperCase(); })] = m[2];
+    });
+    clickHandler({ target: btn });
+    ok(!!sheetCtx && !!sheetCtx.onSave, '★★ 点「改」后弹层被打开且有 onSave');
+    ok(String(sheetCtx.title).indexOf('床位') >= 0, '弹层标题点明是设床位', sheetCtx && sheetCtx.title);
+    ok(/name="ward"/.test(sheetCtx.body) && /name="bedNo"/.test(sheetCtx.body),
+      '弹层含病区与床号两个输入');
+    ok(/value="放疗科一病区"/.test(sheetCtx.body), '弹层预填当前病区（改而非重填）');
+    ok(/value="12"/.test(sheetCtx.body), '弹层预填当前床号');
+
+    const before = JSON.stringify({ mrn: p.mrn, name: p.name, diagnosis: p.diagnosis, physician: p.physician });
+    sheetCtx.onSave({ ward: '放疗科二病区', bedNo: '15-2' });
+    ok(p.ward === '放疗科二病区' && p.bedNo === '15-2', '★★ 保存后床位两个字段被更新', [p.ward, p.bedNo]);
+    ok(JSON.stringify({ mrn: p.mrn, name: p.name, diagnosis: p.diagnosis, physician: p.physician }) === before,
+      '★★ 轻量弹层未触碰其他字段（mrn/姓名/诊断/医生原样）');
+
+    /* 详情页已重渲染，显示新床位 */
+    const d2 = getEl('view').innerHTML;
+    ok(d2.indexOf('放疗科二病区') >= 0 && d2.indexOf('<b>15-2</b> 床') >= 0,
+      '★★ 保存后详情页顶部立即显示新床位（无需手动刷新）');
+  }
+  resetUI();
+
+  /* ---- 19b 空床位也保留入口（"设置"），避免入口时有时无 ---- */
+  {
+    const q = inState({ name: '床位乙', mrn: 'B2', status: '在治' });
+    view.page = 'patient'; view.pid = q.id; render();
+    const dq = getEl('view').innerHTML;
+    ok(dq.indexOf('class="kv bedrow"') >= 0, '★★ 无床位时床位行仍渲染（入口常驻）');
+    ok(dq.indexOf('未设置床号') >= 0, '无床位时给出「未设置床号」提示', null);
+    const tq = String(dq).match(/<button[^>]*data-act="bed-edit"[^>]*>[^<]*/g) || [];
+    ok(tq.length === 1 && /设置\s*$/.test(tq[0]),
+      '★★ 无床位时按钮文案为「设置」（有→「改」）', tq);
+    resetUI();
+  }
 }
 
 console.log('');

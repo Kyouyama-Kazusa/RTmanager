@@ -307,14 +307,18 @@ const rNd = todo.length ? todo[0].reasons : [];
 console.log('  未开始患者待办:', JSON.stringify(rNd));
 ok(rNd.indexOf('还未开始') >= 0, '★ 开始日期在将来 → 提示「还未开始」', rNd);
 
-/* 待排程（缺开始日期）→ 归入「未开始」 */
+/* 待排程（缺开始日期）→ 归入「未开始」
+   ★ v0.17.0：去掉原来的 `|| rNo.indexOf('流程：') >= 0` 逃生门 ——
+     「流程：xxx」这个分支已随字段一起删除，现在**只能**是「待排程」。
+     留着 || 会让这条断言在两种口径下都绿，等于没测。 */
 const pNo = mkPatient({ startDate: '', fractions: '' });
 state = normalize({ version: 2, updatedAt: '', patients: [pNo] });
 state.patients[0].status = '在治';
 todo = buildTodo();
 const rNo = todo.length ? todo[0].reasons : [];
 console.log('  待排程患者待办:', JSON.stringify(rNo));
-ok(rNo.indexOf('待排程') >= 0 || rNo.indexOf('流程：') >= 0, '★ 缺排程信息 → 仍进待办（归未开始）', rNo);
+ok(rNo.indexOf('待排程') >= 0, '★★ 缺排程信息 → 进待办且**只报「待排程」**（v0.17.0 收紧）', rNo);
+ok(rNo.every(function (x) { return x.indexOf('流程') < 0; }), '★★ 待办理由里不再出现「流程」字样', rNo);
 delMakeup(today);      /* 复原 */
 
 group('B10. 边界');

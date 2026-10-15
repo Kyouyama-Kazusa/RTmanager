@@ -173,6 +173,27 @@ ok(l.treatDays.join(',') === '1,3,5', '个别患者的治疗日设置保留（SB
 ok(state.version === SCHEMA_VERSION, '数据版本已升级为 ' + SCHEMA_VERSION, state.version);
 
 console.log('');
+console.log('--- 5b. ★★ v0.17.0：老数据里的 planStatus 必须被【显式丢弃】---');
+/* ★★ 这一段是本次改动最容易踩的坑，必须有断言守着：
+   normalize() 结尾是 keepExtra(p, {...})，其语义是「保留一切目标未声明的键」
+   （契约 4：未知的未来字段原样保留，保证云同步双向不丢数据）。
+   于是**光把 planStatus 从 out 对象里删掉是不够的** —— keepExtra 会把它原样搬回来。
+   必须靠 LEGACY_DROP_PATIENT + dropLegacyPatientFields() 显式剔除。
+   V1_DATA 的 4 位患者原本都带 planStatus，迁移后**一个都不能剩**。 */
+ok(state.patients.every(function (p) { return !('planStatus' in p); }),
+  '★★ 迁移后所有患者都不含 planStatus（dropLegacyPatientFields 生效）',
+  state.patients.filter(function (p) { return 'planStatus' in p; }).map(function (p) { return p.name; }));
+ok(LEGACY_DROP_PATIENT.indexOf('planStatus') >= 0, '★★ 剔除清单登记了 planStatus（显式声明，非隐式依赖）');
+/* ★ 反向对照：keepExtra 的核心职责（保留未知字段）不能被这次改动破坏 */
+{
+  var probe = keepExtra({ name: 'X', 未来的新字段: 'v9' }, { name: '' });
+  ok(probe['未来的新字段'] === 'v9', '★★ keepExtra 仍原样保留未知的未来字段（契约 4 未被破坏）');
+  ok(!('planStatus' in dropLegacyPatientFields({ name: 'X', planStatus: '待计划' })),
+    '★★ dropLegacyPatientFields 只剔 planStatus，其余字段原样留下');
+  ok(dropLegacyPatientFields({ name: 'X', planStatus: '待计划' }).name === 'X', '★★ 剔除时不动其它字段');
+}
+
+console.log('');
 console.log('--- 6. 迁移前自动备份 ---');
 const bks = backupKeys();
 console.log('  备份 key:', bks.join(', ') || '(无)');

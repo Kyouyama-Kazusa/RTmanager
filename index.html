@@ -61,7 +61,13 @@ button,input,select,textarea{font:inherit;color:inherit}
 .pcard .pbody{flex:1;min-width:0}
 .line1{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
 .pname{font-size:17px;font-weight:600}
-.pdiag{margin-top:3px;font-size:14px;color:#39424f;word-break:break-all}
+/* v0.17.0：诊断信息**只显示一行**（用户要求）。
+   原先 word-break:break-all + 自动换行，长诊断（如「鼻咽癌 T3N2M0 III期 同步放化疗后」）
+   会把卡片撑到三四行，在治页一屏看不到几个人。
+   单行 + 省略号：一屏能看更多人，需要全文时点进详情页看。
+   ★ 用 overflow:hidden + text-overflow:ellipsis 是**单行截断**的标准写法，
+     前提是 white-space:nowrap（否则会先换行，ellipsis 永不生效）。 */
+.pdiag{margin-top:3px;font-size:14px;color:#39424f;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .pmeta{margin-top:4px;font-size:12px;color:var(--sub);line-height:1.6}
 .pmeta b{font-weight:600;color:#4a5464}
 
@@ -78,6 +84,14 @@ button,input,select,textarea{font:inherit;color:inherit}
 .chip.sm{font-size:11px;line-height:16px;padding:0 6px}
 /* v0.16.0：病区/床号徽标 —— 用 info 色系与性别/年龄等中性标签区分开 */
 .chip.bed{background:var(--info-soft);color:var(--info);font-weight:600}
+/* v0.17.0：在治页卡片开头的**大字床号**（用户要求「床号放在最开头放大显示」）。
+   动机：在治页是交班/找人的场景，"几床"是第一识别问题，比姓名更快定位；
+   原先床号只是身份行里一个 11px 小灰 chip，排在性别年龄之后，需要逐字找。
+   设计：独立于 badgebox 的首列，等宽占位保证多张卡片床号竖排对齐（扫视更快）；
+   无床号时整块不渲染（不留空列，避免老数据卡片左侧出现空洞）。 */
+.pbed{flex:0 0 auto;min-width:56px;padding:6px 8px;border-radius:10px;background:var(--info-soft);color:var(--info);text-align:center}
+.pbed .n{font-size:22px;font-weight:800;line-height:1.1;word-break:break-all}
+.pbed .u{font-size:11px;opacity:.85;margin-top:1px}
 .count{display:inline-block;min-width:20px;height:20px;padding:0 6px;border-radius:10px;background:var(--danger);color:#fff;font-size:12px;line-height:20px;text-align:center;font-weight:600}
 
 /* v0.16.0：在治页搜索/排序条 */
@@ -98,6 +112,11 @@ button,input,select,textarea{font:inherit;color:inherit}
 .kv:last-child{border-bottom:0}
 .kv .k{flex:0 0 82px;color:var(--sub)}
 .kv .v{flex:1;word-break:break-all}
+/* v0.17.0：详情页顶部床位行 —— 比普通 kv 更醒目（床位是交班第一信息），
+   右侧固定「改」按钮；按钮不参与 flex:1，避免把值挤成一行省略号。 */
+.kv.bedrow{align-items:center;padding:8px 0}
+.kv.bedrow .v{font-size:15px}
+.kv.bedrow .btn{flex:0 0 auto}
 .hero{display:flex;align-items:center;gap:12px;margin-bottom:10px}
 .hero .badgebox{min-width:62px}
 .hero .pname{font-size:20px}
@@ -340,12 +359,18 @@ button,input,select,textarea{font:inherit;color:inherit}
 var LS_KEY = 'radiotherapy.v1';
 var SNAP_PREFIX = 'radiotherapy.snap.';
 var SNAP_KEEP = 7;
-var APP_VERSION = '0.16.2';
+var APP_VERSION = '0.17.0';
 
 var SEXES = ['男', '女'];
 var PURPOSES = ['根治性', '术后辅助', '术前新辅助', '姑息性'];
 var TECHNIQUES = ['IMRT', 'VMAT', 'SBRT', '3D-CRT', '电子线', 'TOMO', '其他'];
-var PLAN_STATUSES = ['待定位', '待勾画', '待计划', '待验证', '已通过'];
+/* ★ v0.17.0：**「流程状态」字段已整体移除**（用户要求）。
+   动机：门诊实际录入里，排程只取决于「放疗开始日期 + 总次数」，
+   流程状态既不参与排程计算，也没人能保证它被及时推进 ——
+   它唯一的作用就是让卡片和待办显示「流程：待计划」，反而**遮挡**
+   了本该显示的治疗进度，让用户以为「排程要等流程推进才出现」。
+   现在：数据层不再存、表单不再有、AI 不再产出、卡片/待办不再显示。
+   老数据里的 planStatus 由 normalize() 白名单自然丢弃，不报错、不损其它字段。 */
 /* 放疗验证提醒的提前量（次）：第 N 次验证，则从第 N-2 次治疗日起开始提醒。
    取 2 是为了给排班/机器预留准备时间，同时不至于过早刷屏。 */
 var VERIFY_LEAD_FRACTIONS = 2;
@@ -557,7 +582,9 @@ function backupKeysToDelete(n) {
 
 /* 归一化辅助：把来源对象里「目标尚未包含」的字段一并带上。
    目的：以后新增字段时，normalize 只需声明需要转换/校验的字段，
-   其余字段自动保留，避免"新字段被静默丢弃"（如 BUG-03 的 tplBase）。 */
+   其余字段自动保留，避免"新字段被静默丢弃"（如 BUG-03 的 tplBase）。
+   ★ 例外见 LEGACY_DROP_PATIENT —— 「主动删除的已知旧字段」必须显式丢弃，
+     否则会被本函数原样保留（keepExtra 的语义就是「保留一切未声明的键」）。 */
 function keepExtra(src, out) {
   if (!src || typeof src !== 'object') return out;
   Object.keys(src).forEach(function (k) {
@@ -566,8 +593,24 @@ function keepExtra(src, out) {
   return out;
 }
 
+/* ★ v0.17.0：「主动删除的已知旧字段」清单（患者级）。
+   ★★ 为什么必须有这张表 —— 这是本次最容易踩的坑：
+     keepExtra() 的语义是「保留一切目标未声明的键」，这是为了契约 4
+     （未知的未来字段原样保留，保证云同步双向不丢数据）。
+     于是**光从 normalize 的 out 对象里删掉 planStatus 是不够的**：
+     它会被 keepExtra 原样搬回来，且不报错 —— 字段看着"删了"其实还在，
+     备份/导出里永远残留一条 '待计划'。必须在这里显式剔除。
+   ★ 与 LEGACY_STATUS_MAP 的区别：那张表是**映射**（旧值 → 新值），
+     这张表是**剔除**（旧字段 → 不存在）。两者都是"历史包袱的出口"。
+   ★ 注意顺序：dropLegacyPatientFields 必须在 keepExtra **之后**调用。 */
+var LEGACY_DROP_PATIENT = ['planStatus'];
+function dropLegacyPatientFields(o) {
+  LEGACY_DROP_PATIENT.forEach(function (k) { delete o[k]; });
+  return o;
+}
+
 /* 把任意历史版本的数据归一化为当前格式。
-   原则：只做「补齐」，不丢弃任何已有内容。 */
+   原则：只做「补齐」，不丢弃任何已有内容（例外：LEGACY_DROP_PATIENT）。 */
 function normalize(d) {
   var out = { version: SCHEMA_VERSION, updatedAt: d.updatedAt || '', patients: [] };
   (d.patients || []).forEach(function (p) {
@@ -585,7 +628,7 @@ function normalize(d) {
     var st = PATIENT_STATUSES.indexOf(p.status) >= 0 ? p.status
       : (LEGACY_STATUS_MAP[p.status] || '在治');
 
-    out.patients.push(keepExtra(p, {
+    out.patients.push(dropLegacyPatientFields(keepExtra(p, {
       id: p.id || uid('p'), mrn: p.mrn || '', name: p.name || '', sex: SEXES.indexOf(p.sex) >= 0 ? p.sex : '', age: p.age || '',
       /* v0.14.1 修复：此处原为「严格枚举，非法值一律清空」——
          一份手写/外部生成的 JSON 只要把放疗目的写成「根治性放疗」，
@@ -599,7 +642,10 @@ function normalize(d) {
       ward: p.ward || '', bedNo: p.bedNo || '',
       purpose: matchEnum(p.purpose, PURPOSES, 'purpose'),
       technique: matchEnum(p.technique, TECHNIQUES, 'technique'),
-      simDate: p.simDate || '', position: p.position || '', planStatus: matchEnum(p.planStatus, PLAN_STATUSES, 'planStatus'),
+      simDate: p.simDate || '', position: p.position || '',
+      /* ★ v0.17.0：planStatus 已删除，**不在此声明** —— 也不靠"未声明即丢弃"，
+         而是靠外层的 dropLegacyPatientFields() 显式剔除（原因见该函数注释：
+         keepExtra 会把未声明的键原样搬回来）。 */
       totalDose: p.totalDose || '', fractions: p.fractions || '', dosePerFraction: p.dosePerFraction || '',
       startDate: start,
       treatDays: (p.treatDays && p.treatDays.length) ? p.treatDays : treatDaysCfg(),
@@ -667,7 +713,7 @@ function normalize(d) {
         });
       }),
       status: st, completedAt: p.completedAt || ''
-    }));
+    })));
   });
   return out;
 }
@@ -787,7 +833,9 @@ var AI_PROVIDERS = [
   { key: 'custom', name: '自定义', note: '填任意 OpenAI 兼容地址', url: '', model: '', vision: '' }
 ];
 
-var AI_FIELDS = ['name', 'mrn', 'sex', 'age', 'diagnosis', 'purpose', 'technique', 'physician', 'planStatus', 'totalDose', 'fractions', 'dosePerFraction', 'simDate', 'startDate', 'position'];
+/* ★ v0.17.0：planStatus（流程状态）已从本表移除，长度 15 → 14。
+   AI_FIELDS 是「参与缺失提示的扁平单值字段」表，test-ai.js 对其 length 有硬编码断言。 */
+var AI_FIELDS = ['name', 'mrn', 'sex', 'age', 'diagnosis', 'purpose', 'technique', 'physician', 'totalDose', 'fractions', 'dosePerFraction', 'simDate', 'startDate', 'position'];
 
 /* ★ 附加的「非临床」标识字段（v0.16.0）：所在病区 / 床号。
    ★ 为什么不塞进 AI_FIELDS：
@@ -813,7 +861,7 @@ function aiExtraOf(r) {
 /* 字段中文名（用于缺失提示） */
 var AI_FIELD_LABEL = {
   name: '姓名', mrn: '住院号', sex: '性别', age: '年龄', diagnosis: '诊断',
-  purpose: '放疗目的', technique: '放疗技术', physician: '主管医生', planStatus: '流程状态',
+  purpose: '放疗目的', technique: '放疗技术', physician: '主管医生',
   totalDose: '总剂量', fractions: '总次数', dosePerFraction: '单次剂量',
   simDate: '定位日期', startDate: '开始日期', position: '体位'
 };
@@ -873,7 +921,6 @@ function defaultAiPrompt() {
     '   diagnosis 诊断（含部位/病理/分期）；physician 主管医生；position 体位/固定装置\n' +
     '   purpose 放疗目的（只能从 ' + PURPOSES.join('/') + ' 中选）\n' +
     '   technique 放疗技术（只能从 ' + TECHNIQUES.join('/') + ' 中选）\n' +
-    '   planStatus 流程状态（只能从 ' + PLAN_STATUSES.join('/') + ' 中选）\n' +
     '   totalDose 总剂量（只要数字，单位 Gy）；fractions 总次数（只要数字）；dosePerFraction 单次剂量（只要数字）\n' +
     '   simDate 定位日期（YYYY-MM-DD）；startDate 放疗开始日期（YYYY-MM-DD，若写「X月X日开始」请转成日期）\n' +
     '6. 日期只有月日没有年份时，按当前年份 ' + new Date().getFullYear() + ' 推断\n\n' +
@@ -1008,13 +1055,6 @@ var AI_ENUM_ALIAS = {
     '三维适形': '3D-CRT', '3DCRT': '3D-CRT', '适形': '3D-CRT',
     '螺旋断层': 'TOMO', '托姆': 'TOMO', 'TOMO': 'TOMO',
     '电子束': '电子线', '电子线': '电子线'
-  },
-  planStatus: {
-    '已通过': '已通过', '已批准': '已通过', '通过': '已通过',
-    '待验证': '待验证', '验证': '待验证',
-    '待定位': '待定位', '定位': '待定位',
-    '待勾画': '待勾画', '勾画': '待勾画',
-    '待计划': '待计划', '计划': '待计划'
   }
 };
 /* 把 AI 返回的说法映射到表单枚举；无法可靠判断时返回空串，交人工选择 */
@@ -1054,7 +1094,8 @@ function normalizeAiPatients(raw) {
     o.sex = matchEnum(o.sex, SEXES, 'sex');
     o.purpose = matchEnum(o.purpose, PURPOSES, 'purpose');
     o.technique = matchEnum(o.technique, TECHNIQUES, 'technique');
-    o.planStatus = matchEnum(o.planStatus, PLAN_STATUSES, 'planStatus');
+    /* ★ v0.17.0：不再映射 planStatus —— 即使模型从旧版提示词里带回了该字段，
+       下面 AI_FIELDS 白名单也会把它丢掉（AI_FIELDS 已不含 planStatus）。 */
     o.age = String(o.age).replace(/[^\d]/g, '');
     ['totalDose', 'fractions', 'dosePerFraction'].forEach(function (k) {
       o[k] = String(o[k]).replace(/[^\d.]/g, '');
@@ -2214,12 +2255,15 @@ function buildTodo() {
            ② 即将结束（剩余 ≤ TODO_NEAR_END_LEFT 次）
            ③ 疗程中验证到点
          以及始终保留的副反应、随访到期。
-         「今日应治疗」「流程未通过」「疗程已结束待归档」不再进待办 —— 它们
-         在在治页与详情页已经可见，塞进待办只会淹没真正要处理的事。 */
+         「今日应治疗」「疗程已结束待归档」不再进待办 —— 它们
+         在在治页与详情页已经可见，塞进待办只会淹没真正要处理的事。
+         ★ v0.17.0：删掉「流程：xxx」分支。缺排程输入时**一律**报「待排程」，
+           不再看任何流程状态（该字段已整体移除）。 */
       var ready = !!(p.startDate && parseInt(p.fractions, 10));
       if (!ready) {
-        if (p.planStatus && p.planStatus !== '已通过') { reasons.push('流程：' + p.planStatus); details.push('治疗流程卡在「' + p.planStatus + '」'); tags.push('未开始'); }
-        else { reasons.push('待排程'); details.push('请填写放疗开始日期与总次数，自动生成治疗日历'); tags.push('未开始'); }
+        reasons.push('待排程');
+        details.push('请填写放疗开始日期与总次数，自动生成治疗日历');
+        tags.push('未开始');
       } else {
         var dn = doneCount(p);
         var plannedN = plannedCount(p);
@@ -2330,8 +2374,39 @@ function wardSorted(list, sort) {
 /* 患者卡上的「病区 · 床号」徽标 —— 排序时更要显眼，否则用户看不出排序依据 */
 function bedChipHtml(p) {
   var w = String(p.ward || '').trim(), b = String(p.bedNo || '').trim();
-  if (!w && !b) return '';
-  return '<span class="chip sm bed">' + esc(w ? (b ? w + ' · ' + b + '床' : w) : b + ' 床') + '</span>';
+  /* ★ v0.17.0：床号已由 bedBigHtml 在卡片首列大字呈现，此处**不再重复**床号，
+     只留病区（信息不重不漏）。无病区时不渲染 —— 避免只剩一个空洞的 chip。 */
+  if (!w) return '';
+  return '<span class="chip sm bed">' + esc(w) + '</span>';
+}
+
+/* ★ v0.17.0：在治页卡片首列的**大字床号**（与 bedChipHtml 分工：这里只管床号）。
+   - 有床号才渲染；没有则整块返回空串（flex 布局自然收缩，不留空列）。
+   - 副号（如 12-3 的 -3）单独小字显示，主号放大，保证「12-3」与「12」在视觉上
+     可区分，同时竖排扫描时主号对齐。
+   - 用 p.bedNo 原始串做兜底（正则匹配不到时整串照原样显示，绝不吞内容）。 */
+function bedBigHtml(p) {
+  var b = String(p.bedNo || '').trim();
+  if (!b) return '';
+  var m = b.match(/^(\d+)\s*[-\u2014]\s*(\w+)$/);
+  var main = m ? m[1] : b, sub = m ? m[2] : '';
+  return '<div class="pbed"><div class="n">' + esc(main) + '</div>' +
+    '<div class="u">' + (sub ? esc(sub) + ' · ' : '') + '床</div></div>';
+}
+
+/* ★ v0.17.0：患者详情页**顶部**的床位行（含快速编辑入口）。
+   - 始终渲染：有床号显示床号，没有显示「未设置床号」——
+     保证入口恒定存在（否则"没床号的人反而找不到设置的地方"）。
+   - 按钮自带 data-id（本项目铁律：详情页按钮一律不自带上下文的 view.pid 兜底）。
+   - 只改两个字段，走轻量弹层 bed-edit，不打开整张患者表单。 */
+function bedQuickRow(p) {
+  var w = String(p.ward || '').trim(), b = String(p.bedNo || '').trim();
+  var txt = (w || b)
+    ? (w ? esc(w) : '') + (b ? (w ? ' · ' : '') + '<b>' + esc(b) + '</b> 床' : '')
+    : '<span style="color:var(--sub)">未设置床号</span>';
+  return '<div class="kv bedrow"><div class="k">床位</div><div class="v">' + txt + '</div>' +
+    '<button class="btn sm" data-act="bed-edit" data-id="' + esc(p.id) + '">' +
+    ((w || b) ? '改' : '设置') + '</button></div>';
 }
 (function () { var t = new Date(); view.calY = t.getFullYear(); view.calM = t.getMonth() + 1; })();
 
@@ -2503,22 +2578,32 @@ function wardCardHtml(p) {
   var end = scheduleEnd(p);
   var pa = inPause(p, todayStr()) ? pauseOn(p, todayStr()) : null;
   return '<div class="card pcard" data-act="open-patient" data-id="' + p.id + '">' +
+    /* ★ v0.17.0：床号提到**最开头并放大**（用户要求）。
+       交班/找床时「几床」是第一识别问题；原先它只是身份行中部一个 11px 灰 chip，
+       排在性别/年龄之后，要逐字扫。现在独占首列、22px 加粗。
+       没有床号时不渲染整列，老数据卡片左侧不留空洞（布局自然收缩）。 */
+    bedBigHtml(p) +
     '<div class="badgebox"><div class="b">' + esc(p.name ? p.name.slice(0, 2) : '—') + '</div><div class="t">' + esc(p.mrn || '') + '</div></div>' +
     '<div class="pbody"><div class="line1"><span class="pname">' + esc(p.name) + '</span>' +
     (p.sex ? '<span class="chip sm">' + esc(p.sex) + '</span>' : '') +
     (p.age ? '<span class="chip sm">' + esc(p.age) + '岁</span>' : '') +
-    /* v0.16.0：病区/床号徽标前置到身份行 —— 排序换成床位序时，一眼能核对顺序 */
+    /* v0.16.0：病区徽标留在身份行（床号已上移到首列大字，此处不再重复渲染床号） */
     bedChipHtml(p) +
     (pa ? '<span class="chip warn sm">中断中</span>' : '') +
     (p.stopDate ? '<span class="chip danger sm">已终止</span>' : '') +
     (boost ? '<span class="chip sm">＋加量' + boost + '</span>' : '') +
     (un ? '<span class="count">' + un + '</span>' : '') + '</div>' +
+    /* 诊断：CSS 单行截断（v0.17.0），需要全文点进详情页 */
     '<div class="pdiag">' + esc(p.diagnosis || '') + '</div>' +
-    (p.planStatus && p.planStatus !== '已通过' ? '<div class="pmeta">流程：<b>' + esc(p.planStatus) + '</b></div>' :
-      (tot ? '<div class="pmeta">治疗 <b>' + dn + '/' + tot + '</b> 次 · 累计 <b>' + accumulatedDose(p).toFixed(1) + '</b> Gy' +
-        (end ? ' · ' + (p.stopDate ? '已止于 ' : '预计 ') + '<b>' + mdLabel(end) + '</b>' + (p.stopDate ? '' : ' 结束') : '') +
-        '<div class="progress' + (prog >= 95 ? ' warn' : '') + '"><div class="fill" style="width:' + Math.min(100, prog) + '%"></div></div></div>'
-        : '<div class="pmeta">' + (p.startDate ? '未填总次数' : '未排程（缺开始日期）') + '</div>')) +
+    /* ★ v0.17.0：删掉「流程：待计划」前置分支。
+       它原是「流程未通过就先显示流程」的写法，副作用很坏：只要 planStatus
+       没推到「已通过」，卡片就**不显示治疗进度**，看着像"没排上"，
+       于是用户以为必须等流程推进才出排程。现在一律显示治疗进度，
+       缺排程输入时才提示去补 —— 与 computeSchedule 的真实口径对齐。 */
+    (tot ? '<div class="pmeta">治疗 <b>' + dn + '/' + tot + '</b> 次 · 累计 <b>' + accumulatedDose(p).toFixed(1) + '</b> Gy' +
+      (end ? ' · ' + (p.stopDate ? '已止于 ' : '预计 ') + '<b>' + mdLabel(end) + '</b>' + (p.stopDate ? '' : ' 结束') : '') +
+      '<div class="progress' + (prog >= 95 ? ' warn' : '') + '"><div class="fill" style="width:' + Math.min(100, prog) + '%"></div></div></div>'
+      : '<div class="pmeta">' + (p.startDate ? '未填总次数' : '待排程（填开始日期与总次数）') + '</div>') +
     (pa ? '<div class="pmeta" style="color:var(--warn)">中断：' + esc(pa.reason || '') + '（至 ' + mdLabel(pa.to) + '）</div>' : '') +
     '</div></div>';
 }
@@ -2768,7 +2853,16 @@ function renderPatientPage() {
 
   h += '<div class="card"><div class="hero"><div class="badgebox"><div class="b">' + esc(p.name ? p.name.slice(0, 2) : '—') + '</div><div class="t">' + esc(p.mrn || '') + '</div></div>' +
     '<div><div class="pname">' + esc(p.name) + '</div><div style="margin-top:2px"><span class="chip">' + esc(p.status) + '</span>' +
-    (p.planStatus ? ' <span class="chip sm">' + esc(p.planStatus) + '</span>' : '') + '</div></div></div>' +
+    '</div></div></div>' +
+    /* ★ v0.17.0：床号/病区放**卡片最顶部**并给「改」按钮（用户要求：方便快速设置）。
+       动机：床位是最常变的字段（转床、调整），而原先只能走
+       「患者状态 → 编辑患者信息 → 基本信息节 → 找到床号」四步；
+       交班时临时改个床要翻半页，非常别扭。
+       这里直接内联一个只改床位的轻量弹层（bed-edit），不动整张患者表单 ——
+       既快，也避免"为了改一个字段打开 18 个字段的表单"带来的误改风险。
+       无床号时也**照常渲染这一行**（显示「未设置床号」+ 「设置」按钮），
+       否则"没床号的人反而找不到设置入口"，入口会时有时无。 */
+    bedQuickRow(p) +
     '<div class="kv"><div class="k">诊断</div><div class="v">' + esc(p.diagnosis || '—') + '</div></div>' +
     '<div class="kv"><div class="k">放疗目的</div><div class="v">' + esc(p.purpose || '—') + '</div></div>' +
     '<div class="kv"><div class="k">技术</div><div class="v">' + esc(p.technique || '—') + '</div></div>' +
@@ -3383,15 +3477,17 @@ function openAiReview() {
       '<div class="field" style="margin-bottom:8px"><label>' + aiLabelHtml(p, 'technique') + '</label>' + aiSelect(aiDraftKey(i, 'technique'), p.technique, TECHNIQUES) + '</div></div>' +
       '<div class="field2">' +
       '<div class="field" style="margin-bottom:8px"><label>' + aiLabelHtml(p, 'physician') + '</label>' + textInput(aiDraftKey(i, 'physician'), p.physician) + '</div>' +
-      '<div class="field" style="margin-bottom:8px"><label>' + aiLabelHtml(p, 'planStatus') + '</label>' + aiSelect(aiDraftKey(i, 'planStatus'), p.planStatus, PLAN_STATUSES) + '</div></div>' +
+      /* ★ v0.17.0：原「流程状态」下拉已移除，位子留给「定位日期」——
+         把决定排程的两项（定位日期 / 开始日期）留在同一栅格，
+         复核时一眼看清「这套排程能不能生成」。 */
+      '<div class="field" style="margin-bottom:8px"><label>' + aiLabelHtml(p, 'simDate') + '</label>' + textInput(aiDraftKey(i, 'simDate'), p.simDate, '', 'date') + '</div></div>' +
       '<div class="field2">' +
       '<div class="field" style="margin-bottom:8px"><label>' + aiLabelHtml(p, 'totalDose') + '</label>' + numberInput(aiDraftKey(i, 'totalDose'), p.totalDose, '', '0.1') + '</div>' +
       '<div class="field" style="margin-bottom:8px"><label>' + aiLabelHtml(p, 'fractions') + '</label>' + numberInput(aiDraftKey(i, 'fractions'), p.fractions, '', '1') + '</div>' +
       '<div class="field" style="margin-bottom:8px"><label>' + aiLabelHtml(p, 'dosePerFraction') + '</label>' + numberInput(aiDraftKey(i, 'dosePerFraction'), p.dosePerFraction, '', '0.01') + '</div></div>' +
       '<div class="field2">' +
-      '<div class="field" style="margin-bottom:8px"><label>' + aiLabelHtml(p, 'simDate') + '</label>' + textInput(aiDraftKey(i, 'simDate'), p.simDate, '', 'date') + '</div>' +
-      '<div class="field" style="margin-bottom:8px"><label>' + aiLabelHtml(p, 'startDate') + '</label>' + textInput(aiDraftKey(i, 'startDate'), p.startDate, '', 'date') + '</div></div>' +
-      '<div class="field" style="margin-bottom:0"><label>' + aiLabelHtml(p, 'position') + '</label>' + textInput(aiDraftKey(i, 'position'), p.position) + '</div>' +
+      '<div class="field" style="margin-bottom:8px"><label>' + aiLabelHtml(p, 'startDate') + '</label>' + textInput(aiDraftKey(i, 'startDate'), p.startDate, '', 'date') + '</div>' +
+      '<div class="field" style="margin-bottom:8px"><label>' + aiLabelHtml(p, 'position') + '</label>' + textInput(aiDraftKey(i, 'position'), p.position) + '</div></div>' +
       /* ---- 其他治疗（靶向 / 免疫 / 内分泌 / 介入 / 中医 / 支持治疗…）----
          嵌套数组用文本框承载，允许两种写法（见 parseAiOtherText）：
          JSON 数组，或每行「名称 | 开始 | 结束 | 备注」的简写。
@@ -3509,7 +3605,7 @@ function commitAiDraft() {
    旧版是 10 个字段平铺（4042 字符、无分组），在手机上要滚很久才看得到「排程」。
    现按**录入顺序的语义**分 4 节：
      ① 基本信息（必填，姓名/住院号/性别/年龄）
-     ② 诊断与方案（诊断 / 目的 / 技术 / 医生 / 流程状态）
+     ② 诊断与方案（诊断 / 目的 / 技术 / 医生）—— v0.17.0 去掉「流程状态」
      ③ 排程与剂量（处方剂量 / 定位 / 开始日期 —— 决定日历能否生成）
      ④ 放疗验证（低频高级项，**默认折叠**）
    ★ 分组只改**呈现**，所有 input 的 name 属性一字未动 ——
@@ -3520,7 +3616,7 @@ function sheetPatient(p) {
   var isNew = !p;
   var d = p || {
     mrn: '', name: '', sex: '男', age: '', physician: '', diagnosis: '', purpose: '根治性', technique: 'IMRT',
-    simDate: '', position: '', planStatus: '待定位', totalDose: '', fractions: '', dosePerFraction: '', startDate: ''
+    simDate: '', position: '', totalDose: '', fractions: '', dosePerFraction: '', startDate: ''
   };
   var vCfg = verifyCfgOf(d);
 
@@ -3539,10 +3635,11 @@ function sheetPatient(p) {
     field('诊断（部位/病理/分期）', areaInput('diagnosis', d.diagnosis, '如 鼻咽癌 T3N2M0 III期')) +
     '<div class="field2"><div class="field"><label>放疗目的</label>' + selectInput('purpose', d.purpose || '根治性', PURPOSES) + '</div>' +
     '<div class="field"><label>放疗技术</label>' + selectInput('technique', d.technique || 'IMRT', TECHNIQUES) + '</div></div>' +
-    '<div class="field2"><div class="field"><label>主管医生</label>' + textInput('physician', d.physician, '可留空') + '</div>' +
-    '<div class="field"><label>流程状态</label>' + selectInput('planStatus', d.planStatus || '待定位', PLAN_STATUSES) + '</div></div>';
+    field('主管医生', textInput('physician', d.physician, '可留空'));
 
-  /* ③ 排程与剂量 —— 决定「治疗日历」能否生成，故与基本信息同为默认展开 */
+  /* ③ 排程与剂量 —— 决定「治疗日历」能否生成，故与基本信息同为默认展开
+     ★ v0.17.0：提示语明确「这两项是排程的唯一输入」，打消「要等流程推进」的误解。
+       排程从不看任何流程状态（computeSchedule 只读 startDate / fractions）。 */
   var gSched =
     field('处方剂量', '<div class="field2"><div class="field">' + numberInput('totalDose', d.totalDose, '总剂量 Gy', '0.1') + '</div>' +
       '<div class="field">' + numberInput('fractions', d.fractions, '总次数', '1') + '</div>' +
@@ -3550,7 +3647,7 @@ function sheetPatient(p) {
       '如 60 Gy / 30 次 / 2.0 Gy 每次') +
     '<div class="field2"><div class="field"><label>定位日期</label>' + textInput('simDate', d.simDate, '', 'date') + '</div>' +
     '<div class="field"><label>放疗开始日期 *</label>' + textInput('startDate', d.startDate, '', 'date') + '</div></div>' +
-    '<div class="hint" style="margin:-6px 0 10px">填写开始日期后，系统按「工作日」自动排程并算出结束日期</div>' +
+    '<div class="hint" style="margin:-6px 0 10px">填「放疗开始日期 + 总次数」即自动排程并算出结束日期，无需任何状态审批</div>' +
     field('体位/固定装置', textInput('position', d.position, '如 头颈肩热塑面罩'));
 
   /* ④ 放疗验证 —— 低频高级项，默认折叠 */
@@ -3597,7 +3694,7 @@ function sheetPatient(p) {
            而这个白名单是**手工维护**的：漏一个就会出现「新增能存、编辑存不上」
            的不对称（与 v0.15.0 修的 verifyAt 缺陷同源）。
            v0.16.0 的 ward / bedNo 已加入；16h 断言锁死两分支一致。 */
-        ['mrn', 'name', 'sex', 'age', 'physician', 'diagnosis', 'purpose', 'technique', 'simDate', 'position', 'planStatus', 'totalDose', 'fractions', 'dosePerFraction', 'startDate', 'ward', 'bedNo'].forEach(function (k) { p[k] = v[k] || ''; });
+        ['mrn', 'name', 'sex', 'age', 'physician', 'diagnosis', 'purpose', 'technique', 'simDate', 'position', 'totalDose', 'fractions', 'dosePerFraction', 'startDate', 'ward', 'bedNo'].forEach(function (k) { p[k] = v[k] || ''; });
         /* 验证配置单独处理：次数变化时，把不再存在的次数的完成标记一并清掉，
            避免「改成 15 后第 10 次仍显示已完成」这种脏数据 */
         p.verifyAt = buildVerifyAt(verifyCfgOf(p).done);
@@ -5196,7 +5293,7 @@ function buildDemoState() {
   function d(off) { return addDays(todayStr(), off); }
   var P = [
     { name: '王建国', sex: '男', age: '58', mrn: 'RT2026001', diagnosis: '鼻咽癌 T3N2M0 III期', purpose: '根治性', technique: 'IMRT', physician: '李医生',
-      planStatus: '已通过', totalDose: '70', fractions: '33', dosePerFraction: '2.12', simDate: d(-32), position: '头颈肩热塑面罩',
+      totalDose: '70', fractions: '33', dosePerFraction: '2.12', simDate: d(-32), position: '头颈肩热塑面罩',
       startDate: d(-28), status: '在治', _doneCount: 21,
       pauses: [{ from: d(-8), to: d(-7), reason: '机器故障维修' }], extras: [],
       reactions: [
@@ -5204,19 +5301,19 @@ function buildDemoState() {
         { site: '皮肤反应', grade: '1级（轻）', foundAt: d(-6) + 'T15:00', content: '颈部照射野皮肤色素沉着、干性脱屑', status: '已处理待复查', nextCheckAt: d(-3), plan: '予放射性皮肤保护剂外用，保持干燥', planAt: d(-6) + 'T15:30', followups: [] }
       ] },
     { name: '李秀兰', sex: '女', age: '63', mrn: 'RT2026002', diagnosis: '右肺上叶腺癌 T2N1M0 ⅡB期', purpose: '根治性', technique: 'SBRT', physician: '赵医生',
-      planStatus: '已通过', totalDose: '48', fractions: '4', dosePerFraction: '12', simDate: d(-12), position: '真空垫仰卧',
+      totalDose: '48', fractions: '4', dosePerFraction: '12', simDate: d(-12), position: '真空垫仰卧',
       startDate: d(-6), status: '在治', _doneCount: 3,
       treatDays: [1, 3, 5], pauses: [], extras: [],
       reactions: [{ site: '乏力', grade: '1级（轻）', foundAt: d(-1) + 'T10:00', content: '轻度乏力，可耐受日常活动', status: '长期随访', plan: '注意休息，加强营养', planAt: d(-1) + 'T10:10', followups: [] }] },
     { name: '张伟', sex: '男', age: '45', mrn: 'RT2026003', diagnosis: '食管中段鳞癌 T3N1M0 Ⅲ期', purpose: '根治性', technique: 'VMAT', physician: '李医生',
-      planStatus: '待计划', totalDose: '60', fractions: '30', dosePerFraction: '2.0', simDate: d(-3), position: '仰卧双臂上举',
+      totalDose: '60', fractions: '30', dosePerFraction: '2.0', simDate: d(-3), position: '仰卧双臂上举',
       startDate: d(2), status: '在治', doneDates: [], treatDays: [1, 2, 3, 4, 5], pauses: [], extras: [], reactions: [] },
     { name: '陈美华', sex: '女', age: '52', mrn: 'RT2026004', diagnosis: '直肠癌术后 pT3N1M0 ⅢB期', purpose: '术后辅助', technique: 'IMRT', physician: '赵医生',
-      planStatus: '已通过', totalDose: '50.4', fractions: '28', dosePerFraction: '1.8', simDate: d(-72), position: '俯卧位',
+      totalDose: '50.4', fractions: '28', dosePerFraction: '1.8', simDate: d(-72), position: '俯卧位',
       startDate: d(-68), status: '治疗完成', _doneCount: 28, pauses: [], extras: [], completedAt: d(-29),
       _followupTpl: [{ n: 1, u: 'm', note: '复查盆腔 MRI、CEA' }, { n: 3, u: 'm', note: '复查盆腔 MRI、CEA' }, { n: 6, u: 'm', note: '复查胸腹 CT' }, { n: 12, u: 'm', note: '全面复查' }] },
     { name: '周敏', sex: '女', age: '46', mrn: 'RT2026007', diagnosis: '左乳浸润性导管癌 pT2N1M0 ⅡB期', purpose: '术后辅助', technique: 'IMRT', physician: '王医生',
-      planStatus: '已通过', totalDose: '50', fractions: '25', dosePerFraction: '2.0', simDate: d(-92), position: '仰卧位（乳腺托架）',
+      totalDose: '50', fractions: '25', dosePerFraction: '2.0', simDate: d(-92), position: '仰卧位（乳腺托架）',
       startDate: d(-85), status: '治疗完成', pauses: [], extras: [], completedAt: d(-50),
       _followupTpl: [
         { n: 3, u: 'm', note: '复查乳腺超声、血常规、肝肾功能' },
@@ -5228,7 +5325,7 @@ function buildDemoState() {
         { n: 60, u: 'm', note: '年度复查：钼靶、胸部CT、肿瘤标志物' }
       ] },
     { name: '刘国强', sex: '男', age: '67', mrn: 'RT2026005', diagnosis: '前列腺癌 T2cN0M0', purpose: '根治性', technique: 'VMAT', physician: '',
-      planStatus: '已通过', totalDose: '76', fractions: '38', dosePerFraction: '2.0', simDate: d(-26), position: '仰卧位（膀胱充盈）',
+      totalDose: '76', fractions: '38', dosePerFraction: '2.0', simDate: d(-26), position: '仰卧位（膀胱充盈）',
       startDate: d(-22), status: '在治', _doneCount: 15,
       pauses: [{ from: d(-2), to: d(1), reason: '骨髓抑制，白细胞偏低需暂停观察' }], extras: [],
       reactions: [{ site: '放射性膀胱炎', grade: '2级（中）', foundAt: d(-4) + 'T14:00', content: '尿频、尿急，排尿轻度疼痛', status: '已复查未解除', nextCheckAt: d(-1), plan: '多饮水，碱化尿液，必要时抗炎', planAt: d(-4) + 'T14:30', followups: [{ at: d(-1) + 'T11:00', content: '复查尿常规白细胞较前下降，症状稍有缓解' }] }] }
@@ -5311,6 +5408,26 @@ function bind() {
     'ai-add-row': function () { addAiBlankRow(); },
     'ai-commit': function () { commitAiDraft(); },
     'edit-patient': function () { sheetPatient(getPatient(view.pid)); },
+    /* ★ v0.17.0：详情页顶部「改床号」——轻量弹层，只改病区/床号两个字段。
+       刻意不复用整张患者表单：改床位是高频微操作，开 18 字段表单既慢又易误改。
+       data-id 必带（详情页按钮铁律），从 el.dataset.id 取患者。 */
+    'bed-edit': function (el) {
+      var p = getPatient(el.dataset.id);
+      if (!p) return;
+      openSheet({
+        title: '设置床位', okText: '保存',
+        body: '<div class="field2"><div class="field"><label>所在病区</label>' +
+          textInput('ward', p.ward, '如 放疗科一病区') + '</div>' +
+          '<div class="field"><label>床号</label>' +
+          textInput('bedNo', p.bedNo, '如 12 或 12-3') + '</div></div>' +
+          '<div class="hint">床号用于在治页排序与快速找人，可只填床号。</div>',
+        onSave: function (v) {
+          p.ward = String(v.ward == null ? '' : v.ward).trim();
+          p.bedNo = String(v.bedNo == null ? '' : v.bedNo).trim();
+          save(); render(); toast('已更新床位');
+        }
+      });
+    },
     'delete-patient': function () { deletePatient(getPatient(view.pid)); },
     'complete-patient': function () { completePatient(getPatient(view.pid)); },
     'reopen-patient': function () {
@@ -6407,4 +6524,4 @@ init();
 </script>
 </body>
 </html>
-<!-- release: v0.16.2 日历格只留「治疗 N」一项统计，图例同步删「已完成」色块 -->
+<!-- release: v0.17.0 彻底移除「流程状态」字段（填日期+次数即自动排程）；在治页床号首列放大、诊断单行；详情页顶部快速改床号 -->

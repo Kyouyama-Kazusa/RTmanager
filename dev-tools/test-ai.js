@@ -116,7 +116,9 @@ ok(matchEnum('根治', PURPOSES, 'purpose') === '根治性', '「根治」→ �
 ok(matchEnum('姑息减症', PURPOSES, 'purpose') === '姑息性', '★「姑息减症」→ 姑息性', matchEnum('姑息减症', PURPOSES, 'purpose'));
 ok(matchEnum('男性', SEXES, 'sex') === '男', '「男性」→ 男');
 ok(matchEnum('M', SEXES, 'sex') === '男', '「M」→ 男');
-ok(matchEnum('已批准', PLAN_STATUSES, 'planStatus') === '已通过', '「已批准」→ 已通过');
+/* ★ v0.17.0：「流程状态」字段已整体移除 —— 原「已批准 → 已通过」断言删除，
+   改为**反向红线**：AI_ENUM_ALIAS 不再有 planStatus 分支。 */
+ok(!AI_ENUM_ALIAS.planStatus, '★★ 别名表不再含 planStatus（v0.17.0 移除流程状态）');
 ok(matchEnum('IMRT', TECHNIQUES, 'technique') === 'IMRT', '精确值直接通过');
 ok(matchEnum('某种没听过的技术', TECHNIQUES, 'technique') === '', '★ 无法判断 → 空串（宁可让用户选，不写错值）');
 ok(matchEnum('', TECHNIQUES, 'technique') === '', '空值返回空串');
@@ -125,6 +127,8 @@ ok(matchEnum(null, TECHNIQUES, 'technique') === '', 'null 安全');
 group('3. 患者数据清洗');
 const raw1 = {
   patients: [
+    /* ★ v0.17.0：样本刻意保留 planStatus —— 模拟「旧版提示词/存量模型仍返回该字段」，
+       用它验证 AI_FIELDS 白名单会把它丢掉（比删掉样本更有价值）。 */
     { name: '张三', mrn: 'M001', sex: '男性', age: '58岁', diagnosis: '鼻咽癌 T3N2M0 III期', purpose: '根治', technique: '调强适形放疗', physician: '李医生', planStatus: '已批准', totalDose: '70Gy', fractions: '33次', dosePerFraction: '2.12Gy', simDate: '2026/09/01', startDate: '2026年9月7日', position: '头颈肩面罩' },
     { name: '', mrn: '', sex: '男' },
     { name: '李四', mrn: '', sex: '女性', age: 'abc', purpose: '不存在的目的' }
@@ -138,7 +142,10 @@ ok(a.sex === '男', '性别「男性」已映射', a.sex);
 ok(a.age === '58', '年龄「58岁」→「58」', a.age);
 ok(a.purpose === '根治性', '目的「根治」已映射', a.purpose);
 ok(a.technique === 'IMRT', '技术「调强适形放疗」已映射', a.technique);
-ok(a.planStatus === '已通过', '流程「已批准」已映射', a.planStatus);
+/* ★★ v0.17.0 反向红线：模型返回的 planStatus 必须被 AI_FIELDS 白名单**丢弃**。
+   normalizeAiPatients 按 AI_FIELDS 逐键取值，未列入的键不进结果对象。 */
+ok(a.planStatus === undefined, '★★ 模型返回的 planStatus 被丢弃（v0.17.0 已移除该字段）', a.planStatus);
+ok(!('planStatus' in a), '★★ 清洗结果对象里不含 planStatus 键');
 ok(a.totalDose === '70', '剂量「70Gy」→「70」', a.totalDose);
 ok(a.fractions === '33', '次数「33次」→「33」', a.fractions);
 ok(a.dosePerFraction === '2.12', '单次「2.12Gy」→「2.12」', a.dosePerFraction);
@@ -310,7 +317,9 @@ function withFetch(plan, fn) {
   const ds = AI_PROVIDERS.find(p => p.key === 'deepseek');
   ok(ds.vision === '', 'DeepSeek 标记为不支持图片');
   ok(defaultAiPrompt().indexOf(String(new Date().getFullYear())) >= 0, '提示词含当前年份（用于推断无年份日期）');
-  ok(AI_FIELDS.length === 15, '覆盖 15 个患者字段', AI_FIELDS.length);
+  /* ★ v0.17.0：15 → 14（移除 planStatus）。 */
+  ok(AI_FIELDS.length === 14, '覆盖 14 个患者字段', AI_FIELDS.length);
+  ok(AI_FIELDS.indexOf('planStatus') < 0, '★★ AI_FIELDS 不再含 planStatus（v0.17.0）');
 
   group('13. 其他治疗（otherTreatments）AI 通道');
   /* AI_FIELDS 是「扁平单值字段」表，其他治疗是数组，走独立通道。
@@ -346,8 +355,8 @@ function withFetch(plan, fn) {
   /* 14a 契约：附加字段不得混入 AI_FIELDS（AI_FIELDS 参与「缺失提示」，且被硬编码断言锁死） */
   {
     ok(AI_FIELDS.indexOf('ward') < 0 && AI_FIELDS.indexOf('bedNo') < 0,
-      '★ ward/bedNo 未混入 AI_FIELDS（不参与缺失提示、不破坏 15 项断言）');
-    ok(AI_FIELDS.length === 15, 'AI_FIELDS 仍为 15 项');
+      '★ ward/bedNo 未混入 AI_FIELDS（不参与缺失提示、不破坏 14 项断言）');
+    ok(AI_FIELDS.length === 14, 'AI_FIELDS 仍为 14 项');
     ok(AI_EXTRA_FIELDS.length === 2 && AI_EXTRA_FIELDS.indexOf('ward') >= 0 && AI_EXTRA_FIELDS.indexOf('bedNo') >= 0,
       '★ 附加字段表恰好含 ward/bedNo', AI_EXTRA_FIELDS);
     ok(!!AI_EXTRA_LABEL.ward && !!AI_EXTRA_LABEL.bedNo, '附加字段有中文标签', AI_EXTRA_LABEL);

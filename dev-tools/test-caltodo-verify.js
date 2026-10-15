@@ -793,6 +793,80 @@ function sliceCalendarCell(gridHtml, ds) {
   }
 
   /* ================================================================
+     M. ★★ v0.17.0：移除「流程状态」后的用户可见行为
+     背景（用户原话）：
+       「取消放疗流程状态，仅设置定位日期和放疗日期即可自动排程，
+         无需等流程状态推进后再出现排程」
+     真相：排程**从来**不看流程状态（computeSchedule 只读 startDate/fractions）；
+       但患者卡片上有个 `planStatus !== '已通过' ? 显示「流程：待计划」: 显示进度`
+       的前置分支 —— 只要流程没推到「已通过」，卡片就**不显示治疗进度**，
+       看起来像「还没排上」。这是"以为要等流程推进"的真凶。
+     本组守的是**用户能看到的结果**，不是复述逻辑（原则 20）：
+       ① 卡片/详情页/待办都不再出现「流程」字样；
+       ② 卡片在**任何 status 下**都显示治疗进度（不再被流程挡住）；
+       ③ 缺排程输入时提示「待排程」，且是可去补的（不是"等审批"）。
+     ================================================================ */
+  group('M. ★★ 移除流程状态：卡片一律显示治疗进度（v0.17.0）');
+  {
+    /* M1. 患者卡片：有完整排程输入 → 必须显示进度，且无「流程」字样 */
+    const pc = mk({ name: '甲患者', startDate: today, fractions: '30', totalDose: '60', dosePerFraction: '2' });
+    pc.planStatus = '待计划';          /* 故意塞入老字段，验证渲染层不再理它 */
+    const cardHtml = wardCardHtml(pc);
+    ok(cardHtml.indexOf('流程') < 0, '★★ 患者卡片不再出现「流程」字样（即使数据里还带着 planStatus）',
+      (cardHtml.match(/[^>]*流程[^<]*/) || [''])[0]);
+    ok(cardHtml.indexOf('待计划') < 0, '★★ 患者卡片不再显示 planStatus 的原始值');
+    ok(/治疗 <b>\d+\/\d+<\/b> 次/.test(cardHtml), '★★ 有排程输入 → 卡片显示治疗进度（v0.17.0 前会被流程分支挡住）',
+      (cardHtml.match(/治疗 <b>[^<]*<\/b> 次/) || [''])[0]);
+    ok(cardHtml.indexOf('progress') >= 0, '★ 进度条渲染（说明走的是进度分支，不是兜底文案）');
+
+    /* M2. 缺排程输入 → 提示「待排程」，且文案是"去补日期与次数"，不是"等流程" */
+    const pn2 = mk({ name: '乙患者', startDate: '', fractions: '' });
+    pn2.planStatus = '待勾画';
+    const card2 = wardCardHtml(pn2);
+    ok(card2.indexOf('待排程') >= 0, '★★ 缺排程输入 → 卡片提示「待排程」', true);
+    ok(card2.indexOf('填开始日期与总次数') >= 0, '★★ 待排程提示指明去补什么（可执行，非等审批）', true);
+    ok(card2.indexOf('流程') < 0, '★★ 缺排程时也不再提「流程」');
+
+    /* M3. 详情页 hero：不再有 planStatus chip
+       ⚠ 注意：上面 M2 的 mk() 会用新患者**重建整个 state**，pc 已不在其中。
+         必须把 pc 放回 state，否则 getPatient(pc.id) 为 null，render() 直接退回标签页，
+         后续断言会对着「标签页」而不是「详情页」下判断 —— 那种"绿"毫无意义。 */
+    state.patients.push(pc);
+    view.page = 'patient'; view.pid = pc.id; render();
+    const detail = getEl('view').innerHTML;
+    /* 先确认真的渲染到了详情页（否则后面所有断言都是在测空气） */
+    ok(getEl('title').textContent === pc.name, '★★ 前置：详情页真的被渲染（title 为患者姓名）', getEl('title').textContent);
+    ok(detail.indexOf('流程') < 0, '★★ 详情页无「流程」字样（hero 里的 planStatus chip 已删）');
+    ok(detail.indexOf('待计划') < 0, '★★ 详情页不显示 planStatus 值');
+    /* 但治疗进度区（患者进度卡片）本身必须还在 —— 不能"删流程"删过头 */
+    ok(detail.indexOf('治疗进度') >= 0, '★★ 详情页「治疗进度」卡片保留（删流程不能误删进度）');
+
+    /* M4. 待办：缺排程输入 → 只报「待排程」 */
+    const cid = pc.id;
+    state.patients = state.patients.filter(function (p) { return p.id !== cid; });
+    const pn3 = mk({ name: '丙患者', startDate: '', fractions: '' });
+    pn3.planStatus = '待验证';        /* 又塞一个老值 */
+    const todo3 = buildTodo();
+    const hit = todo3.filter(function (x) { return x.p.id === pn3.id; })[0];
+    ok(!!hit, '待排程患者仍在待办里（提醒补充，不被静默忽略）', !!hit);
+    ok(hit && hit.reasons.indexOf('待排程') >= 0, '★★ 待办理由为「待排程」', hit && hit.reasons);
+    ok(hit && hit.reasons.every(function (r) { return r.indexOf('流程') < 0; }), '★★ 待办理由无「流程」', hit && hit.reasons);
+    ok(hit && hit.details.join('').indexOf('待验证') < 0, '★★ 待办详情不复述 planStatus 值', hit && hit.details);
+
+    /* M5. 老数据里的 planStatus 被 normalize 丢弃后，卡片仍正常工作（端到端） */
+    {
+      const legacy = normalize({ version: 2, updatedAt: '', patients: [
+        { name: '丁患者', startDate: today, fractions: '20', planStatus: '待计划', status: '在治' }
+      ] }).patients[0];
+      ok(!('planStatus' in legacy), '★★ 端到端：老数据里的 planStatus 被丢弃');
+      const h5 = wardCardHtml(legacy);
+      ok(/治疗 <b>\d+\/20<\/b> 次/.test(h5), '★★ 端到端：丢弃后卡片仍显示治疗进度', (h5.match(/治疗 <b>[^<]*<\/b> 次/) || [''])[0]);
+    }
+    state.patients = state.patients.filter(function (p) { return p.id !== pn3.id; });
+    view.page = 'tab';
+  }
+
+  /* ================================================================
      L. ★ 验证按钮「点击真的能用」—— 回归测试
      背景（用户报告的真实缺陷）：
        详情页的「设置 / 修改」按钮点击后毫无反应；待办里的「第 N 次」切换也不生效。

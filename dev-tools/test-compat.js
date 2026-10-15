@@ -161,13 +161,19 @@ group('契约 4 · 未知的未来字段必须原样保留');
     '★ courses 里的未知字段原样保留');
 
   /* 已知字段的完整性：v0.9 的全部业务字段都要在（新增字段须同步加进来，
-     否则 normalize 里漏声明一个字段，这道门禁不会报错） */
+     否则 normalize 里漏声明一个字段，这道门禁不会报错）。
+     ★ v0.17.0：移除 'planStatus' —— 该字段已从产品中整体删除。 */
   const must = ['id', 'mrn', 'name', 'sex', 'age', 'physician', 'ward', 'bedNo', 'diagnosis', 'purpose', 'technique',
-    'simDate', 'position', 'planStatus', 'totalDose', 'fractions', 'dosePerFraction', 'startDate',
+    'simDate', 'position', 'totalDose', 'fractions', 'dosePerFraction', 'startDate',
     'treatDays', 'pauses', 'extras', 'boostFractions', 'boostNote', 'stopDate', 'doneDates',
     'reactions', 'followupPlans', 'status', 'completedAt', 'notes', 'courses'];
   const missing = must.filter(function (k) { return !(k in p); });
   ok(missing.length === 0, '★ 业务字段无缺失（新增字段后 normalize 必须同步声明）', missing);
+  /* ★★ v0.17.0 反向红线：normalize 后不得再产出 planStatus。
+     ★ 特别注意：契约 4「未知的未来字段必须原样保留」是有意的**白名单例外** ——
+       planStatus 是我们主动删除的**已知旧字段**，与「未来的未知字段」不是一回事：
+       前者必须丢弃，后者必须保留。两者用同一份 normalize 实现，靠白名单区分。 */
+  ok(!('planStatus' in p), '★★ normalize 后不再产出 planStatus（v0.17.0 移除，非「未知字段」）');
 }
 
 /* =====================================================================

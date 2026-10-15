@@ -1066,7 +1066,7 @@ group('I. 其他治疗（kind=other）：枚举钳制 / 时间轴 / 概况 / AI 
 
   /* I15. AI_FIELDS 不得被污染（其他治疗走独立通道） */
   {
-    ok(AI_FIELDS.length === 15, '★★ I15 AI_FIELDS 仍为 15 项（其他治疗未塞进扁平字段表）', AI_FIELDS.length);
+    ok(AI_FIELDS.length === 14, '★★ I15 AI_FIELDS 仍为 14 项（其他治疗未塞进扁平字段表；v0.17.0 移除 planStatus）', AI_FIELDS.length);
     ok(AI_FIELDS.indexOf('otherTreatments') < 0, '★★ I15 AI_FIELDS 不含 otherTreatments（避免破坏单值假设）');
   }
 
@@ -1379,7 +1379,9 @@ group('K. 可读性优化：时间轴瘦身 / 尾部入卡 / 枚举容错（v0.1
     ok(normEnum('purpose', '姑息减症') === '姑息性', '★ K5 别名「姑息减症」→「姑息性」');
     ok(normEnum('technique', '容积旋转调强放疗') === 'VMAT', '★★ K5 技术别名长键优先：→ VMAT');
     ok(normEnum('technique', '调强适形') === 'IMRT', '★ K5 「调强适形」→ IMRT');
-    ok(normEnum('planStatus', '已批准') === '已通过', '★ K5 流程状态「已批准」→「已通过」');
+    /* ★ v0.17.0：原「流程状态「已批准」→「已通过」」断言删除（字段已移除），
+       改为反向红线：normalize 会把老数据里的 planStatus 丢弃。 */
+    ok(normEnum('planStatus', '已批准') === undefined, '★★ K5 v0.17.0 planStatus 已被 normalize 丢弃（不再是已知字段）');
     /* 关键：完全无法识别的垃圾值仍然清空（容错 ≠ 放行脏数据） */
     ok(normEnum('purpose', '完全看不懂的东西') === '', '★★ K5 无法识别的值仍清空（未放行脏数据）');
     ok(normEnum('technique', 'xyz乱写') === '', '★ K5 技术脏值仍清空');
