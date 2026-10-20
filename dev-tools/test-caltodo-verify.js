@@ -1017,6 +1017,204 @@ function sliceCalendarCell(gridHtml, ds) {
      ok(state.patients[0].verifyAt.extra === 'keep', '★ verifyAt 内的未知字段也保留');
   }
 
+  /* ================================================================
+     T. ★★ v0.19.0：待办页「按事项分类分组 + 床号大字」
+     需求（用户 2026-10-20 原话）：
+       「更新一下待办页面的展示方式，首先是和在治页面一样，展示床号，
+         另外是将患者分组展示，如即将结束的和待开始的，未排程的分类展示」
+     已与用户确认的三条规则：
+       ① 一人可命中**多组**（每组都是可直接照着办事的完整清单，缺人就是漏办）
+       ② 组内排序走 wardGroups()，与在治页同一口径（先病区再床号）
+       ③ 空组不渲染；顶部「共 N 位」按患者**去重**，组标题写「人次」
+     ================================================================ */
+  group('T. 待办页按事项分组 + 床号大字（v0.19.0）');
+  {
+    const T = today, A = (n) => addDays(T, n);
+
+    /* ★★ startForLeft(want)：返回一个 startDate，使该患者「剩余次数」恰为 want，**与今天是哪天无关**。
+       为什么不能用 A(-40) 这类固定偏移：治疗日跳过周末、又被法定节假日拦住（computeSchedule
+       只按 treatDays + holidays/makeups 排），所以「往前 40 天」在不同 Today 下剩的次数完全不同。
+       实测：2026-10-20 下 A(-40) 剩 5 次（刚好成组），而 2026-06-19 下剩 6 次（>阈值 5，不成组）、
+       2026-02-28 直接崩在 `.find(...).items`（undefined）。
+       这正是 scan-dates.sh 抓出来的跨日期脆弱点 —— 「只在今天绿」的断言等于没有断言。
+       实现：不推公式（节假日/调休/周末三重变量，公式推不准），直接**逐日回扫实测**：
+       从今天往前一天天试，第一个让 left===want 的开工日就是答案。
+       区间取 400 天，覆盖 30 次疗程跨春节/国庆的最坏情况。 */
+    const startForLeft = (want, total) => {
+      const N = total || 30;
+      for (let k = 1; k <= 400; k++) {
+        const sd = addDays(T, -k);
+        const probe = { status: '在治', startDate: sd, fractions: String(N),
+          treatDays: DEFAULT_TREAT_DAYS, pauses: [], extras: [] };
+        const sc = computeSchedule(probe);
+        if (sc.length && sc.length - sc.filter(x => x.done).length === want) return sd;
+      }
+      throw new Error('startForLeft: 400 天内找不到剩余 ' + want + ' 次的开工日');
+    };
+
+    /* ★★ startForDone(want)：返回一个 startDate，使「已完成次数」恰为 want（同上的逐日回扫思路）。
+       为什么 T9 需要它：验证提醒的触发条件是 dn >= n - VERIFY_LEAD_FRACTIONS，
+       而 dn 由「开工日距今天隔了几个治疗日」决定 —— 固定偏移 A(-12) 在国庆/春节前后
+       只排出 7~8 次，够不到第 10 次的提醒窗口，于是 2026-02-28 / 2026-10-06 / 2026-10-10
+       三个日期 T9 三条断言全红。改为按「已完成次数」反查，任何 Today 都稳定。 */
+    const startForDone = (want, total) => {
+      const N = total || 30;
+      for (let k = 1; k <= 400; k++) {
+        const sd = addDays(T, -k);
+        const probe = { status: '在治', startDate: sd, fractions: String(N),
+          treatDays: DEFAULT_TREAT_DAYS, pauses: [], extras: [] };
+        const sc = computeSchedule(probe);
+        if (sc.length && sc.filter(x => x.done).length === want) return sd;
+      }
+      throw new Error('startForDone: 400 天内找不到已完成 ' + want + ' 次的开工日');
+    };
+
+    /* ---- T1. 分组划分：7 类各归各位 ---- */
+    mkMany([
+      /* 待排程：缺开始日期 */
+      { name: '排', ward: '一病区', bedNo: '3' },
+      /* 还未开始：5 天后开始 */
+      { name: '未', ward: '一病区', bedNo: '1', startDate: A(5), fractions: '30' },
+      /* 即将结束：剩余**恰好 3 次**（反推，与今天是哪天无关） */
+      { name: '快', ward: '二病区', bedNo: '8', startDate: startForLeft(3), fractions: '30' },
+      /* 副反应未处理 */
+      { name: '副', ward: '二病区', bedNo: '2', startDate: A(-1), fractions: '30',
+        reactions: [{ site: '皮肤反应', grade: '1级（轻）', foundAt: A(-2) + 'T09:00', content: '红斑', status: '未处理' }] },
+      /* 复查到期（已逾期） */
+      { name: '查', ward: '三病区', bedNo: '5', startDate: A(-1), fractions: '30',
+        reactions: [{ site: '放射性膀胱炎', grade: '2级（中）', foundAt: A(-6) + 'T09:00', content: '尿频',
+          status: '已复查未解除', nextCheckAt: A(-2) }] }
+    ]);
+    const tItems = buildTodo();
+    const tGroups = todoGroups(tItems);
+    const tKeys = tGroups.map(g => g.key);
+
+    ok(tKeys.indexOf('unscheduled') >= 0, '★ T1 「待排程」成组出现', tKeys);
+    ok(tKeys.indexOf('notstarted') >= 0, '★ T1 「还未开始」成组出现', tKeys);
+    ok(tKeys.indexOf('ending') >= 0, '★ T1 「即将结束」成组出现', tKeys);
+    ok(tKeys.indexOf('reaction') >= 0, '★ T1 「副反应」成组出现', tKeys);
+    ok(tKeys.indexOf('recheck') >= 0, '★ T1 「复查」成组出现', tKeys);
+    /* 组顺序必须与 TAG_GROUPS 声明一致（页面从上到下：补录 → 收尾 → 处理） */
+    const declared = TAG_GROUPS.map(g => g.key).filter(k => tKeys.indexOf(k) >= 0);
+    ok(JSON.stringify(tKeys) === JSON.stringify(declared), '★★ T1 组间顺序与 TAG_GROUPS 声明一致', tKeys);
+
+    /* ---- T2. ★★ 一人可命中多组（不能只归一组，否则会漏办） ---- */
+    mkMany([
+      /* 同时「即将结束」+「随访到期」 */
+      { name: '多', ward: '一病区', bedNo: '6', startDate: startForLeft(3), fractions: '30', status: '在治',
+        followupPlans: [{ id: 'fp1', baseDate: A(-30), offsetN: 1, offsetUnit: 'm', dueDate: A(-3), note: '复查 CT', done: false }] }
+    ]);
+    const g2 = todoGroups(buildTodo());
+    const k2 = g2.map(g => g.key);
+    ok(k2.indexOf('ending') >= 0, '★★ T2 该患者进入「即将结束」组', k2);
+    ok(k2.indexOf('followup') >= 0, '★★ T2 同一位患者也进入「随访到期」组（多组命中最）', k2);
+    const inEnding = g2.find(g => g.key === 'ending').items.map(r => r.p.name);
+    const inFollow = g2.find(g => g.key === 'followup').items.map(r => r.p.name);
+    ok(inEnding.indexOf('多') >= 0 && inFollow.indexOf('多') >= 0, '★★ T2 两组里都有这位患者', { inEnding, inFollow });
+
+    /* ---- T3. 组内只带本组理由（不把该患者的其他理由混进来） ---- */
+    const rowEnd = g2.find(g => g.key === 'ending').items[0];
+    ok(rowEnd.reason === '即将结束', '★★ T3 「即将结束」组里的理由只有「即将结束」', rowEnd.reason);
+    const rowFu = g2.find(g => g.key === 'followup').items[0];
+    ok(rowFu.reason === '随访到期', '★★ T3 「随访到期」组里的理由只有「随访到期」', rowFu.reason);
+
+    /* ---- T4. ★★ 组内按「病区 → 床号」排序（与在治页同一口径） ---- */
+    mkMany([
+      { name: '十床', ward: '一病区', bedNo: '12', startDate: startForLeft(3), fractions: '30' },
+      { name: '二床', ward: '一病区', bedNo: '2', startDate: startForLeft(3), fractions: '30' },
+      { name: '空床', ward: '一病区', bedNo: '', startDate: startForLeft(3), fractions: '30' },
+      { name: '他区', ward: '二病区', bedNo: '1', startDate: startForLeft(3), fractions: '30' }
+    ]);
+    const gE = todoGroups(buildTodo()).find(g => g.key === 'ending');
+    const order = gE.items.map(r => r.p.name);
+    ok(order[0] === '二床' && order[1] === '十床', '★★ T4 同病区内床号**数值序**（2 在 12 前，非字符串序）', order);
+    /* ★ 断言要收窄到「一病区」这一组内部：order 是**所有病区拼起来**的扁平序，
+       「空床」在一病区组内排最后，但后面还跟着二病区的「他区」。
+       直接判 order[last] 会把「他区」当成一病区的成员，属断言口径错（曾误判过一次）。 */
+    const g1 = gE.items.filter(r => r.p.ward === '一病区').map(r => r.p.name);
+    ok(g1[g1.length - 1] === '空床', '★ T4 空床号排在该病区**组内**最后', g1);
+    /* 一病区的人必须**连续**（不能被他区插到中间）—— 这正是"排序≠分组"的判别点 */
+    const firstOther = order.indexOf('他区');
+    const lastWard1 = Math.max(order.indexOf('二床'), order.indexOf('十床'), order.indexOf('空床'));
+    ok(firstOther > lastWard1, '★★ T4 不同病区不混杂（一病区连续，二病区整体在其后）', order);
+
+    /* ---- T5. 空组不渲染 ---- */
+    mkMany([{ name: '仅排程', ward: '一病区', bedNo: '1' }]);
+    const gOnly = todoGroups(buildTodo());
+    ok(gOnly.length === 1 && gOnly[0].key === 'unscheduled', '★★ T5 只有一类事项时只渲染一个组（空组不占位）', gOnly.map(g => g.key));
+
+    /* ---- T6. 顶部摘要：组标题是「人次」，总数是去重「位」 ---- */
+    mkMany([
+      { name: '甲', ward: '一病区', bedNo: '1', startDate: startForLeft(3), fractions: '30',
+        followupPlans: [{ id: 'a1', baseDate: A(-30), offsetN: 1, offsetUnit: 'm', dueDate: A(-3), note: 'x', done: false }] },
+      { name: '乙', ward: '一病区', bedNo: '2' }
+    ]);
+    const sumItems = buildTodo();
+    const sumGroups = todoGroups(sumItems);
+    const sumHtml = todoSummaryHtml(sumGroups, sumItems);
+    ok(sumHtml.indexOf('共 2 位') >= 0, '★★ T6 摘要总数按患者**去重**（2 人 3 人次仍显示 2 位）', sumHtml.match(/共 \d+ 位/));
+    /* 甲占「即将结束」+「随访到期」两个组 → 3 条人次分布在 2 个组里。
+       断言：各组人数之和 > 去重人数（这就是"人次 vs 位"的口径差，必须真的发生） */
+    const sumOfGroups = sumGroups.reduce((n, g) => n + g.items.length, 0);
+    ok(sumOfGroups === 3, '★ T6 各组人次之和 = 3（甲占两组）', sumGroups.map(g => g.key + ':' + g.items.length));
+    ok(sumOfGroups > 2, '★★ T6 人次之和严格大于去重人数（否则"位/人次"区分没有意义）', { sumOfGroups, uniq: 2 });
+    /* ★★ T6b 直接喂「同一患者出现两条」的输入 —— **唯一**能区分「去重」与「累加」的场景。
+       为什么必须单独补：真实 buildTodo() 里每个患者最多产出一条 item（一人多理由合并进
+       reasons 数组），所以 allItems 天然无重复，`seen` 那层去重是**防御性冗余**，
+       上面三条断言在注入「改成累加」后仍然全绿（已实测：注入 4 首轮未变红）。
+       这里绕开 buildTodo，手工构造重复项，才真正压到 uniq 那行代码。 */
+    const dupP = sumItems[0].p;
+    const dupHtml = todoSummaryHtml([{ key: 'x', title: 'X', items: [{ p: dupP }, { p: dupP }] }],
+                                    [{ p: dupP }, { p: dupP }]);
+    ok(dupHtml.indexOf('共 1 位') >= 0, '★★ T6b 同一患者重复出现时总数仍为 1 位（真正压到去重逻辑）', dupHtml.match(/共 \d+ 位/));
+
+    /* ---- T7. ★★ 渲染层：床号大字 + 分组标题条 ---- */
+    mkMany([
+      { name: '床号测试', ward: '一病区', bedNo: '12-3', startDate: startForLeft(3), fractions: '30' }
+    ]);
+    view.page = 'tab'; view.tab = 'todo'; render();
+    const todoH = getEl('view').innerHTML;
+    ok(todoH.indexOf('class="pbed"') >= 0, '★★ T7 待办卡片渲染出床号大字（.pbed，与在治页同一组件）', true);
+    ok(/<div class="pbed">[\s\S]*?<div class="n">12<\/div>/.test(todoH), '★★ T7 复合床号 12-3 显示为主号大字 12', true);
+    ok(todoH.indexOf('badgebox') < 0, '★★ T7 姓名缩写方块已删除（卡片只留一个强视觉锚点：床号）', true);
+    ok(todoH.indexOf('todogroup') >= 0, '★★ T7 渲染出分组标题条（.todogroup）', true);
+    ok(todoH.indexOf('data-g="ending"') >= 0, '★★ T7 分组带 data-g 标记（可定位）', true);
+    ok(todoH.indexOf('即将结束') >= 0, '★ T7 分组标题显示组名', true);
+
+    /* ---- T8. 无床号患者不渲染空列（老数据友好） ---- */
+    mkMany([{ name: '无床', ward: '一病区', bedNo: '', startDate: startForLeft(3), fractions: '30' }]);
+    view.tab = 'todo'; render();
+    const noBedH = getEl('view').innerHTML;
+    ok(noBedH.indexOf('class="pbed"') < 0, '★ T8 无床号时不渲染 .pbed（不留空列）', true);
+    /* ★ 类名是 "card todocard"，不是 "todocard" 单独成串 ——
+       断言必须匹配完整类名 token，直接 indexOf('class="todocard"') 会永远 -1（踩过一次）。 */
+    ok(/class="card todocard"/.test(noBedH), '★ T8 但卡片本身照常渲染', true);
+
+    /* ---- T9. 验证组里的「标记已验证」按钮仍在（不能被分组改坏） ---- */
+    /* 已完成**恰好 10 次** = 第 10 次验证正好到期（status='due'），与 Today 无关 */
+    mkMany([{ name: '验证人', ward: '一病区', bedNo: '9', startDate: startForDone(10), fractions: '30',
+      verifyAt: { fractions: '10', note: '复位', done: [] } }]);
+    view.tab = 'todo'; render();
+    const vH = getEl('view').innerHTML;
+    ok(vH.indexOf('data-g="verify"') >= 0, '★★ T9 验证到点成组', true);
+    ok(vH.indexOf('data-act="verify-done"') >= 0, '★★ T9 验证组内保留「标记已验证」按钮', true);
+    ok(/data-act="verify-done"[^>]*data-id="/.test(vH), '★★ T9 按钮自带 data-id（弹层/待办语境下不依赖 view.pid）', true);
+
+    /* ---- T10. 空待办时的空态 ---- */
+    /* ★ 这里必须**先存后恢复 state**：mkMany([]) 会清空患者列表，
+       而紧随其后的 G-chrome 组依赖 state.patients[0] 存在（view.pid 取自它），
+       清空后会让那条「render() 进入详情页后标签栏隐藏」误红 —— 属测试间状态污染。 */
+    const _keepState = state;
+    mkMany([]);
+    view.tab = 'todo'; render();
+    const emptyH = getEl('view').innerHTML;
+    ok(emptyH.indexOf('暂无待办') >= 0, '★ T10 无待办时显示空态', true);
+    ok(emptyH.indexOf('todogroup') < 0, '★ T10 空态下不渲染任何分组标题', true);
+    state = _keepState;                    /* 复原，避免污染后续分组 */
+
+    view.page = 'tab'; view.tab = 'ward'; view.pid = null;
+  }
+
   /* ================================================================ */
   group('G-chrome. 标签栏/顶部按钮显隐 + 页面恢复（v0.13.2）');
 

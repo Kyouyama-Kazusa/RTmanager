@@ -71,6 +71,12 @@ button,input,select,textarea{font:inherit;color:inherit}
 .wardgroup{display:flex;align-items:baseline;gap:8px;margin:14px 2px 8px;padding-bottom:4px;border-bottom:1px solid var(--line)}
 .wardgroup .wt{font-size:14px;font-weight:600;color:#39424f}
 .wardgroup .wc{font-size:12px;color:var(--sub)}
+/* ★ v0.19.0：待办页分组标题比病区标题**多一个说明后缀**（.wg-hint）——
+   病区分组是"这些人属于哪"，读者一看就懂；待办分组是"这一组为什么值得单独列"，
+   不写清楚读者会问「验证到点是什么意思」。说明文字压到最轻（11px、更淡），
+   手机上过窄时允许截断，不换行撑高标题条。 */
+.wardgroup .wg-hint{font-size:11px;color:var(--sub);opacity:.85;margin-left:auto;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:58%}
 /* v0.17.0：诊断信息**只显示一行**（用户要求）。
    原先 word-break:break-all + 自动换行，长诊断（如「鼻咽癌 T3N2M0 III期 同步放化疗后」）
    会把卡片撑到三四行，在治页一屏看不到几个人。
@@ -367,7 +373,7 @@ button,input,select,textarea{font:inherit;color:inherit}
 var LS_KEY = 'radiotherapy.v1';
 var SNAP_PREFIX = 'radiotherapy.snap.';
 var SNAP_KEEP = 7;
-var APP_VERSION = '0.18.0';
+var APP_VERSION = '0.19.0';
 
 var SEXES = ['男', '女'];
 var PURPOSES = ['根治性', '术后辅助', '术前新辅助', '姑息性'];
@@ -2528,38 +2534,128 @@ function calBody(y, m, cells) {
 }
 function isWe(d) { var w = d.getDay(); return w === 0 || w === 6; }
 
-/* ================= 渲染：待办 ================= */
+/* ================= 渲染：待办 =================
+   ★ v0.19.0：待办页改为「按事项分类分组 + 床号大字首列」，与在治页同一套视觉语言。
+
+   为什么要分组（用户 2026-10-20 要求）：
+     旧实现是**一条扁平列表**，一个人的多条理由串在同一张卡片上，
+     「即将结束」的人和「待排程」的人交错排列 —— 交班时想"先把快结束的过一遍"
+     只能自己挑；想"把没排程的补齐"更无从下手。
+
+   分组口径（TAG_GROUPS 的顺序 = 页面从上到下的顺序）：
+     1 待排程 / 2 还未开始 / 3 即将结束 / 4 验证到点 / 5 副反应 / 6 复查 / 7 随访到期
+     前 4 组是**放疗流程节点**（来自 computeSchedule 派生），后 3 组是**事项型**。
+
+   ★★ 三条必须守住的规则（已与用户确认，改动前先想清楚）：
+     ① 一人可命中**多组**：同时「即将结束」+「随访到期」的患者，两组里都要出现。
+        因为每组都是一份**可以直接照着办事的完整清单**，缺人就是漏办。
+     ② 组内排序走 wardGroups()，与在治页**同一套**口径（先病区再床号）——
+        绝不各写一遍排序，否则就是「同值不同命」的老坑（v0.18.0 已在搜索处踩过）。
+     ③ 空组**不渲染**：一个「副反应 0」的标题条只是占位噪音。
+     顶部摘要的「共 N 位」按**患者去重**统计，而各组标题的数字是**组内人次** ——
+     两个口径刻意不同，文案分别写「位」与「人次」以示区分。 */
+
+/* 分组定义：key 用于 DOM 标记与测试定位，match 判断某条理由是否属于该组。
+   顺序即页面展示顺序：排程类在前（要动手补），事项类在后（要去处理）。 */
+var TAG_GROUPS = [
+  { key: 'unscheduled', title: '待排程', hint: '缺「放疗开始日期」或「总次数」，补上即自动排程', match: function (r) { return r === '待排程'; } },
+  { key: 'notstarted', title: '还未开始', hint: '已排程但首个治疗日还没到', match: function (r) { return r === '还未开始'; } },
+  { key: 'ending', title: '即将结束', hint: '剩余 ≤ ' + TODO_NEAR_END_LEFT + ' 次，需安排收尾与随访', match: function (r) { return r === '即将结束'; } },
+  { key: 'verify', title: '验证到点', hint: '疗程中验证（位置验证 / 复位 / 中期评估）', match: function (r) { return r.indexOf('验证') === 0; } },
+  { key: 'reaction', title: '副反应', hint: '有未处理的副反应记录', match: function (r) { return r === '副反应待处理'; } },
+  { key: 'recheck', title: '复查', hint: '副反应的复查日期已到或已逾期', match: function (r) { return r === '今日复查' || r.indexOf('复查逾期') === 0; } },
+  { key: 'followup', title: '随访到期', hint: '随访计划已到期，需完成本次随访', match: function (r) { return r === '随访到期'; } }
+];
+
+/* 把 buildTodo() 的扁平结果重排成分组。
+   ★ 返回结构：[{ key, title, hint, items: [{ p, reason, detail }] }]
+     items 里每项只携带**本组的那一条理由**（不是患者的全部理由）——
+     否则「即将结束」组里会混进该患者的"副反应"标签，读者会误以为这组也管副反应。
+   ★ 组内排序复用 wardGroups()：它返回 [{ward, items}]，这里展开回扁平数组。
+     ★ 注意 wardGroups 会把「空病区」恒排最后 —— 这个语义在待办页同样成立。 */
+function todoGroups(items) {
+  var out = [];
+  TAG_GROUPS.forEach(function (g) {
+    var rows = [];
+    (items || []).forEach(function (it) {
+      /* 一条患者记录可能有多条理由命中同一组（如两条不同部位的复查逾期），
+         按患者去重，只保留该组的第一条理由，避免同一人在这组里出现两次。 */
+      var hit = null, hitDetail = '';
+      for (var i = 0; i < it.reasons.length; i++) {
+        if (g.match(it.reasons[i])) { hit = it.reasons[i]; hitDetail = it.details[i] || ''; break; }
+      }
+      if (hit === null) return;
+      rows.push({ p: it.p, reason: hit, detail: hitDetail });
+    });
+    if (!rows.length) return;                 /* 空组不渲染 */
+    /* 组内排序：与在治页同一口径（病区分段 → 组内床号自然序 → 空床号最后） */
+    var sorted = [];
+    wardGroups(rows.map(function (r) { return r.p; })).forEach(function (grp) {
+      grp.items.forEach(function (p) {
+        for (var j = 0; j < rows.length; j++) if (rows[j].p === p) { sorted.push(rows[j]); break; }
+      });
+    });
+    out.push({ key: g.key, title: g.title, hint: g.hint, items: sorted });
+  });
+  return out;
+}
+
+/* 待办页顶部摘要：各组的**人次** + 去重后的**总人数**。
+   ★ 为什么不复用 items.length：一人可能占两组，直接相加会把 3 人算成 5 位，
+     用户看到「共 5 位」但实际只有 3 个人，会以为多了两个不存在的人。 */
+function todoSummaryHtml(groups, allItems) {
+  if (!allItems.length) return '';
+  var seen = {}, uniq = 0;
+  allItems.forEach(function (it) { if (!seen[it.p.id]) { seen[it.p.id] = 1; uniq++; } });
+  return '<div class="todo-sum">' +
+    groups.map(function (g) { return '<span class="ts-i">' + esc(g.title) + ' ' + g.items.length + '</span>'; }).join('') +
+    '<span class="ts-i" style="margin-left:auto;color:var(--sub)">共 ' + uniq + ' 位</span></div>';
+}
+
+/* 待办卡片（组内）：床号大字首列 + 身份行 + 本组理由 + 详情。
+   ★ 床号复用 bedBigHtml(p)，与在治页**同一个函数**，不另写一套（口径唯一）。
+   ★ 姓名缩写方块（badgebox）整块删除 —— 与 v0.18.0 在治页的处理一致：
+     卡片上只留**一个**强视觉锚点（床号），否则扫视时不知道先看哪个。 */
+function todoCardHtml(row, gkey) {
+  var p = row.p;
+  var vp = gkey === 'verify' ? verifyPending(p) : null;
+  return '<div class="card todocard" data-act="open-patient" data-id="' + p.id + '">' +
+    bedBigHtml(p) +
+    '<div class="pbody"><div class="line1"><span class="pname">' + esc(p.name) + '</span>' +
+    (p.mrn ? '<span class="mrn">' + esc(p.mrn) + '</span>' : '') +
+    (p.status !== '在治' ? '<span class="chip sm">' + esc(p.status) + '</span>' : '') +
+    '</div>' +
+    '<div class="pdiag">' + esc(p.diagnosis || '') + '</div>' +
+    /* 只渲染**本组**的那一条理由，不把该患者的其他理由带进来 */
+    '<div class="todo-reasons"><span class="chip warn">' + esc(row.reason) + '</span></div>' +
+    (row.detail ? '<div class="hint">' + esc(row.detail) + '</div>' : '') +
+    /* 注意：这两个按钮**绝不能**加 onclick="event.stopPropagation()"。
+       本应用所有按钮依赖挂在 document 上的冒泡委托；阻止冒泡会让点击永远
+       到不了委托 → 按钮「点了没反应」。findAct 从 target 向上找**最近的**
+       data-act，命中按钮后不会继续升到外层卡片的 open-patient，故无需阻止冒泡。 */
+    (vp ? '<div class="todo-acts"><button class="btn sm" data-act="verify-done" data-id="' + p.id + '" data-n="' + vp.n + '">✓ 标记第 ' + vp.n + ' 次已验证</button>' +
+      '<button class="btn sm" data-act="verify-edit" data-id="' + p.id + '" data-verify="1">修改</button></div>' : '') +
+    '</div></div>';
+}
+
 function renderTodo() {
   var items = buildTodo();
-  var h = '';
-  /* 顶部给一句分类说明，让「为什么只剩这些」一目了然 */
-  var cntVerify = items.filter(function (it) { return (it.tags || []).indexOf('验证') >= 0; }).length;
-  var cntEnd = items.filter(function (it) { return (it.tags || []).indexOf('即将结束') >= 0; }).length;
-  var cntNew = items.filter(function (it) { return (it.tags || []).indexOf('未开始') >= 0; }).length;
-  if (items.length) {
-    h += '<div class="todo-sum">' +
-      (cntNew ? '<span class="ts-i">未开始 ' + cntNew + '</span>' : '') +
-      (cntVerify ? '<span class="ts-i">验证 ' + cntVerify + '</span>' : '') +
-      (cntEnd ? '<span class="ts-i">即将结束 ' + cntEnd + '</span>' : '') +
-      '<span class="ts-i" style="margin-left:auto;color:var(--sub)">共 ' + items.length + ' 位</span></div>';
+  if (!items.length) {
+    $('view').innerHTML = '<div class="empty"><span class="big">🎉</span>暂无待办</div><div style="height:60px"></div>';
+    return;
   }
-  if (!items.length) h = '<div class="empty"><span class="big">🎉</span>暂无待办</div>';
-  items.forEach(function (it) {
-    var vp = (it.tags || []).indexOf('验证') >= 0 ? verifyPending(it.p) : null;
-    h += '<div class="card todocard" data-act="open-patient" data-id="' + it.p.id + '">' +
-      '<div class="badgebox"><div class="b">' + esc(it.p.name ? it.p.name.slice(0, 2) : '—') + '</div><div class="t">' + esc(it.p.mrn || '') + '</div></div>' +
-      '<div class="pbody"><div class="line1"><span class="pname">' + esc(it.p.name) + '</span><span class="chip">' + esc(it.p.status) + '</span></div>' +
-      '<div class="pdiag">' + esc(it.p.diagnosis || '') + '</div>' +
-      '<div class="todo-reasons">' + it.reasons.map(function (r) { return '<span class="chip warn">' + esc(r) + '</span>'; }).join('') + '</div>' +
-      (it.details.length ? '<div class="hint">' + esc(it.details.join('；')) + '</div>' : '') +
-      /* 注意：这两个按钮**绝不能**加 onclick="event.stopPropagation()"。
-         本应用所有按钮依赖挂在 document 上的冒泡委托；阻止冒泡会让点击永远
-         到不了委托 → 按钮「点了没反应」。findAct 从 target 向上找**最近的**
-         data-act，命中按钮后不会继续升到外层卡片的 open-patient，故无需阻止冒泡。 */
-      (vp ? '<div class="todo-acts"><button class="btn sm" data-act="verify-done" data-id="' + it.p.id + '" data-n="' + vp.n + '">✓ 标记第 ' + vp.n + ' 次已验证</button>' +
-        '<button class="btn sm" data-act="verify-edit" data-id="' + it.p.id + '">修改</button></div>' : '') +
-      '</div></div>';
-  });
+  var groups = todoGroups(items);
+  var h = todoSummaryHtml(groups, items);
+  /* 组标题条：与在治页 .wardgroup 同一套视觉（轻、浅、不抢床号焦点），
+     另加 .todogroup 标记以便测试与后续扩展。 */
+  h += groups.map(function (g) {
+    return '<div class="wardgroup todogroup" data-g="' + g.key + '">' +
+      '<span class="wt">' + esc(g.title) + '</span>' +
+      '<span class="wc">' + g.items.length + ' 人次</span>' +
+      '<span class="wg-hint">' + esc(g.hint) + '</span>' +
+      '</div>' +
+      g.items.map(function (row) { return todoCardHtml(row, g.key); }).join('');
+  }).join('');
   $('view').innerHTML = h + '<div style="height:60px"></div>';
 }
 
@@ -6575,4 +6671,4 @@ init();
 </script>
 </body>
 </html>
-<!-- release: v0.18.0 在治页改为病区分段排序（不同病区不混杂）；卡片姓名/住院号去高显著度，床号成为唯一视觉焦点 -->
+<!-- release: v0.19.0 待办页按事项分组（待排程/还未开始/即将结束/验证到点/副反应/复查/随访到期）+ 床号大字首列，与在治页同一视觉口径；空组不渲染，顶部按患者去重计「位」 -->
