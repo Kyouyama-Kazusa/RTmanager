@@ -33,6 +33,10 @@ body{
 }
 button,input,select,textarea{font:inherit;color:inherit}
 .hint{color:var(--sub);font-size:13px}
+/* ★ v0.19.1：hint 允许长句换行，但**不允许**长英文/数字串（如超长住院号、URL）
+   把容器撑破 —— 中文有天然断行点，纯字母数字串没有，会整段溢出。
+   overflow-wrap:anywhere 在必要处强制断字；break-word 作为旧内核兜底。 */
+.hint{overflow-wrap:anywhere;word-break:break-word}
 
 .topbar{flex:0 0 auto;display:flex;align-items:center;gap:6px;padding:calc(env(safe-area-inset-top) + 8px) 10px 8px;background:#fff;border-bottom:1px solid var(--line)}
 .topbar h1{flex:1;margin:0;font-size:18px;font-weight:600;text-align:center;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
@@ -60,6 +64,16 @@ button,input,select,textarea{font:inherit;color:inherit}
 .badgebox .t{font-size:11px;opacity:.8}
 .pcard .pbody{flex:1;min-width:0}
 .line1{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+/* ★ v0.19.1：身份行防重叠。
+   症状：超长姓名（「欧阳阿卜杜拉·穆罕默德」）与紧随的住院号**水平重叠**，
+   文字糊在一起。原因是 .pname 无收缩约束，flex 把它按内容宽度铺开后，
+   .mrn / .chip 仍按"还有空间"排版，视觉上压到同一段像素里。
+   处理：姓名允许收缩并省略（flex:0 1 auto + min-width:0），住院号与状态 chip
+   保持原子（flex:0 0 auto）—— 宁可截姓名，也不截能唯一区分患者的住院号。
+   ★ 这里刻意**不**用 white-space:nowrap 关掉换行：姓名截断 + 住院号换行到第二行
+     比"住院号被挤没"更可接受，wrap 已在 .line1 上保留。 */
+.line1 .pname{flex:0 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.line1 .mrn,.line1 .chip{flex:0 0 auto}
 .pname{font-size:17px;font-weight:600}
 /* ★ v0.18.0：住院号「去高显著度」（用户要求）。
    原先它在 badgebox 里是 11px、和 19px 的姓名缩写叠在一块蓝底方块中，很跳；
@@ -71,12 +85,24 @@ button,input,select,textarea{font:inherit;color:inherit}
 .wardgroup{display:flex;align-items:baseline;gap:8px;margin:14px 2px 8px;padding-bottom:4px;border-bottom:1px solid var(--line)}
 .wardgroup .wt{font-size:14px;font-weight:600;color:#39424f}
 .wardgroup .wc{font-size:12px;color:var(--sub)}
+/* ★ v0.19.1：标题条整体防溢出。
+   症状：组名 + 人次 + 说明三段 all-baseline 排列，前两段不收缩、说明段 max-width:58%，
+   加起来可能超过容器宽度 —— flex 又因 min-width:auto 不肯压，标题条横向溢出。
+   处理：标题条自身允许换行（flex-wrap），说明段 flex:1 + min-width:0 参与收缩，
+   最窄时省略号收尾。这样 320px 小屏也不会把说明推到屏幕外。 */
+.wardgroup{flex-wrap:wrap}
+.wardgroup .wt{flex:0 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.wardgroup .wc{flex:0 0 auto}
 /* ★ v0.19.0：待办页分组标题比病区标题**多一个说明后缀**（.wg-hint）——
    病区分组是"这些人属于哪"，读者一看就懂；待办分组是"这一组为什么值得单独列"，
    不写清楚读者会问「验证到点是什么意思」。说明文字压到最轻（11px、更淡），
    手机上过窄时允许截断，不换行撑高标题条。 */
 .wardgroup .wg-hint{font-size:11px;color:var(--sub);opacity:.85;margin-left:auto;
   white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:58%}
+/* ★ v0.19.1：说明段改为可收缩（flex:1 + min-width:0），替代固定 max-width:58%。
+   固定百分比在窄屏上算出的绝对宽度很小，而组名不收缩，两者相加仍可能超宽；
+   交给 flex 分配剩余空间更稳。 */
+.wardgroup .wg-hint{flex:1 1 0;min-width:0;max-width:none;text-align:right}
 /* v0.17.0：诊断信息**只显示一行**（用户要求）。
    原先 word-break:break-all + 自动换行，长诊断（如「鼻咽癌 T3N2M0 III期 同步放化疗后」）
    会把卡片撑到三四行，在治页一屏看不到几个人。
@@ -117,6 +143,17 @@ button,input,select,textarea{font:inherit;color:inherit}
 
 .todocard{display:flex;gap:12px;align-items:flex-start;cursor:pointer}
 .todocard:active{background:#fafbfc}
+/* ★ v0.19.1 修复文字溢出 BUG：待办卡片漏了 `.pbody{flex:1;min-width:0}`。
+   症状：超长诊断（「鼻咽癌 T4N3M1 IVB期 同步放化疗后复发 伴多发骨转移及肝转移」）
+   把 .pbody 撑到 400px，卡片宽仅 296~396px，文字直接冲出屏幕右缘。
+   根因：flex 子项默认 min-width:auto —— **不肯收缩到内容最小宽度以下**。
+   .pdiag 虽有 overflow:hidden+ellipsis，但它的父级 .pbody 已经先被撑开，
+   截断发生在一个宽 400px 的盒子里，等于没截。
+   在治页 .pcard 从一开始就写了这条，待办页新写的 .todocard 漏了 ——
+   又一个「同值不同命」（同一个 .pbody 结构、两套卡片类名）。
+   ★ 教训：凡是 display:flex 里放**会显示用户输入长文本**的 pbody，必须 min-width:0，
+     否则 ellipsis 永远是摆设。.pcard / .todocard 两条现已对齐。 */
+.todocard .pbody{flex:1;min-width:0}
 .todo-reasons{display:flex;gap:6px;flex-wrap:wrap;margin-top:5px}
 .todo-sum{display:flex;gap:6px;flex-wrap:wrap;align-items:center;font-size:12px;color:var(--pri);margin-bottom:9px;padding:0 2px}
 .todo-sum .ts-i{background:var(--pri-soft);border-radius:10px;padding:2px 9px;font-weight:600}
@@ -373,7 +410,7 @@ button,input,select,textarea{font:inherit;color:inherit}
 var LS_KEY = 'radiotherapy.v1';
 var SNAP_PREFIX = 'radiotherapy.snap.';
 var SNAP_KEEP = 7;
-var APP_VERSION = '0.19.0';
+var APP_VERSION = '0.19.1';
 
 var SEXES = ['男', '女'];
 var PURPOSES = ['根治性', '术后辅助', '术前新辅助', '姑息性'];
@@ -6671,4 +6708,4 @@ init();
 </script>
 </body>
 </html>
-<!-- release: v0.19.0 待办页按事项分组（待排程/还未开始/即将结束/验证到点/副反应/复查/随访到期）+ 床号大字首列，与在治页同一视觉口径；空组不渲染，顶部按患者去重计「位」 -->
+<!-- release: v0.19.1 修复待办页文字溢出（.todocard .pbody 缺 min-width:0 导致长文本撑破卡片）；身份行姓名可收缩不压住院号；hint/分组标题条防溢出 -->

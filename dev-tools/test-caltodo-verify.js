@@ -1212,6 +1212,46 @@ function sliceCalendarCell(gridHtml, ds) {
     ok(emptyH.indexOf('todogroup') < 0, '★ T10 空态下不渲染任何分组标题', true);
     state = _keepState;                    /* 复原，避免污染后续分组 */
 
+    /* ---- T11. ★★ 防文字溢出：CSS 约束必须真的在（v0.19.1 BUG 回归） ----
+       BUG 现场：待办卡片漏写 `.todocard .pbody{flex:1;min-width:0}`，
+       超长诊断把 .pbody 撑到 400px（卡片仅 296~396px），文字冲出屏幕右缘；
+       超长姓名与住院号还会水平重叠。
+       ★ 为什么在 DOM 打桩测试里查 CSS 字符串：本套件不跑真实布局引擎，
+         无法测量 getBoundingClientRect。但**缺的就是这几条声明本身**，
+         查声明比查渲染更贴近根因，也不依赖浏览器。
+         真正的布局验证由 /tmp 下的 playwright 溢出扫描完成（320/375/420 三个视口）。 */
+    const cssTxt = html.match(/<style>([\s\S]*?)<\/style>/)[1];
+    ok(/\.todocard\s+\.pbody\s*\{[^}]*min-width\s*:\s*0/.test(cssTxt),
+      '★★ T11 待办卡片 .pbody 有 min-width:0（否则长文本撑破卡片冲出屏幕）', true);
+    ok(/\.pcard\s+\.pbody\s*\{[^}]*min-width\s*:\s*0/.test(cssTxt),
+      '★★ T11 在治卡片 .pbody 同样有 min-width:0（两套卡片口径一致）', true);
+    ok(/\.line1\s+\.pname\s*\{[^}]*min-width\s*:\s*0/.test(cssTxt),
+      '★ T11 身份行姓名可收缩（否则超长姓名与住院号重叠）', true);
+    /* .pname 收缩后必须配 ellipsis，否则会看到"半个字"被硬切 */
+    ok(/\.line1\s+\.pname\s*\{[^}]*text-overflow\s*:\s*ellipsis/.test(cssTxt),
+      '★ T11 姓名截断带省略号（不是硬切半个字）', true);
+    /* 住院号/状态 chip 必须是原子，不能被姓名挤没 —— 它们是唯一区分患者的依据 */
+    ok(/\.line1\s+\.mrn\s*,\s*\.line1\s+\.chip\s*\{[^}]*flex\s*:\s*0\s+0\s+auto/.test(cssTxt) ||
+       /\.line1\s+\.mrn,\.line1\s+\.chip\s*\{[^}]*flex\s*:\s*0\s+0\s+auto/.test(cssTxt),
+      '★★ T11 住院号与状态 chip 不收缩（宁可截姓名也不丢身份信息）', true);
+    ok(/\.hint\s*\{[^}]*overflow-wrap\s*:\s*anywhere/.test(cssTxt),
+      '★ T11 .hint 长串可断行（超长住院号/英文串不撑破容器）', true);
+    ok(/\.wardgroup\s*\{[^}]*flex-wrap\s*:\s*wrap/.test(cssTxt),
+      '★ T11 分组标题条允许换行（组名+人次+说明在三段并存时不横向溢出）', true);
+    ok(/\.wardgroup\s+\.wg-hint\s*\{[^}]*min-width\s*:\s*0/.test(cssTxt),
+      '★ T11 分组说明段可收缩（替代固定 max-width:58%）', true);
+
+    /* 渲染层再验一次：卡片结构里 bed 块与 pbody 是**兄弟**，pbody 必须能被压窄。
+       若哪天有人把 pbody 改成不参与收缩的写法，上面 CSS 断言会红，这里兜底防结构改动。 */
+    mkMany([{ name: '长诊断患者', ward: '一病区', bedNo: '8', startDate: startForLeft(3), fractions: '30',
+      diagnosis: '鼻咽癌 T4N3M1 IVB期 同步放化疗后复发 伴多发骨转移及肝转移' }]);
+    view.tab = 'todo'; render();
+    const ovH = getEl('view').innerHTML;
+    ok(/class="pbed"[\s\S]*?<div class="pbody">/.test(ovH),
+      '★ T11 待办卡片仍是「床号块 + pbody」兄弟结构（min-width:0 才有意义）', true);
+    ok(ovH.indexOf('伴多发骨转移') >= 0,
+      '★ T11 长诊断内容完整进入 DOM（截断交给 CSS，不在渲染层砍字）', true);
+
     view.page = 'tab'; view.tab = 'ward'; view.pid = null;
   }
 
